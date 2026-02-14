@@ -1,0 +1,19 @@
+// Test: Constructing Option<Point> with Some
+pub type Option<T> =
+    | None
+    | Some(T)
+
+pub type Point = { x: Nat, y: Nat }
+
+pub fn get_x(opt: Option<Point>) -> Nat {
+    match opt {
+        None() => 0,
+        Some(p) => p.x
+    }
+}
+
+pub fn main() -> Nat {
+    let pt: Point = { x: 42, y: 10 };
+    let opt: Option<Point> = Some(pt);
+    get_x(opt)
+}

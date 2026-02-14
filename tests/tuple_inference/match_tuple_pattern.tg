@@ -1,0 +1,18 @@
+// Test: Tuple pattern inside Cons pattern in match
+// This tests whether pattern type inference correctly destructures
+// tuples inside generic constructors.
+
+type List<T> = | Nil | Cons(T, List<T>)
+type Entry = (String, Nat)
+
+fn sum_entries(list: List<Entry>) -> Nat {
+    match list {
+        Nil() => 0,
+        Cons((_, val), rest) => val + sum_entries(rest)
+    }
+}
+
+fn main() -> Nat {
+    let list = Cons(("a", 1), Cons(("b", 2), Cons(("c", 3), Nil)));
+    sum_entries(list)
+}

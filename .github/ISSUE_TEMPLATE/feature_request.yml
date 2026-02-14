@@ -1,0 +1,34 @@
+---
+name: Feature Request
+description: Suggest an idea or improvement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature requests are welcome as discussion starters. Please note that Tungsten is a personal research project — features are accepted at the maintainer's discretion. See [CONTRIBUTING.md](https://github.com/Spinning-Cat-Studios/tungsten/blob/main/CONTRIBUTING.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem does this solve? What's painful or missing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like this to work? Include examples if possible.
+
+  - type: dropdown
+    id: roadmap
+    attributes:
+      label: Is this on the roadmap?
+      options:
+        - "I don't know"
+        - "Yes — listed in ROADMAP.md"
+        - "No — this is a new idea"
+    validations:
+      required: true

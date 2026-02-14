@@ -1,0 +1,10 @@
+// Test: E0016 private item access from another module
+// Accessing a private type from another module should error
+// with the correct module information.
+
+mod helper;
+
+use helper::PrivateType;  // Import might succeed but usage should fail
+
+fn main() -> PrivateType { 0 }  // Should error: PrivateType is private
+

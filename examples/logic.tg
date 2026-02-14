@@ -1,0 +1,17 @@
+// Boolean logic examples
+
+pub fn my_not(b: Bool) -> Bool {
+    if b { false } else { true }
+}
+
+pub fn my_and(a: Bool, b: Bool) -> Bool {
+    if a { b } else { false }
+}
+
+pub fn my_or(a: Bool, b: Bool) -> Bool {
+    if a { true } else { b }
+}
+
+fn main() -> Bool {
+    my_and(true, my_not(false))
+}

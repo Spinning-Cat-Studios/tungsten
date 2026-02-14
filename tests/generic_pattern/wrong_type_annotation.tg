@@ -1,0 +1,16 @@
+// Negative test: Type mismatch on pattern-bound variable
+// x should be Nat (from Option<Nat>), not Bool
+
+type Option<T> = | None | Some(T)
+
+fn also_bad(opt: Option<Nat>) -> Bool {
+    match opt {
+        None() => false,
+        Some(x) => {
+            let y: Bool = x;  // ERROR: x is Nat, not Bool
+            y
+        }
+    }
+}
+
+fn main() -> Bool { also_bad(None) }

@@ -1,0 +1,4 @@
+// Golden test: compile command produces a working binary
+fn main() -> String {
+    "hello from compiled binary"
+}

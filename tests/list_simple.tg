@@ -1,0 +1,12 @@
+type List<T> = | Nil | Cons(T, List<T>)
+
+fn make_list() -> List<Nat> {
+    Cons(1, Nil)
+}
+
+fn main() -> Nat {
+    match make_list() {
+        Nil() => 0,
+        Cons(a, _) => a
+    }
+}

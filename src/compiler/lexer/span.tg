@@ -1,0 +1,33 @@
+// src/compiler/lexer/span.tg
+// Source location tracking for the Tungsten lexer and parser.
+
+// Record type for source spans
+pub type Span = { start: Nat, end: Nat, file: String }
+
+pub fn span_new(start: Nat, end_pos: Nat, file: String) -> Span {
+    { start: start, end: end_pos, file: file }
+}
+
+pub fn span_start(s: Span) -> Nat {
+    s.start
+}
+
+pub fn span_end(s: Span) -> Nat {
+    s.end
+}
+
+pub fn span_file(s: Span) -> String {
+    s.file
+}
+
+pub fn span_len(s: Span) -> Nat {
+    s.end - s.start
+}
+
+pub fn span_empty(pos: Nat, file: String) -> Span {
+    { start: pos, end: pos, file: file }
+}
+
+pub fn span_merge(a: Span, b: Span) -> Span {
+    { start: a.start, end: b.end, file: a.file }
+}

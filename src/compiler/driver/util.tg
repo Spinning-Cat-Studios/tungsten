@@ -1,0 +1,557 @@
+// src/compiler/driver/util.tg
+// Shared utility functions for the driver.
+//
+// String manipulation, parsing helpers, and common operations.
+
+use driver::ffi::{List, Nil, Cons, string_len, string_char_at_internal, string_append_char};
+
+// Import and re-export Option from parser (canonical location)
+pub use parser::option::{Option, Some, None, is_some, is_none, unwrap_or};
+
+// ===========================================================================
+// TYPE ALIASES
+// ===========================================================================
+
+/// Char type alias for FFI interop (used in *Char pointer types).
+/// Characters are represented as their Unicode code points.
+pub type Char = Nat
+
+// ===========================================================================
+// BOOLEAN HELPERS
+// ===========================================================================
+
+/// Boolean negation.
+pub fn not(b: Bool) -> Bool {
+    match b {
+        true => false,
+        false => true
+    }
+}
+
+// ===========================================================================
+// OPTION EXTENSIONS (additional functions beyond parser::option)
+// ===========================================================================
+
+/// Map a function over an Option.
+pub fn option_map<A, B>(opt: Option<A>, f: A -> B) -> Option<B> {
+    match opt {
+        Some(x) => Some(f(x)),
+        None() => None
+    }
+}
+
+/// Get the value or a default (alias for unwrap_or).
+pub fn option_unwrap_or<T>(opt: Option<T>, default: T) -> T {
+    unwrap_or(opt, default)
+}
+
+/// Chain computation that may fail.
+pub fn option_and_then<A, B>(opt: Option<A>, f: A -> Option<B>) -> Option<B> {
+    match opt {
+        Some(x) => f(x),
+        None() => None
+    }
+}
+
+// ===========================================================================
+// RESULT TYPE
+// ===========================================================================
+
+/// Result of a computation that may fail.
+/// Ok(value) for success, Err(error) for failure.
+pub type Result<T, E> =
+    | Ok(T)
+    | Err(E)
+
+/// Map a function over the success value.
+pub fn result_map<A, B, E>(res: Result<A, E>, f: A -> B) -> Result<B, E> {
+    match res {
+        Ok(x) => Ok(f(x)),
+        Err(e) => Err(e)
+    }
+}
+
+/// Map a function over the error value.
+pub fn result_map_err<T, E1, E2>(res: Result<T, E1>, f: E1 -> E2) -> Result<T, E2> {
+    match res {
+        Ok(x) => Ok(x),
+        Err(e) => Err(f(e))
+    }
+}
+
+/// Chain computation that may fail.
+pub fn result_and_then<A, B, E>(res: Result<A, E>, f: A -> Result<B, E>) -> Result<B, E> {
+    match res {
+        Ok(x) => f(x),
+        Err(e) => Err(e)
+    }
+}
+
+/// Get the success value or a default.
+pub fn result_unwrap_or<T, E>(res: Result<T, E>, default: T) -> T {
+    match res {
+        Ok(x) => x,
+        Err(_) => default
+    }
+}
+
+/// Get the success value or compute from error.
+pub fn result_unwrap_or_else<T, E>(res: Result<T, E>, f: E -> T) -> T {
+    match res {
+        Ok(x) => x,
+        Err(e) => f(e)
+    }
+}
+
+/// Check if Result is Ok.
+pub fn is_ok<T, E>(res: Result<T, E>) -> Bool {
+    match res {
+        Ok(_) => true,
+        Err(_) => false
+    }
+}
+
+/// Check if Result is Err.
+pub fn is_err<T, E>(res: Result<T, E>) -> Bool {
+    match res {
+        Ok(_) => false,
+        Err(_) => true
+    }
+}
+
+/// Convert Result to Option, discarding error.
+pub fn result_ok<T, E>(res: Result<T, E>) -> Option<T> {
+    match res {
+        Ok(x) => Some(x),
+        Err(_) => None
+    }
+}
+
+/// Convert Result to Option of error, discarding success.
+pub fn result_err<T, E>(res: Result<T, E>) -> Option<E> {
+    match res {
+        Ok(_) => None,
+        Err(e) => Some(e)
+    }
+}
+
+// ===========================================================================
+// STRING COMPARISON
+// ===========================================================================
+
+/// Check if two strings are equal.
+pub fn string_eq(a: String, b: String) -> Bool {
+    let len_a = string_len(a);
+    let len_b = string_len(b);
+    if len_a != len_b {
+        false
+    } else {
+        string_eq_loop(a, b, 0, len_a)
+    }
+}
+
+fn string_eq_loop(a: String, b: String, i: Nat, len: Nat) -> Bool {
+    if i >= len {
+        true
+    } else {
+        let ca = string_char_at_internal(a, i);
+        let cb = string_char_at_internal(b, i);
+        if ca != cb {
+            false
+        } else {
+            string_eq_loop(a, b, i + 1, len)
+        }
+    }
+}
+
+/// Check if string starts with prefix.
+pub fn starts_with(s: String, prefix: String) -> Bool {
+    let s_len = string_len(s);
+    let p_len = string_len(prefix);
+    if p_len > s_len {
+        false
+    } else {
+        starts_with_loop(s, prefix, 0, p_len)
+    }
+}
+
+fn starts_with_loop(s: String, prefix: String, i: Nat, p_len: Nat) -> Bool {
+    if i >= p_len {
+        true
+    } else {
+        let cs = string_char_at_internal(s, i);
+        let cp = string_char_at_internal(prefix, i);
+        if cs != cp {
+            false
+        } else {
+            starts_with_loop(s, prefix, i + 1, p_len)
+        }
+    }
+}
+
+/// Check if string ends with suffix.
+pub fn ends_with(s: String, suffix: String) -> Bool {
+    let s_len = string_len(s);
+    let suf_len = string_len(suffix);
+    if suf_len > s_len {
+        false
+    } else {
+        let offset = s_len - suf_len;
+        ends_with_loop(s, suffix, 0, suf_len, offset)
+    }
+}
+
+fn ends_with_loop(s: String, suffix: String, i: Nat, suf_len: Nat, offset: Nat) -> Bool {
+    if i >= suf_len {
+        true
+    } else {
+        let cs = string_char_at_internal(s, offset + i);
+        let csuf = string_char_at_internal(suffix, i);
+        if cs != csuf {
+            false
+        } else {
+            ends_with_loop(s, suffix, i + 1, suf_len, offset)
+        }
+    }
+}
+
+// ===========================================================================
+// STRING CHECKING
+// ===========================================================================
+
+/// Check if string is empty.
+pub fn string_is_empty(s: String) -> Bool {
+    string_len(s) == 0
+}
+
+/// Check if character is a digit (0-9).
+pub fn is_digit(c: Nat) -> Bool {
+    c >= 48 && c <= 57  // '0' = 48, '9' = 57
+}
+
+/// Check if string contains only digits.
+pub fn is_numeric(s: String) -> Bool {
+    let len = string_len(s);
+    if len == 0 {
+        false
+    } else {
+        is_numeric_loop(s, 0, len)
+    }
+}
+
+fn is_numeric_loop(s: String, i: Nat, len: Nat) -> Bool {
+    if i >= len {
+        true
+    } else {
+        let c = string_char_at_internal(s, i);
+        if is_digit(c) {
+            is_numeric_loop(s, i + 1, len)
+        } else {
+            false
+        }
+    }
+}
+
+// ===========================================================================
+// NUMBER PARSING
+// ===========================================================================
+
+/// Parse a string as a natural number.
+/// Returns None if the string is not a valid number.
+pub fn parse_nat(s: String) -> Option<Nat> {
+    let len = string_len(s);
+    if len == 0 {
+        None
+    } else {
+        parse_nat_loop(s, 0, len, 0)
+    }
+}
+
+fn parse_nat_loop(s: String, i: Nat, len: Nat, acc: Nat) -> Option<Nat> {
+    if i >= len {
+        Some(acc)
+    } else {
+        let c = string_char_at_internal(s, i);
+        if is_digit(c) {
+            let digit = c - 48;  // '0' = 48
+            parse_nat_loop(s, i + 1, len, acc * 10 + digit)
+        } else {
+            None
+        }
+    }
+}
+
+/// Convert a natural number to string.
+pub fn nat_to_string(n: Nat) -> String {
+    if n == 0 {
+        "0"
+    } else {
+        nat_to_string_acc(n, "")
+    }
+}
+
+/// Helper for nat_to_string - accumulates digits.
+pub fn nat_to_string_acc(n: Nat, acc: String) -> String {
+    if n == 0 {
+        acc
+    } else {
+        let digit = n % 10;
+        let rest = n / 10;
+        let char = digit_to_char(digit);
+        nat_to_string_acc(rest, char ++ acc)
+    }
+}
+
+/// Convert digit (0-9) to single-character string.
+pub fn digit_to_char(d: Nat) -> String {
+    if d == 0 { "0" }
+    else if d == 1 { "1" }
+    else if d == 2 { "2" }
+    else if d == 3 { "3" }
+    else if d == 4 { "4" }
+    else if d == 5 { "5" }
+    else if d == 6 { "6" }
+    else if d == 7 { "7" }
+    else if d == 8 { "8" }
+    else { "9" }
+}
+
+// ===========================================================================
+// LIST OPERATIONS
+// ===========================================================================
+
+/// Get length of a list.
+pub fn list_len<T>(list: List<T>) -> Nat {
+    match list {
+        Nil() => 0,
+        Cons(_, rest) => 1 + list_len(rest)
+    }
+}
+
+/// Check if a list is empty.
+pub fn list_is_empty<T>(list: List<T>) -> Bool {
+    match list {
+        Nil() => true,
+        Cons(_, _) => false
+    }
+}
+
+/// Reverse a list.
+pub fn list_reverse<T>(list: List<T>) -> List<T> {
+    list_reverse_acc(list, Nil)
+}
+
+fn list_reverse_acc<T>(list: List<T>, acc: List<T>) -> List<T> {
+    match list {
+        Nil() => acc,
+        Cons(x, rest) => list_reverse_acc(rest, Cons(x, acc))
+    }
+}
+
+/// Map a function over a list.
+pub fn list_map<A, B>(list: List<A>, f: A -> B) -> List<B> {
+    match list {
+        Nil() => Nil,
+        Cons(x, rest) => Cons(f(x), list_map(rest, f))
+    }
+}
+
+/// Filter a list by predicate.
+pub fn list_filter<T>(list: List<T>, pred: T -> Bool) -> List<T> {
+    match list {
+        Nil() => Nil,
+        Cons(x, rest) =>
+            if pred(x) {
+                Cons(x, list_filter(rest, pred))
+            } else {
+                list_filter(rest, pred)
+            }
+    }
+}
+
+/// Get element at index (0-based). Returns None if out of bounds.
+pub fn list_get<T>(list: List<T>, index: Nat) -> Option<T> {
+    match list {
+        Nil() => None,
+        Cons(x, rest) =>
+            if index == 0 {
+                Some(x)
+            } else {
+                list_get(rest, index - 1)
+            }
+    }
+}
+
+/// Drop first n elements from list.
+pub fn list_drop<T>(list: List<T>, n: Nat) -> List<T> {
+    if n == 0 {
+        list
+    } else {
+        match list {
+            Nil() => Nil,
+            Cons(_, rest) => list_drop(rest, n - 1)
+        }
+    }
+}
+
+/// Take first n elements from list.
+pub fn list_take<T>(list: List<T>, n: Nat) -> List<T> {
+    if n == 0 {
+        Nil
+    } else {
+        match list {
+            Nil() => Nil,
+            Cons(x, rest) => Cons(x, list_take(rest, n - 1))
+        }
+    }
+}
+
+/// Append two lists.
+pub fn list_append<T>(a: List<T>, b: List<T>) -> List<T> {
+    match a {
+        Nil() => b,
+        Cons(x, rest) => Cons(x, list_append(rest, b))
+    }
+}
+
+/// Check if list contains element (using string equality for String lists).
+pub fn list_contains_string(list: List<String>, elem: String) -> Bool {
+    match list {
+        Nil() => false,
+        Cons(x, rest) =>
+            if string_eq(x, elem) {
+                true
+            } else {
+                list_contains_string(rest, elem)
+            }
+    }
+}
+
+/// Check if two string lists are equal.
+pub fn list_eq_string(a: List<String>, b: List<String>) -> Bool {
+    match a {
+        Nil() => match b {
+            Nil() => true,
+            Cons(_, _) => false
+        },
+        Cons(head_a, rest_a) => match b {
+            Nil() => false,
+            Cons(head_b, rest_b) =>
+                if string_eq(head_a, head_b) {
+                    list_eq_string(rest_a, rest_b)
+                } else {
+                    false
+                }
+        }
+    }
+}
+
+/// Check if string list A is a prefix of or equal to string list B.
+pub fn list_is_prefix_or_eq_string(a: List<String>, b: List<String>) -> Bool {
+    match a {
+        Nil() => true,  // Empty is prefix of everything
+        Cons(head_a, rest_a) =>
+            match b {
+                Nil() => false,  // Non-empty can't be prefix of empty
+                Cons(head_b, rest_b) =>
+                    if string_eq(head_a, head_b) {
+                        list_is_prefix_or_eq_string(rest_a, rest_b)
+                    } else {
+                        false
+                    }
+            }
+    }
+}
+
+/// Append a string to the end of a string list.
+/// WARNING: This function is O(n) and should NOT be used in loops or recursion.
+/// For building lists iteratively, use cons-then-reverse pattern instead:
+///   1. Cons each element to the front: Cons(item, acc)
+///   2. Reverse once at the end: list_reverse(acc)
+pub fn list_append_string(list: List<String>, s: String) -> List<String> {
+    match list {
+        Nil() => Cons(s, Nil),
+        Cons(head, rest) => Cons(head, list_append_string(rest, s))
+    }
+}
+
+/// Get head of string list (empty string if empty list).
+pub fn list_head_string(list: List<String>) -> String {
+    match list {
+        Nil() => "",
+        Cons(s, _) => s
+    }
+}
+
+/// Get all elements except the last one for a string list.
+pub fn list_init_string(list: List<String>) -> List<String> {
+    match list {
+        Nil() => Nil,
+        Cons(_, rest) =>
+            match rest {
+                Nil() => Nil,
+                Cons(_, _) => Cons(list_head_string(list), list_init_string(rest))
+            }
+    }
+}
+
+/// Get all elements except the last one.
+pub fn list_init<T>(list: List<T>) -> Option<List<T>> {
+    match list {
+        Nil() => None,
+        Cons(_, Nil()) => Some(Nil),
+        Cons(x, rest) =>
+            match list_init(rest) {
+                None() => None,  // Should not happen if rest is non-empty
+                Some(init_rest) => Some(Cons(x, init_rest))
+            }
+    }
+}
+
+/// Get the last element of a list.
+pub fn list_last<T>(list: List<T>) -> Option<T> {
+    match list {
+        Nil() => None,
+        Cons(x, Nil()) => Some(x),
+        Cons(_, rest) => list_last(rest)
+    }
+}
+
+/// Fold left over a list.
+pub fn list_foldl<A, B>(list: List<A>, init: B, f: B -> A -> B) -> B {
+    match list {
+        Nil() => init,
+        Cons(x, rest) => list_foldl(rest, f(init, x), f)
+    }
+}
+
+// ===========================================================================
+// STRING CONCATENATION
+// ===========================================================================
+
+/// Concatenate two strings.
+/// TODO: Needs proper FFI support
+pub fn string_concat(a: String, b: String) -> String {
+    // Placeholder - ideally FFI would provide this
+    // For now, character-by-character copy
+    string_concat_loop(a, b, 0, string_len(b))
+}
+
+fn string_concat_loop(a: String, b: String, i: Nat, b_len: Nat) -> String {
+    if i >= b_len {
+        a
+    } else {
+        let c = string_char_at_internal(b, i);
+        let a2 = string_append_char(a, c);
+        string_concat_loop(a2, b, i + 1, b_len)
+    }
+}
+
+/// Join list of strings with separator.
+pub fn string_join(parts: List<String>, sep: String) -> String {
+    match parts {
+        Nil() => "",
+        Cons(first, Nil()) => first,
+        Cons(first, rest) => string_concat(string_concat(first, sep), string_join(rest, sep))
+    }
+}

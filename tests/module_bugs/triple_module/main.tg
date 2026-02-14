@@ -1,0 +1,15 @@
+// Test: Three modules with import chain (main entry point)
+// Bug #1: Cross-module type resolution
+//
+// a imports from c, b imports from a, main uses all three.
+
+mod a;
+mod b;
+mod c;
+
+fn main() -> Nat {
+    let cv = c::make_c(42);
+    let av = a::make_a(cv);
+    let bv = b::make_b(av);
+    bv.id + bv.a_val.id + bv.a_val.c_val.value
+}

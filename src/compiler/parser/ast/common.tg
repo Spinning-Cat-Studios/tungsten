@@ -1,0 +1,279 @@
+// src/compiler/parser/ast/common.tg
+// Leaf types and simple helpers for the AST.
+// These types have no dependencies on other AST node types.
+
+use lexer::span::{Span, span_empty};
+use parser::option::{Option, None, Some};
+
+// ===========================================================================
+// VISIBILITY
+// ===========================================================================
+
+/// Visibility modifier for items.
+/// - VisPrivate: default, visible within declaring module and submodules
+/// - VisCrate: `pub(crate)`, visible anywhere within current crate
+/// - VisPublic: `pub`, visible to external crates
+pub type Visibility =
+    | VisPrivate
+    | VisCrate
+    | VisPublic
+
+// ===========================================================================
+// BINARY OPERATORS
+// ===========================================================================
+
+/// Binary operators with precedence.
+/// Precedence (higher = tighter binding):
+///   1: || (Or)
+///   2: && (And)
+///   3: ==, != (Eq, Ne)
+///   4: <, <=, >, >= (Lt, Le, Gt, Ge)
+///   5: |> (Pipe)
+///   6: +, -, ++ (Add, Sub, Concat)
+///   7: *, /, % (Mul, Div, Mod)
+pub type BinOp =
+    // Arithmetic
+    | OpAdd      // +
+    | OpSub      // -
+    | OpMul      // *
+    | OpDiv      // /
+    | OpMod      // %
+    // Comparison
+    | OpEq       // ==
+    | OpNe       // !=
+    | OpLt       // <
+    | OpLe       // <=
+    | OpGt       // >
+    | OpGe       // >=
+    // Logical
+    | OpAnd      // &&
+    | OpOr       // ||
+    // Pipeline
+    | OpPipe     // |>
+    // String
+    | OpConcat   // ++
+
+/// Get the precedence of a binary operator (higher = binds tighter).
+pub fn binop_precedence(op: BinOp) -> Nat {
+    match op {
+        OpOr() => 1,
+        OpAnd() => 2,
+        OpEq() => 3,
+        OpNe() => 3,
+        OpLt() => 4,
+        OpLe() => 4,
+        OpGt() => 4,
+        OpGe() => 4,
+        OpPipe() => 5,
+        OpAdd() => 6,
+        OpSub() => 6,
+        OpConcat() => 6,
+        OpMul() => 7,
+        OpDiv() => 7,
+        OpMod() => 7
+    }
+}
+
+/// Check if a binary operator is right-associative.
+/// Only |> (pipe) is right-associative; all others are left-associative.
+pub fn binop_is_right_assoc(op: BinOp) -> Bool {
+    match op {
+        OpPipe() => true,
+        _ => false
+    }
+}
+
+// ===========================================================================
+// UNARY OPERATORS
+// ===========================================================================
+
+/// Unary operators.
+pub type UnaryOp =
+    | OpNot      // ! (logical negation)
+    | OpNeg      // - (arithmetic negation)
+
+// ===========================================================================
+// PATTERN LITERALS
+// ===========================================================================
+
+/// Literal values that can appear in patterns.
+pub type PatLit =
+    | PatLitInt(Nat)
+    | PatLitNat(Nat)       // Alias for PatLitInt
+    | PatLitBool(Bool)
+    | PatLitString(String)
+
+// ===========================================================================
+// IDENTIFIER
+// ===========================================================================
+
+/// An identifier with source location.
+pub type Ident = { name: String, span: Span }
+
+/// Create a new identifier.
+pub fn ident_new(name: String, span: Span) -> Ident {
+    { name: name, span: span }
+}
+
+/// Get the name of an identifier.
+pub fn ident_name(id: Ident) -> String {
+    id.name
+}
+
+/// Get the span of an identifier.
+pub fn ident_span(id: Ident) -> Span {
+    id.span
+}
+
+// ===========================================================================
+// IDENTIFIER LIST HELPERS
+// ===========================================================================
+
+/// Create an empty identifier list.
+pub fn ident_list_empty() -> List<Ident> {
+    Nil()
+}
+
+/// Prepend an identifier to a list.
+pub fn ident_list_cons(id: Ident, rest: List<Ident>) -> List<Ident> {
+    Cons(id, rest)
+}
+
+/// Create a singleton identifier list.
+pub fn ident_list_singleton(id: Ident) -> List<Ident> {
+    Cons(id, Nil())
+}
+
+/// Check if an identifier list is empty.
+pub fn ident_list_is_empty(list: List<Ident>) -> Bool {
+    match list {
+        Nil() => true,
+        Cons(_, _) => false
+    }
+}
+
+/// Get the length of an identifier list.
+pub fn ident_list_len(list: List<Ident>) -> Nat {
+    match list {
+        Nil() => 0,
+        Cons(_, rest) => 1 + ident_list_len(rest)
+    }
+}
+
+/// Get the last identifier in a list (for item name extraction).
+/// Returns the identifier if found, panics on empty list.
+pub fn ident_list_last(list: List<Ident>) -> Ident {
+    match list {
+        Nil() => ident_new("", span_empty_zero()),  // Should not happen
+        Cons(id, rest) => match rest {
+            Nil() => id,
+            Cons(_, _) => ident_list_last(rest)
+        }
+    }
+}
+
+/// Append an identifier to the end of a list.
+/// WARNING: This function is O(n) and should NOT be used in loops or recursion.
+/// For building lists iteratively, use cons-then-reverse pattern instead:
+///   1. Cons each element to the front: Cons(item, acc)
+///   2. Reverse once at the end: list_reverse(acc)
+pub fn ident_list_append(list: List<Ident>, id: Ident) -> List<Ident> {
+    match list {
+        Nil() => Cons(id, Nil()),
+        Cons(head, rest) => Cons(head, ident_list_append(rest, id))
+    }
+}
+
+// ===========================================================================
+// PATH SEGMENT
+// ===========================================================================
+
+/// A single segment of a path (identifier with optional type arguments).
+/// Note: type_args is Option<String> as placeholder - actual type args are parsed separately.
+pub type PathSegment = {
+    name: Ident,
+    type_args: Option<String>  // Placeholder for type arguments
+}
+
+// ===========================================================================
+// PATH
+// ===========================================================================
+
+/// A qualified path like `foo::bar::baz` (wrapped to avoid structural collision).
+/// A single-segment path is equivalent to an unqualified identifier.
+pub type Path = | MkPath(List<Ident>, Span)
+
+/// Create a simple single-segment path from an identifier.
+pub fn path_simple(id: Ident) -> Path {
+    MkPath(ident_list_singleton(id), ident_span(id))
+}
+
+/// Create a path from segments and span.
+pub fn path_new(segments: List<Ident>, span: Span) -> Path {
+    MkPath(segments, span)
+}
+
+/// Check if a path is a simple unqualified name (single segment).
+pub fn path_is_simple(p: Path) -> Bool {
+    match p {
+        MkPath(segments, _) => ident_list_len(segments) == 1
+    }
+}
+
+/// Get the item name (last segment) of a path.
+pub fn path_item_name(p: Path) -> Ident {
+    match p {
+        MkPath(segments, _) => ident_list_last(segments)
+    }
+}
+
+/// Get the span of a path.
+pub fn path_span(p: Path) -> Span {
+    match p {
+        MkPath(_, span) => span
+    }
+}
+
+/// Get the segments of a path.
+pub fn path_segments(p: Path) -> List<Ident> {
+    match p {
+        MkPath(segments, _) => segments
+    }
+}
+
+/// Append an identifier to a path, returning a new path with updated span.
+/// WARNING: This function is O(n) where n is path length. Should NOT be used
+/// in loops or recursion. For building paths iteratively, collect identifiers
+/// with cons pattern, then call path_new(list_reverse(acc), span) once.
+pub fn path_append(p: Path, id: Ident) -> Path {
+    match p {
+        MkPath(segments, span) => {
+            let new_segments = ident_list_append(segments, id);
+            let new_span = span_merge(span, ident_span(id));
+            MkPath(new_segments, new_span)
+        }
+    }
+}
+
+// ===========================================================================
+// OPTIONAL TYPES
+// ===========================================================================
+
+/// Optional string (for extern symbol names).
+pub type MaybeString =
+    | NoString
+    | SomeString(String)
+
+/// Optional identifier.
+pub type MaybeIdent =
+    | NoIdent
+    | SomeIdent(Ident)
+
+// ===========================================================================
+// UTILITY FUNCTIONS
+// ===========================================================================
+
+/// Create an empty span at position zero (for error recovery).
+fn span_empty_zero() -> Span {
+    span_empty(0, "")
+}

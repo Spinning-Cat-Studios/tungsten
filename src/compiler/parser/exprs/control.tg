@@ -1,0 +1,250 @@
+// src/compiler/parser/exprs/control.tg
+// Control flow parsing: if, match, let.
+
+use lexer::token::{TokenKind, TokIf, TokElse, TokMatch, TokLet, TokLBrace, TokRBrace,
+    TokFatArrow, TokColon, TokEq, TokSemi, TokComma};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected, parse_error_eof};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_check, cursor_is_eof,
+    cursor_advance, cursor_expect,
+    ParseResultToken, ParseOkToken, ParseErrToken};
+use parser::option::{Option, None, Some};
+use parser::ast::nodes::{Expr, ExprIf, ExprMatch, ExprLet, ExprUnit, expr_span,
+    MaybeExpr, NoExpr, SomeExpr, MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    MatchArm};
+use parser::ast::pattern::Pattern;
+use result::{ParseResultExpr, ParseOkExpr, ParseErrExpr,
+    ParseResultMatchArm, ParseOkMatchArm, ParseErrMatchArm,
+    ParseResultMatchArmList, ParseOkMatchArmList, ParseErrMatchArmList,
+    cursor_peek_span};
+use blocks::parse_block;
+use pratt::parse_expr;
+use parser::types::{parse_type, ParseResultType, ParseOkType, ParseErrType};
+use parser::patterns::{parse_pattern, ParseResultPattern, ParseOkPattern, ParseErrPattern};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+
+// ===========================================================================
+// IF EXPRESSION
+// ===========================================================================
+
+/// Parse an if expression: `if cond { then } else { else }`
+pub fn parse_if(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    
+    match cursor_expect(cur, TokIf()) {
+        ParseErrToken(e) => ParseErrExpr(e),
+        ParseOkToken(_, cur2) => {
+            // Parse condition
+            match parse_expr(cur2) {
+                ParseErrExpr(e) => ParseErrExpr(e),
+                ParseOkExpr(cond, cur3) => {
+                    // Parse then branch (block)
+                    match parse_block(cur3) {
+                        ParseErrExpr(e) => ParseErrExpr(e),
+                        ParseOkExpr(then_branch, cur4) => {
+                            // Parse optional else branch
+                            if cursor_check(cur4, TokElse()) {
+                                let cur5 = cursor_advance(cur4);
+                                // Check for else if
+                                if cursor_check(cur5, TokIf()) {
+                                    match parse_if(cur5) {
+                                        ParseErrExpr(e) => ParseErrExpr(e),
+                                        ParseOkExpr(else_branch, cur6) => {
+                                            let span = span_merge(start_span, expr_span(else_branch));
+                                            ParseOkExpr(ExprIf(cond, then_branch, else_branch, span), cur6)
+                                        }
+                                    }
+                                } else {
+                                    match parse_block(cur5) {
+                                        ParseErrExpr(e) => ParseErrExpr(e),
+                                        ParseOkExpr(else_branch, cur6) => {
+                                            let span = span_merge(start_span, expr_span(else_branch));
+                                            ParseOkExpr(ExprIf(cond, then_branch, else_branch, span), cur6)
+                                        }
+                                    }
+                                }
+                            } else {
+                                // No else branch - default to unit
+                                let unit_span = span_empty(start_span.end, start_span.file);
+                                let else_branch = ExprUnit(unit_span);
+                                let span = span_merge(start_span, expr_span(then_branch));
+                                ParseOkExpr(ExprIf(cond, then_branch, else_branch, span), cur4)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// MATCH EXPRESSION
+// ===========================================================================
+
+/// Parse a match expression: `match expr { arms }`
+pub fn parse_match(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    
+    match cursor_expect(cur, TokMatch()) {
+        ParseErrToken(e) => ParseErrExpr(e),
+        ParseOkToken(_, cur2) => {
+            // Parse scrutinee
+            match parse_expr(cur2) {
+                ParseErrExpr(e) => ParseErrExpr(e),
+                ParseOkExpr(scrutinee, cur3) => {
+                    match cursor_expect(cur3, TokLBrace()) {
+                        ParseErrToken(e) => ParseErrExpr(e),
+                        ParseOkToken(_, cur4) => {
+                            // Parse match arms
+                            match parse_match_arms(cur4, Nil) {
+                                ParseErrMatchArmList(e) => ParseErrExpr(e),
+                                ParseOkMatchArmList(arms, cur5) => {
+                                    match cursor_expect(cur5, TokRBrace()) {
+                                        ParseErrToken(e) => ParseErrExpr(e),
+                                        ParseOkToken(_, cur6) => {
+                                            let span = span_merge(start_span, cursor_peek_span(cur5));
+                                            ParseOkExpr(ExprMatch(scrutinee, list_reverse(arms), span), cur6)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse match arms until `}`.
+fn parse_match_arms(cur: Cursor, acc: List<MatchArm>) -> ParseResultMatchArmList {
+    if cursor_check(cur, TokRBrace()) {
+        ParseOkMatchArmList(acc, cur)
+    } else if cursor_is_eof(cur) {
+        ParseErrMatchArmList(parse_error_eof("match arm or '}'", cursor_peek_span(cur)))
+    } else {
+        match parse_match_arm(cur) {
+            ParseErrMatchArm(e) => ParseErrMatchArmList(e),
+            ParseOkMatchArm(arm, cur2) => {
+                let new_acc = Cons(arm, acc);
+                // Optional comma between arms
+                if cursor_check(cur2, TokComma()) {
+                    let cur3 = cursor_advance(cur2);
+                    parse_match_arms(cur3, new_acc)
+                } else {
+                    parse_match_arms(cur2, new_acc)
+                }
+            }
+        }
+    }
+}
+
+/// Parse a single match arm: `pattern => expr` or `pattern if guard => expr`
+fn parse_match_arm(cur: Cursor) -> ParseResultMatchArm {
+    let start_span = cursor_peek_span(cur);
+    
+    match parse_pattern(cur) {
+        ParseErrPattern(e) => ParseErrMatchArm(e),
+        ParseOkPattern(pat, cur2) =>
+            // Optional guard: `if cond` - call helper to handle
+            parse_match_arm_after_pattern(start_span, pat, cur2)
+    }
+}
+
+/// Continue parsing match arm after pattern, handling optional guard.
+fn parse_match_arm_after_pattern(start_span: Span, pat: Pattern, cur: Cursor) -> ParseResultMatchArm {
+    if cursor_check(cur, TokIf()) {
+        let cur_after_if = cursor_advance(cur);
+        match parse_expr(cur_after_if) {
+            ParseErrExpr(e) => ParseErrMatchArm(e),
+            ParseOkExpr(g, c) => parse_match_arm_after_guard(start_span, pat, SomeExpr(g), c)
+        }
+    } else {
+        parse_match_arm_after_guard(start_span, pat, NoExpr, cur)
+    }
+}
+
+/// Continue parsing match arm after guard.
+fn parse_match_arm_after_guard(start_span: Span, pat: Pattern, guard: MaybeExpr, cur: Cursor) -> ParseResultMatchArm {
+    match cursor_expect(cur, TokFatArrow()) {
+        ParseErrToken(e) => ParseErrMatchArm(e),
+        ParseOkToken(_, cur2) => {
+            match parse_expr(cur2) {
+                ParseErrExpr(e) => ParseErrMatchArm(e),
+                ParseOkExpr(body, cur3) => {
+                    let span = span_merge(start_span, expr_span(body));
+                    let arm: MatchArm = {
+                        pattern: pat,
+                        guard: guard,
+                        body: body,
+                        span: span
+                    };
+                    ParseOkMatchArm(arm, cur3)
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// LET EXPRESSION
+// ===========================================================================
+
+/// Parse a let expression: `let pattern: T = expr; body`
+pub fn parse_let(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    
+    match cursor_expect(cur, TokLet()) {
+        ParseErrToken(e) => ParseErrExpr(e),
+        ParseOkToken(_, cur2) => {
+            match parse_pattern(cur2) {
+                ParseErrPattern(e) => ParseErrExpr(e),
+                ParseOkPattern(pat, cur3) =>
+                    // Optional type annotation - call helper to handle
+                    parse_let_expr_after_pattern(start_span, pat, cur3)
+            }
+        }
+    }
+}
+
+/// Continue parsing let expression after pattern, handling optional type annotation.
+fn parse_let_expr_after_pattern(start_span: Span, pat: Pattern, cur: Cursor) -> ParseResultExpr {
+    if cursor_check(cur, TokColon()) {
+        let cur_after_colon = cursor_advance(cur);
+        match parse_type(cur_after_colon) {
+            ParseErrType(e) => ParseErrExpr(e),
+            ParseOkType(t, c) => parse_let_expr_after_type(start_span, pat, SomeTypeExpr(t), c)
+        }
+    } else {
+        parse_let_expr_after_type(start_span, pat, NoTypeExpr, cur)
+    }
+}
+
+/// Continue parsing let expression after type annotation.
+fn parse_let_expr_after_type(start_span: Span, pat: Pattern, ty: MaybeTypeExpr, cur: Cursor) -> ParseResultExpr {
+    match cursor_expect(cur, TokEq()) {
+        ParseErrToken(e) => ParseErrExpr(e),
+        ParseOkToken(_, cur2) => {
+            match parse_expr(cur2) {
+                ParseErrExpr(e) => ParseErrExpr(e),
+                ParseOkExpr(value, cur3) => {
+                    // Expect semicolon, then parse body
+                    match cursor_expect(cur3, TokSemi()) {
+                        ParseErrToken(e) => ParseErrExpr(e),
+                        ParseOkToken(_, cur4) => {
+                            match parse_expr(cur4) {
+                                ParseErrExpr(e) => ParseErrExpr(e),
+                                ParseOkExpr(body, cur5) => {
+                                    let span = span_merge(start_span, expr_span(body));
+                                    ParseOkExpr(ExprLet(pat, ty, value, body, span), cur5)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,209 @@
+// src/compiler/parser/exprs/proof.tg
+// Proof construct parsing: return, have, show, assume.
+
+use lexer::token::{TokenKind, TokReturn, TokHave, TokShow, TokAssume, TokSorry, TokRefl,
+    TokIntLit, TokStringLit, TokTrue, TokFalse, TokIdent,
+    TokLParen, TokLBrace, TokBang, TokMinus, TokPipe, TokFn, TokIf, TokMatch, TokLet,
+    TokColon, TokEq, TokSemi};
+use lexer::span::{Span, span_merge};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_advance, cursor_expect,
+    cursor_eat_ident, token_kind_name,
+    ParseResultToken, ParseOkToken, ParseErrToken,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new};
+use parser::ast::nodes::{Expr, ExprReturn, ExprHave, ExprShow, ExprAssume, TypeExpr, expr_span,
+    MaybeExpr, NoExpr, SomeExpr};
+use result::{ParseResultExpr, ParseOkExpr, ParseErrExpr, cursor_peek_span};
+use pratt::parse_expr;
+use blocks::parse_block;
+use parser::types::{parse_type, ParseResultType, ParseOkType, ParseErrType};
+
+// ===========================================================================
+// RETURN EXPRESSION
+// ===========================================================================
+
+/// Parse a return expression: `return` or `return expr`
+pub fn parse_return(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    
+    match cursor_expect(cur, TokReturn()) {
+        ParseErrToken(e) => ParseErrExpr(e),
+        ParseOkToken(_, cur2) => {
+            // Check if there's an expression to return
+            if can_start_expr(cur2) {
+                match parse_expr(cur2) {
+                    ParseErrExpr(e) => ParseErrExpr(e),
+                    ParseOkExpr(value, cur3) => {
+                        let span = span_merge(start_span, expr_span(value));
+                        ParseOkExpr(ExprReturn(SomeExpr(value), span), cur3)
+                    }
+                }
+            } else {
+                ParseOkExpr(ExprReturn(NoExpr, start_span), cur2)
+            }
+        }
+    }
+}
+
+/// Check if current token can start an expression.
+pub fn can_start_expr(cur: Cursor) -> Bool {
+    match cursor_peek_kind(cur) {
+        None() => false,
+        Some(kind) => match kind {
+            TokIntLit(_) => true,
+            TokStringLit(_) => true,
+            TokTrue() => true,
+            TokFalse() => true,
+            TokIdent(_) => true,
+            TokLParen() => true,
+            TokLBrace() => true,
+            TokBang() => true,
+            TokMinus() => true,
+            TokPipe() => true,
+            TokFn() => true,
+            TokIf() => true,
+            TokMatch() => true,
+            TokLet() => true,
+            TokReturn() => true,
+            TokHave() => true,
+            TokShow() => true,
+            TokAssume() => true,
+            TokSorry() => true,
+            TokRefl() => true,
+            _ => false
+        }
+    }
+}
+
+// ===========================================================================
+// PROOF CONSTRUCTS
+// ===========================================================================
+
+/// Parse a have expression: `have name: Prop = proof; body`
+pub fn parse_have(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    
+    match cursor_expect(cur, TokHave()) {
+        ParseErrToken(e) => ParseErrExpr(e),
+        ParseOkToken(_, cur2) => {
+            match cursor_eat_ident(cur2) {
+                NoIdentResult() => {
+                    let found = match cursor_peek_kind(cur2) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    ParseErrExpr(parse_error_expected("identifier", found, cursor_peek_span(cur2)))
+                },
+                SomeIdentResult(name, cur3) => {
+                    let name_span = cursor_peek_span(cur2);
+                    let name_ident = ident_new(name, name_span);
+                    
+                    match cursor_expect(cur3, TokColon()) {
+                        ParseErrToken(e) => ParseErrExpr(e),
+                        ParseOkToken(_, cur4) => {
+                            match parse_type(cur4) {
+                                ParseErrType(e) => ParseErrExpr(e),
+                                ParseOkType(prop, cur5) => {
+                                    match cursor_expect(cur5, TokEq()) {
+                                        ParseErrToken(e) => ParseErrExpr(e),
+                                        ParseOkToken(_, cur6) => {
+                                            match parse_expr(cur6) {
+                                                ParseErrExpr(e) => ParseErrExpr(e),
+                                                ParseOkExpr(proof, cur7) => {
+                                                    match cursor_expect(cur7, TokSemi()) {
+                                                        ParseErrToken(e) => ParseErrExpr(e),
+                                                        ParseOkToken(_, cur8) => {
+                                                            match parse_expr(cur8) {
+                                                                ParseErrExpr(e) => ParseErrExpr(e),
+                                                                ParseOkExpr(body, cur9) => {
+                                                                    let span = span_merge(start_span, expr_span(body));
+                                                                    ParseOkExpr(ExprHave(name_ident, prop, proof, body, span), cur9)
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse a show expression: `show Prop { body }`
+pub fn parse_show(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    
+    match cursor_expect(cur, TokShow()) {
+        ParseErrToken(e) => ParseErrExpr(e),
+        ParseOkToken(_, cur2) => {
+            match parse_type(cur2) {
+                ParseErrType(e) => ParseErrExpr(e),
+                ParseOkType(prop, cur3) => {
+                    match parse_block(cur3) {
+                        ParseErrExpr(e) => ParseErrExpr(e),
+                        ParseOkExpr(body, cur4) => {
+                            let span = span_merge(start_span, expr_span(body));
+                            ParseOkExpr(ExprShow(prop, body, span), cur4)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse an assume expression: `assume name: Prop; body`
+pub fn parse_assume(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    
+    match cursor_expect(cur, TokAssume()) {
+        ParseErrToken(e) => ParseErrExpr(e),
+        ParseOkToken(_, cur2) => {
+            match cursor_eat_ident(cur2) {
+                NoIdentResult() => {
+                    let found = match cursor_peek_kind(cur2) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    ParseErrExpr(parse_error_expected("identifier", found, cursor_peek_span(cur2)))
+                },
+                SomeIdentResult(name, cur3) => {
+                    let name_span = cursor_peek_span(cur2);
+                    let name_ident = ident_new(name, name_span);
+                    
+                    match cursor_expect(cur3, TokColon()) {
+                        ParseErrToken(e) => ParseErrExpr(e),
+                        ParseOkToken(_, cur4) => {
+                            match parse_type(cur4) {
+                                ParseErrType(e) => ParseErrExpr(e),
+                                ParseOkType(prop, cur5) => {
+                                    match cursor_expect(cur5, TokSemi()) {
+                                        ParseErrToken(e) => ParseErrExpr(e),
+                                        ParseOkToken(_, cur6) => {
+                                            match parse_expr(cur6) {
+                                                ParseErrExpr(e) => ParseErrExpr(e),
+                                                ParseOkExpr(body, cur7) => {
+                                                    let span = span_merge(start_span, expr_span(body));
+                                                    ParseOkExpr(ExprAssume(name_ident, prop, body, span), cur7)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

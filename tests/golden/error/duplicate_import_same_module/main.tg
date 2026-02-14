@@ -1,0 +1,10 @@
+// Test: E0007 duplicate import shows both locations
+// When the same name is imported twice from the same module,
+// the error should show both import locations.
+
+mod mymod;
+
+use mymod::Foo;
+use mymod::Foo;  // duplicate import!
+
+fn main() -> Nat { 0 }

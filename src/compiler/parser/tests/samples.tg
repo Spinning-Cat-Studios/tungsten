@@ -1,0 +1,275 @@
+// Parser Test Samples
+// ====================
+// Comprehensive test cases for parser verification.
+// This file should parse successfully.
+//
+// Note: Some type constructs (like type aliases to generic applications)
+// are not supported in current Tungsten, so samples focus on what works.
+
+// ============================================================================
+// ITEMS: Function Definitions
+// ============================================================================
+
+fn simple_function() -> Nat { 42 }
+
+fn function_with_params(x: Nat, y: Nat) -> Nat { x + y }
+
+fn function_with_trailing_comma(a: Nat, b: Nat,) -> Nat { a + b }
+
+pub fn public_function() -> Nat { 1 }
+
+fn generic_function<T>(x: T) -> T { x }
+
+fn multi_generic<A, B>(a: A, b: B) -> A { a }
+
+// ============================================================================
+// ITEMS: Type Definitions
+// ============================================================================
+
+pub type SumType =
+    | Variant1
+    | Variant2(Nat)
+    | Variant3(String, Bool)
+
+pub type RecordType = {
+    field1: Nat,
+    field2: String,
+}
+
+pub type GenericSum<T> =
+    | SomeValue(T)
+    | NoValue
+
+pub type SingletonSum = | OnlyVariant
+
+pub type RecordWithGeneric<T> = {
+    value: T,
+    count: Nat,
+}
+
+// ============================================================================
+// ITEMS: Extern Functions
+// ============================================================================
+
+extern "C" fn extern_no_args() -> Nat
+
+extern "C" fn extern_with_args(x: Nat, y: Nat) -> Nat
+
+// ============================================================================
+// EXPRESSIONS: Literals
+// ============================================================================
+
+fn test_int_literal() -> Nat { 123 }
+
+fn test_string_literal() -> String { "hello world" }
+
+fn test_bool_true() -> Bool { true }
+
+fn test_bool_false() -> Bool { false }
+
+fn test_unit_literal() -> Unit { () }
+
+// ============================================================================
+// EXPRESSIONS: Operators - Arithmetic
+// ============================================================================
+
+fn test_add() -> Nat { 1 + 2 }
+
+fn test_sub() -> Nat { 5 - 3 }
+
+fn test_mul() -> Nat { 4 * 5 }
+
+fn test_div() -> Nat { 10 / 2 }
+
+fn test_mod() -> Nat { 10 % 3 }
+
+fn test_operator_precedence() -> Nat { 1 + 2 * 3 - 4 / 2 }
+
+fn test_nested_arithmetic() -> Nat { (1 + 2) * (3 + 4) }
+
+// ============================================================================
+// EXPRESSIONS: Operators - Comparison
+// ============================================================================
+
+fn test_eq() -> Bool { 1 == 1 }
+
+fn test_ne() -> Bool { 1 != 2 }
+
+fn test_lt() -> Bool { 1 < 2 }
+
+fn test_le() -> Bool { 1 <= 1 }
+
+fn test_gt() -> Bool { 2 > 1 }
+
+fn test_ge() -> Bool { 2 >= 2 }
+
+// ============================================================================
+// EXPRESSIONS: Operators - Logical
+// ============================================================================
+
+fn test_and() -> Bool { true && false }
+
+fn test_or() -> Bool { true || false }
+
+fn test_not() -> Bool { !true }
+
+fn test_logical_complex() -> Bool { (true && false) || (!true && true) }
+
+// ============================================================================
+// EXPRESSIONS: Control Flow
+// ============================================================================
+
+fn test_if_else(x: Nat) -> Nat {
+    if x > 0 { x } else { 0 }
+}
+
+fn test_nested_if(x: Nat) -> Nat {
+    if x > 10 { 
+        100 
+    } else if x > 5 { 
+        50 
+    } else { 
+        0 
+    }
+}
+
+// ============================================================================
+// EXPRESSIONS: Let Bindings
+// ============================================================================
+
+fn test_let_binding() -> Nat {
+    let x = 42;
+    x
+}
+
+fn test_let_with_type() -> Nat {
+    let x: Nat = 42;
+    x
+}
+
+fn test_multiple_lets() -> Nat {
+    let a = 1;
+    let b = 2;
+    let c = 3;
+    a + b + c
+}
+
+// ============================================================================
+// EXPRESSIONS: Match
+// ============================================================================
+
+fn test_match_bool(b: Bool) -> Nat {
+    match b {
+        true => 1,
+        false => 0
+    }
+}
+
+fn test_match_with_patterns(x: GenericSum<Nat>) -> Nat {
+    match x {
+        SomeValue(n) => n,
+        NoValue() => 0
+    }
+}
+
+fn test_match_record(r: RecordType) -> Nat {
+    r.field1
+}
+
+// ============================================================================
+// EXPRESSIONS: Lambdas
+// ============================================================================
+
+fn test_simple_lambda() -> Nat {
+    let f = |x: Nat| x + 1;
+    f(5)
+}
+
+fn test_multi_param_lambda() -> Nat {
+    let f = |x: Nat, y: Nat| x + y;
+    f(3, 4)
+}
+
+// ============================================================================
+// EXPRESSIONS: Records
+// ============================================================================
+
+fn test_record_construction() -> RecordType {
+    { field1: 42, field2: "hello" }
+}
+
+fn test_record_field_access(r: RecordType) -> Nat {
+    r.field1
+}
+
+// ============================================================================
+// EXPRESSIONS: Sum Type Construction
+// ============================================================================
+
+fn test_variant_no_args() -> SumType {
+    Variant1()
+}
+
+fn test_variant_with_args() -> SumType {
+    Variant2(42)
+}
+
+fn test_variant_multiple_args() -> SumType {
+    Variant3("hello", true)
+}
+
+// ============================================================================
+// EXPRESSIONS: Function Calls
+// ============================================================================
+
+fn identity(x: Nat) -> Nat { x }
+
+fn test_function_call() -> Nat {
+    identity(42)
+}
+
+fn test_nested_calls() -> Nat {
+    identity(identity(identity(42)))
+}
+
+// ============================================================================
+// PATTERNS: Various Forms
+// ============================================================================
+
+fn test_wildcard_pattern(x: SumType) -> Nat {
+    match x {
+        Variant1() => 0,
+        Variant2(_) => 1,
+        Variant3(_, _) => 2
+    }
+}
+
+fn test_variable_pattern(x: GenericSum<Nat>) -> Nat {
+    match x {
+        SomeValue(n) => n,
+        NoValue() => 0
+    }
+}
+
+fn test_record_field_pattern(p: RecordType) -> Nat {
+    p.field1
+}
+
+// ============================================================================
+// EDGE CASES
+// ============================================================================
+
+fn test_trailing_comma_in_call() -> Nat {
+    identity(42,)
+}
+
+fn test_empty_match_body(b: Bool) -> Nat {
+    match b {
+        true => 1,
+        false => 0,
+    }
+}
+
+fn deeply_nested_expression() -> Nat {
+    ((((1 + 2) * 3) - 4) / 5)
+}

@@ -1,0 +1,12 @@
+// src/compiler/lexer/mod.tg
+// Lexer module for the Tungsten compiler.
+//
+// Converts source text into a stream of tokens.
+//
+// Run with: cargo run -p tungsten_bootstrap --no-default-features -- run src/compiler/lexer/mod.tg
+
+pub mod span;
+pub mod error;
+pub mod token;
+pub mod scanner;
+mod tests;

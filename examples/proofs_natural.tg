@@ -1,0 +1,235 @@
+// =============================================================================
+// Proofs in Tungsten: Natural Number Properties
+// =============================================================================
+//
+// This file demonstrates verification of natural number properties.
+// We define Peano natural numbers and verify properties through exhaustive
+// testing for small values.
+//
+// Tungsten's core calculus supports:
+// - Equality types: Eq<T, a, b> (propositional equality)
+// - Reflexivity: refl (proof that x = x)
+// - Substitution: subst (if a = b, then P(a) implies P(b))
+//
+// However, the full equality type surface syntax with expressions like
+// Eq<Nat, add(x, 0), x> is not yet fully implemented. These examples use
+// computational verification as an approximation.
+
+// -----------------------------------------------------------------------------
+// Peano Natural Numbers
+// -----------------------------------------------------------------------------
+
+// Note: "Nat" is a built-in type in Tungsten, so we use "Peano" for clarity
+pub type Peano = Zero | Succ(Peano)
+
+// Convenience constructors
+pub fn one() -> Peano { Succ(Zero) }
+pub fn two() -> Peano { Succ(one()) }
+pub fn three() -> Peano { Succ(two()) }
+pub fn four() -> Peano { Succ(three()) }
+pub fn five() -> Peano { Succ(four()) }
+
+// -----------------------------------------------------------------------------
+// Arithmetic Operations
+// -----------------------------------------------------------------------------
+
+pub fn add(m: Peano, n: Peano) -> Peano {
+    match m {
+        Zero => n,
+        Succ(pred) => Succ(add(pred, n)),
+    }
+}
+
+pub fn mul(m: Peano, n: Peano) -> Peano {
+    match m {
+        Zero => Zero,
+        Succ(pred) => add(n, mul(pred, n)),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Comparison and Equality
+// -----------------------------------------------------------------------------
+
+pub fn nat_eq(m: Peano, n: Peano) -> Bool {
+    match m {
+        Zero => match n {
+            Zero => true,
+            Succ(_) => false,
+        },
+        Succ(m_pred) => match n {
+            Zero => false,
+            Succ(n_pred) => nat_eq(m_pred, n_pred),
+        },
+    }
+}
+
+pub fn leq(m: Peano, n: Peano) -> Bool {
+    match m {
+        Zero => true,
+        Succ(m_pred) => match n {
+            Zero => false,
+            Succ(n_pred) => leq(m_pred, n_pred),
+        },
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Property: Right Identity of Addition (n + 0 = n)
+// -----------------------------------------------------------------------------
+// This is trivially true by the definition of add (base case matches).
+// For add(n, 0), we need to reduce: add(Zero, 0) = 0 ok
+// For Succ(k): add(Succ(k), 0) = Succ(add(k, 0)) 
+//   By induction: = Succ(k) ok
+
+pub fn test_add_right_identity() -> Bool {
+    nat_eq(add(Zero, Zero), Zero) &&
+    nat_eq(add(one(), Zero), one()) &&
+    nat_eq(add(two(), Zero), two()) &&
+    nat_eq(add(three(), Zero), three()) &&
+    nat_eq(add(four(), Zero), four()) &&
+    nat_eq(add(five(), Zero), five())
+}
+
+// -----------------------------------------------------------------------------
+// Property: Left Identity of Addition (0 + n = n)
+// -----------------------------------------------------------------------------
+// This follows directly from the definition of add.
+
+pub fn test_add_left_identity() -> Bool {
+    nat_eq(add(Zero, Zero), Zero) &&
+    nat_eq(add(Zero, one()), one()) &&
+    nat_eq(add(Zero, two()), two()) &&
+    nat_eq(add(Zero, three()), three()) &&
+    nat_eq(add(Zero, four()), four()) &&
+    nat_eq(add(Zero, five()), five())
+}
+
+// -----------------------------------------------------------------------------
+// Property: Commutativity of Addition (m + n = n + m)
+// -----------------------------------------------------------------------------
+
+pub fn test_add_commutative() -> Bool {
+    // Test several pairs
+    nat_eq(add(Zero, one()), add(one(), Zero)) &&
+    nat_eq(add(one(), two()), add(two(), one())) &&
+    nat_eq(add(two(), three()), add(three(), two())) &&
+    nat_eq(add(one(), four()), add(four(), one())) &&
+    nat_eq(add(three(), two()), add(two(), three()))
+}
+
+// -----------------------------------------------------------------------------
+// Property: Associativity of Addition ((a + b) + c = a + (b + c))
+// -----------------------------------------------------------------------------
+
+pub fn test_add_associative() -> Bool {
+    // Test: (1 + 2) + 3 = 1 + (2 + 3)
+    let left1 = add(add(one(), two()), three());
+    let right1 = add(one(), add(two(), three()));
+    
+    // Test: (2 + 1) + 2 = 2 + (1 + 2)
+    let left2 = add(add(two(), one()), two());
+    let right2 = add(two(), add(one(), two()));
+    
+    // Test: (0 + 3) + 2 = 0 + (3 + 2)
+    let left3 = add(add(Zero, three()), two());
+    let right3 = add(Zero, add(three(), two()));
+    
+    nat_eq(left1, right1) && nat_eq(left2, right2) && nat_eq(left3, right3)
+}
+
+// -----------------------------------------------------------------------------
+// Property: Multiplication by Zero (n * 0 = 0)
+// -----------------------------------------------------------------------------
+
+pub fn test_mul_zero_right() -> Bool {
+    nat_eq(mul(Zero, Zero), Zero) &&
+    nat_eq(mul(one(), Zero), Zero) &&
+    nat_eq(mul(two(), Zero), Zero) &&
+    nat_eq(mul(three(), Zero), Zero)
+}
+
+// -----------------------------------------------------------------------------
+// Property: Multiplication by One (n * 1 = n)
+// -----------------------------------------------------------------------------
+
+pub fn test_mul_one_right() -> Bool {
+    nat_eq(mul(Zero, one()), Zero) &&
+    nat_eq(mul(one(), one()), one()) &&
+    nat_eq(mul(two(), one()), two()) &&
+    nat_eq(mul(three(), one()), three())
+}
+
+// -----------------------------------------------------------------------------
+// Property: Commutativity of Multiplication (m * n = n * m)
+// -----------------------------------------------------------------------------
+
+pub fn test_mul_commutative() -> Bool {
+    nat_eq(mul(two(), three()), mul(three(), two())) &&
+    nat_eq(mul(one(), four()), mul(four(), one())) &&
+    nat_eq(mul(two(), two()), mul(two(), two()))
+}
+
+// -----------------------------------------------------------------------------
+// Property: Distributivity (a * (b + c) = a*b + a*c)
+// -----------------------------------------------------------------------------
+
+pub fn test_distributivity() -> Bool {
+    // 2 * (1 + 3) = 2*1 + 2*3
+    let left = mul(two(), add(one(), three()));
+    let right = add(mul(two(), one()), mul(two(), three()));
+    
+    // 3 * (2 + 1) = 3*2 + 3*1
+    let left2 = mul(three(), add(two(), one()));
+    let right2 = add(mul(three(), two()), mul(three(), one()));
+    
+    nat_eq(left, right) && nat_eq(left2, right2)
+}
+
+// -----------------------------------------------------------------------------
+// Property: Ordering is Reflexive (n <= n)
+// -----------------------------------------------------------------------------
+
+pub fn test_leq_reflexive() -> Bool {
+    leq(Zero, Zero) &&
+    leq(one(), one()) &&
+    leq(two(), two()) &&
+    leq(three(), three())
+}
+
+// -----------------------------------------------------------------------------
+// Property: Ordering is Transitive (a <= b AND b <= c => a <= c)
+// -----------------------------------------------------------------------------
+
+pub fn test_leq_transitive() -> Bool {
+    // 0 <= 1 <= 2
+    let p1 = leq(Zero, one()) && leq(one(), two());
+    let c1 = leq(Zero, two());
+    
+    // 1 <= 2 <= 3
+    let p2 = leq(one(), two()) && leq(two(), three());
+    let c2 = leq(one(), three());
+    
+    // 0 <= 2 <= 4
+    let p3 = leq(Zero, two()) && leq(two(), four());
+    let c3 = leq(Zero, four());
+    
+    (p1 == c1) && (p2 == c2) && (p3 == c3)
+}
+
+// -----------------------------------------------------------------------------
+// All Tests
+// -----------------------------------------------------------------------------
+
+fn main() -> Bool {
+    test_add_left_identity() &&
+    test_add_right_identity() &&
+    test_add_commutative() &&
+    test_add_associative() &&
+    test_mul_zero_right() &&
+    test_mul_one_right() &&
+    test_mul_commutative() &&
+    test_distributivity() &&
+    test_leq_reflexive() &&
+    test_leq_transitive()
+}

@@ -1,0 +1,33 @@
+// src/compiler/parser/option.tg
+// Generic Option type for the Tungsten parser.
+//
+// Provides Option<T> to replace ad-hoc Maybe* types.
+
+/// Generic optional value.
+pub type Option<T> =
+    | None
+    | Some(T)
+
+/// Check if an option contains a value.
+pub fn is_some<T>(opt: Option<T>) -> Bool {
+    match opt {
+        None() => false,
+        Some(_) => true
+    }
+}
+
+/// Check if an option is empty.
+pub fn is_none<T>(opt: Option<T>) -> Bool {
+    match opt {
+        None() => true,
+        Some(_) => false
+    }
+}
+
+/// Get the value or a default.
+pub fn unwrap_or<T>(opt: Option<T>, default: T) -> T {
+    match opt {
+        None() => default,
+        Some(x) => x
+    }
+}

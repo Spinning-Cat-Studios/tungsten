@@ -1,0 +1,93 @@
+// src/compiler/driver/modules/path.tg
+// ModulePath type and helper functions.
+//
+// A ModulePath represents a path to a module like "lexer::span".
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{
+    Option, Some, None,
+    string_eq, list_append, list_init, list_last, string_join
+};
+
+// ===========================================================================
+// MODULE PATH
+// ===========================================================================
+
+/// A path to a module (e.g., ["lexer", "span"] for lexer::span).
+pub type ModulePath = {
+    segments: List<String>
+}
+
+/// Create the root module path (empty).
+pub fn module_path_root() -> ModulePath {
+    { segments: Nil }
+}
+
+/// Create a module path from a list of segments.
+pub fn module_path_new(segments: List<String>) -> ModulePath {
+    { segments: segments }
+}
+
+/// Create a module path from a single name.
+pub fn module_path_single(name: String) -> ModulePath {
+    { segments: Cons(name, Nil) }
+}
+
+/// Append a child segment to a module path.
+pub fn module_path_child(path: ModulePath, name: String) -> ModulePath {
+    { segments: list_append(path.segments, Cons(name, Nil)) }
+}
+
+/// Get the parent module path (all segments except the last).
+pub fn module_path_parent(path: ModulePath) -> Option<ModulePath> {
+    match list_init(path.segments) {
+        None() => None,
+        Some(segs) => Some({ segments: segs } : ModulePath)
+    }
+}
+
+/// Get the last segment of a module path (the module name).
+pub fn module_path_name(path: ModulePath) -> Option<String> {
+    list_last(path.segments)
+}
+
+/// Check if module path is the root (empty).
+pub fn module_path_is_root(path: ModulePath) -> Bool {
+    match path.segments {
+        Nil() => true,
+        _ => false
+    }
+}
+
+/// Join two module paths.
+pub fn module_path_join(base: ModulePath, child: ModulePath) -> ModulePath {
+    { segments: list_append(base.segments, child.segments) }
+}
+
+/// Check if two module paths are equal.
+pub fn module_path_eq(a: ModulePath, b: ModulePath) -> Bool {
+    segments_eq(a.segments, b.segments)
+}
+
+fn segments_eq(a: List<String>, b: List<String>) -> Bool {
+    match a {
+        Nil() => match b {
+            Nil() => true,
+            Cons(_, _) => false
+        },
+        Cons(x, xs) => match b {
+            Nil() => false,
+            Cons(y, ys) =>
+                if string_eq(x, y) {
+                    segments_eq(xs, ys)
+                } else {
+                    false
+                }
+        }
+    }
+}
+
+/// Convert module path to display string (e.g., "lexer::span").
+pub fn module_path_display(path: ModulePath) -> String {
+    string_join(path.segments, "::")
+}

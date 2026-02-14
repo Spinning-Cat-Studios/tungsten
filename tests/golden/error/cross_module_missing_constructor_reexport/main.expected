@@ -1,0 +1,9 @@
+[E0006] Error: cannot find `Some` in module `middle`
+    ╭─[tests/golden/error/cross_module_missing_constructor_reexport/main.tg:15:28]
+    │
+ 15 │     let opt: Option<Nat> = middle::Some(42);  // Trying to use middle::Some
+    │                            ──────┬─────  
+    │                                  ╰─────── 
+────╯
+
+error: aborting due to 1 error

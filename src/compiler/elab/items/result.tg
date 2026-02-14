@@ -1,0 +1,187 @@
+// src/compiler/elab/items/result.tg
+// Result types and context for item elaboration.
+//
+// This module provides:
+// - ElabContext: Threading context with return type for ExprReturn
+// - ElabItemResult: Result of elaborating a single item
+// - CollectResult: Result of collection phase
+// - ElabResult: Final result of elaborating a source file
+//
+// Error types are defined in elab/error.tg and re-exported here.
+
+use lexer::span::Span;
+use parser::ast::Visibility;
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_len, list_is_empty};
+use elab::ffi::{TermHandle, TypeHandle, INVALID_HANDLE};
+use elab::env::{
+    Env, env_set_return_type, env_clear_return_type,
+    MaybeTypeHandle, NoTypeHandle, SomeTypeHandle
+};
+use elab::cir::{CodegenIR, CIRUnit};
+use elab::error::{
+    Suggestion, ElabError,
+    ExpectedBecause, MaybeExpectedBecause,
+    elab_error_new, elab_error_type_mismatch,
+    elab_error_unresolved_value,
+    elab_error_no_return_context,
+    elab_error_with_note, elab_error_with_suggestion, elab_error_with_help,
+    ErrTypeMismatch, ErrUnresolvedValue,
+    ErrPrivateAccess, ErrMissingReturnType,
+    ErrInvalidExtern,
+    ErrCyclicDependency, ErrNoReturnContext, ErrCannotInfer, ErrOther
+};
+
+// ===========================================================================
+// ELABORATION CONTEXT
+// ===========================================================================
+
+/// Context carried through item elaboration.
+/// Extends the basic Env with additional state needed during elaboration.
+pub type ElabContext = {
+    env: Env,
+    return_type: MaybeTypeHandle,    // Expected return type (for ExprReturn)
+    errors: List<ElabError>          // Accumulated errors
+}
+
+/// Create a new elaboration context.
+pub fn elab_context_new(env: Env) -> ElabContext {
+    {
+        env: env,
+        return_type: NoTypeHandle,
+        errors: Nil
+    }
+}
+
+/// Set the return type in the context (entering a function).
+/// Also updates the Env so expression elaboration can access it.
+pub fn elab_context_set_return_type(ctx: ElabContext, ty: TypeHandle) -> ElabContext {
+    let new_env = env_set_return_type(ctx.env, ty);
+    let new_return_type = SomeTypeHandle(ty);
+    let new_errors = ctx.errors;
+    {
+        env: new_env,
+        return_type: new_return_type,
+        errors: new_errors
+    }
+}
+
+/// Clear the return type (exiting a function).
+/// Also clears it from the Env.
+pub fn elab_context_clear_return_type(ctx: ElabContext) -> ElabContext {
+    {
+        env: env_clear_return_type(ctx.env),
+        return_type: NoTypeHandle,
+        errors: ctx.errors
+    }
+}
+
+/// Update the environment in the context.
+pub fn elab_context_with_env(ctx: ElabContext, env: Env) -> ElabContext {
+    {
+        env: env,
+        return_type: ctx.return_type,
+        errors: ctx.errors
+    }
+}
+
+/// Add an error to the context.
+pub fn elab_context_add_error(ctx: ElabContext, err: ElabError) -> ElabContext {
+    {
+        env: ctx.env,
+        return_type: ctx.return_type,
+        errors: Cons(err, ctx.errors)
+    }
+}
+
+// ===========================================================================
+// RE-EXPORTS FROM ERROR MODULE
+// ===========================================================================
+
+// All error types (ElabError, ElabErrorKind, Suggestion, etc.) are defined
+// in elab/error.tg and imported above. They are re-exported via the
+// pub use statements at the module level.
+
+// ===========================================================================
+// ITEM ELABORATION RESULT
+// ===========================================================================
+
+/// Result of elaborating a single item.
+pub type ElabItemResult =
+    | ElabItemOk(ElabContext, ElabDef)
+    | ElabItemErr(ElabContext)               // Error recorded in context
+    | ElabItemSkip(ElabContext)              // No definition produced (e.g., use decl)
+
+/// An elaborated definition.
+pub type ElabDef = {
+    name: String,
+    term: TermHandle,
+    ty: TypeHandle,
+    cir: CodegenIR,           // CodegenIR for self-hosted codegen (3C-7)
+    visibility: Visibility
+}
+
+/// Create an elaborated definition.
+pub fn elab_def_new(name: String, term: TermHandle, ty: TypeHandle, vis: Visibility) -> ElabDef {
+    { name: name, term: term, ty: ty, cir: CIRUnit(), visibility: vis }
+}
+
+/// Create an elaborated definition with CIR.
+pub fn elab_def_new_with_cir(name: String, term: TermHandle, ty: TypeHandle, cir: CodegenIR, vis: Visibility) -> ElabDef {
+    { name: name, term: term, ty: ty, cir: cir, visibility: vis }
+}
+
+// ===========================================================================
+// COLLECTION RESULT
+// ===========================================================================
+
+/// Result of the collection phase.
+pub type CollectResult =
+    | CollectOk(ElabContext)
+    | CollectErr(ElabContext)     // Errors accumulated but can continue
+
+/// Check if collection succeeded (no fatal errors).
+pub fn collect_result_ok(result: CollectResult) -> Bool {
+    match result {
+        CollectOk(_) => true,
+        CollectErr(_) => false
+    }
+}
+
+/// Get the context from a collection result.
+pub fn collect_result_context(result: CollectResult) -> ElabContext {
+    match result {
+        CollectOk(ctx) => ctx,
+        CollectErr(ctx) => ctx
+    }
+}
+
+// ===========================================================================
+// FINAL ELABORATION RESULT
+// ===========================================================================
+
+/// Final result of elaborating a source file.
+pub type ElabResult = {
+    defs: List<ElabDef>,
+    errors: List<ElabError>
+}
+
+/// Create an elaboration result.
+pub fn elab_result_new(defs: List<ElabDef>, errors: List<ElabError>) -> ElabResult {
+    { defs: defs, errors: errors }
+}
+
+/// Check if elaboration succeeded (no errors).
+pub fn elab_result_ok(result: ElabResult) -> Bool {
+    list_is_empty(result.errors)
+}
+
+/// Get the number of definitions.
+pub fn elab_result_def_count(result: ElabResult) -> Nat {
+    list_len(result.defs)
+}
+
+/// Get the number of errors.
+pub fn elab_result_error_count(result: ElabResult) -> Nat {
+    list_len(result.errors)
+}

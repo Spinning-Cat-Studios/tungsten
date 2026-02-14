@@ -1,0 +1,8 @@
+// Token type - uses Span from sibling module
+use span::Span;
+
+pub type Token = { kind: Nat, span: Span }
+
+pub fn token_span(t: Token) -> Span {
+    t.span
+}

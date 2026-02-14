@@ -1,0 +1,12 @@
+// Consumer module: imports Option from middle (not core directly)
+// and pattern matches on Option<String>
+
+use middle::{Option, None, Some};
+
+pub fn test_option_match() -> Nat {
+    let opt: Option<String> = Some("hello");
+    match opt {
+        Some(s) => 1,
+        None => 0
+    }
+}

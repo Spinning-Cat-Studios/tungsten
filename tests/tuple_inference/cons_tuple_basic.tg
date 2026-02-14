@@ -1,0 +1,17 @@
+// Test: Basic tuple inside generic Cons constructor
+// This tests whether the expected type List<(Nat, Nat)> propagates
+// into the tuple expression (1, 2) inside Cons.
+
+type List<T> = | Nil | Cons(T, List<T>)
+
+fn make_list() -> List<(Nat, Nat)> {
+    Cons((1, 2), Nil)
+}
+
+fn main() -> Nat {
+    // Just verify we can create and return the list
+    match make_list() {
+        Nil() => 0,
+        Cons(_, _) => 42
+    }
+}

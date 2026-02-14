@@ -1,0 +1,38 @@
+// Regression test for ADR 31: Cross-Module Generic Type Resolution
+// Tests: Local type alias of generic type, then pattern match
+//
+// type Foo = Option<String>
+// match foo_value { None => ..., Some(x) => ... }
+//
+// This is a simpler single-file variant of the cross-module tests.
+
+pub type Option<T> =
+    | None
+    | Some(T)
+
+// Local alias of a specific instantiation of a generic type
+// Note: In Tungsten, type aliases use the same ADT syntax
+pub type MaybeString =
+    | NoString
+    | HasString(String)
+
+fn test_local_alias_match() -> Nat {
+    let x: MaybeString = HasString("hello");
+    match x {
+        HasString(s) => 1,
+        NoString => 0
+    }
+}
+
+// Also test matching on the original generic type with String
+fn test_generic_with_string() -> Nat {
+    let opt: Option<String> = Some("world");
+    match opt {
+        Some(s) => 1,
+        None => 0
+    }
+}
+
+pub fn main() -> Nat {
+    test_local_alias_match() + test_generic_with_string()
+}

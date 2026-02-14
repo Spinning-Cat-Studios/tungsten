@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["tungsten_core", "tungsten_codegen", "bootstrap"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/token-cjg/Tungsten"
+authors = ["Chris Goddard"]
+
+[workspace.lints.rust]
+# Use 'deny' instead of 'forbid' to allow FFI modules to override
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

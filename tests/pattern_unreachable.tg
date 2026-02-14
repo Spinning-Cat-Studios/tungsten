@@ -1,0 +1,34 @@
+// Test: unreachable pattern warnings
+// This should compile successfully but emit warnings about unreachable arms.
+
+type Option<T> = None | Some(T)
+
+// Test 1: Constructor arm after catch-all (should warn)
+fn test_unreachable(opt: Option<Nat>) -> Nat {
+    match opt {
+        _ => 42,
+        Some(x) => x,   // W0001: unreachable pattern
+    }
+}
+
+// Test 2: Multiple catch-alls after constructor (second should warn)  
+fn test_multi_catchall(opt: Option<Nat>) -> Nat {
+    match opt {
+        None() => 0,
+        _ => 1,
+        _ => 2,   // W0001: unreachable pattern  
+    }
+}
+
+// Test 3: Valid pattern - no warning expected
+fn test_valid(opt: Option<Nat>) -> Nat {
+    match opt {
+        Some(x) => x,
+        _ => 0,
+    }
+}
+
+fn main() -> Nat {
+    // All functions should work, just with warnings
+    test_valid(Some(42))   // Should return 42
+}

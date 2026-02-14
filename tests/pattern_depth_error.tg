@@ -1,0 +1,16 @@
+// Test: Pattern depth limit (should fail with E0103)
+// This file tests that deeply nested patterns are rejected.
+
+// Define types in reverse order (dependencies first)
+type D = MkD(Nat)
+type C = MkC(D)
+type B = MkB(C)
+type A = MkA(B)
+
+// This should exceed MAX_PATTERN_DEPTH of 3
+// Depth: MkA=1, MkB=2, MkC=3, MkD=4 (too deep!)
+fn deep_match(a: A) -> Nat {
+    match a {
+        MkA(MkB(MkC(MkD(n)))) => n,
+    }
+}

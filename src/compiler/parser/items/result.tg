@@ -1,0 +1,82 @@
+// src/compiler/parser/items/result.tg
+// Parse result types for item parsing.
+
+use lexer::span::{Span, span_empty};
+use parser::error::ParseError;
+use parser::cursor::Cursor;
+use parser::ast::nodes::{
+    Item, TypeBody, Variant, RecordField,
+    UseTree,
+    TypeParam, Param, ExternParam
+};
+use parser::ast::common::Visibility;
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+
+// Re-export ItemList and related for convenience - Using generic List<Item>
+
+// ===========================================================================
+// PARSE RESULT TYPES FOR ITEMS
+// ===========================================================================
+
+/// Result of parsing an item.
+pub type ParseResultItem =
+    | ParseOkItem(Item, Cursor)
+    | ParseErrItem(ParseError)
+
+/// Result of parsing a list of items.
+pub type ParseResultItemList =
+    | ParseOkItemList(List<Item>, Cursor)
+    | ParseErrItemList(ParseError)
+
+/// Result of parsing visibility.
+pub type ParseResultVisibility =
+    | ParseOkVisibility(Visibility, Cursor)
+    | ParseErrVisibility(ParseError)
+
+/// Result of parsing type parameters.
+pub type ParseResultTypeParams =
+    | ParseOkTypeParams(List<TypeParam>, Cursor)
+    | ParseErrTypeParams(ParseError)
+
+/// Result of parsing function parameters.
+pub type ParseResultParams =
+    | ParseOkParams(List<Param>, Cursor)
+    | ParseErrParams(ParseError)
+
+/// Result of parsing extern parameters.
+pub type ParseResultExternParams =
+    | ParseOkExternParams(List<ExternParam>, Cursor)
+    | ParseErrExternParams(ParseError)
+
+/// Result of parsing a use tree.
+pub type ParseResultUseTree =
+    | ParseOkUseTree(UseTree, Cursor)
+    | ParseErrUseTree(ParseError)
+
+/// Result of parsing a use tree list.
+pub type ParseResultUseTreeList =
+    | ParseOkUseTreeList(List<UseTree>, Cursor)
+    | ParseErrUseTreeList(ParseError)
+
+/// Result of parsing a type body (ADT or record).
+pub type ParseResultTypeBody =
+    | ParseOkTypeBody(TypeBody, Cursor)
+    | ParseErrTypeBody(ParseError)
+
+/// Result of parsing a variant list.
+pub type ParseResultVariants =
+    | ParseOkVariants(List<Variant>, Cursor)
+    | ParseErrVariants(ParseError)
+
+/// Result of parsing record fields.
+pub type ParseResultRecordFields =
+    | ParseOkRecordFields(List<RecordField>, Cursor)
+    | ParseErrRecordFields(ParseError)
+
+// ItemList replaced by List<Item>
+
+/// Reverse an item list.
+pub fn item_list_reverse(list: List<Item>) -> List<Item> {
+    list_reverse(list)
+}

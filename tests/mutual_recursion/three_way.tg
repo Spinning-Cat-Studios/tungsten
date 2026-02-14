@@ -1,0 +1,12 @@
+// Test: Three-way mutual recursion
+// Bug #2: Mutual type recursion support
+//
+// A → B → C → A cycle in type definitions.
+
+type NodeA = { next: NodeB, id: Nat }
+type NodeB = { next: NodeC, id: Nat }
+type NodeC = { next: NodeA, id: Nat }
+
+fn main() -> Nat {
+    0  // Just test that types elaborate
+}

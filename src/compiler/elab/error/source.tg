@@ -1,0 +1,151 @@
+// src/compiler/elab/error/source.tg
+// Source file info for diagnostic rendering.
+//
+// Provides line/column lookup and source content extraction.
+
+use driver::util::string_is_empty;
+use driver::ffi::{List, Nil, Cons, string_len, string_char_at_internal};
+use driver::util::{list_len, list_reverse};
+
+// ===========================================================================
+// SOURCE INFO
+// ===========================================================================
+
+/// Source file info for diagnostic rendering.
+pub type SourceInfo = {
+    path: String,
+    contents: String,
+    lines: List<Nat>  // Line start offsets
+}
+
+// LineList is now List<Nat> using driver::ffi::{List, Nil, Cons}
+// Helper functions use generic versions from driver::util:
+//   - list_len<T> replaces line_list_len
+//   - list_reverse<T> replaces line_list_reverse
+
+/// Line and column position (1-indexed).
+pub type LineCol = { line: Nat, col: Nat }
+
+// ===========================================================================
+// SOURCE INFO CREATION
+// ===========================================================================
+
+/// Create a source info from file contents.
+/// Computes line starts for efficient line:col lookup.
+pub fn source_info_new(path: String, contents: String) -> SourceInfo {
+    { path: path, contents: contents, lines: compute_line_starts(contents, 0, Nil) }
+}
+
+/// Compute line start offsets from source content.
+fn compute_line_starts(s: String, pos: Nat, acc: List<Nat>) -> List<Nat> {
+    // Add first line if at position 0
+    let acc2 = if pos == 0 { Cons(0, acc) } else { acc };
+    
+    // Scan for newlines
+    if string_is_empty(s) {
+        list_reverse(acc2)
+    } else {
+        let c = string_char_at_internal(s, 0);
+        let rest = string_drop(s, 1);
+        if c == 10 {  // '\n'
+            compute_line_starts(rest, pos + 1, Cons(pos + 1, acc2))
+        } else {
+            compute_line_starts(rest, pos + 1, acc2)
+        }
+    }
+}
+
+// ===========================================================================
+// LINE/COLUMN LOOKUP
+// ===========================================================================
+
+/// Convert a byte offset to (line, column). Lines and columns are 1-indexed.
+pub fn offset_to_line_col(src: SourceInfo, offset: Nat) -> LineCol {
+    find_line_col(src.lines, offset, 1)
+}
+
+/// Find line and column for an offset.
+/// Note: Uses explicit nested match to avoid nested patterns (bootstrap limitation).
+fn find_line_col(lines: List<Nat>, offset: Nat, line_num: Nat) -> LineCol {
+    match lines {
+        Nil() => { line: line_num, col: offset + 1 } : LineCol,
+        Cons(start, rest) =>
+            // Check if this is the last line or if we need to look ahead
+            match rest {
+                Nil() =>
+                    // Last line
+                    { line: line_num, col: offset - start + 1 } : LineCol,
+                Cons(next_start, rest2) =>
+                    if offset < next_start {
+                        { line: line_num, col: offset - start + 1 } : LineCol
+                    } else {
+                        find_line_col(Cons(next_start, rest2), offset, line_num + 1)
+                    }
+            }
+    }
+}
+
+// ===========================================================================
+// LINE CONTENT EXTRACTION
+// ===========================================================================
+
+/// Get the start offset of a specific line (1-indexed).
+pub fn get_line_start(src: SourceInfo, line: Nat) -> Nat {
+    get_line_start_acc(src.lines, line, 1)
+}
+
+fn get_line_start_acc(lines: List<Nat>, target: Nat, current: Nat) -> Nat {
+    match lines {
+        Nil() => 0,
+        Cons(start, rest) =>
+            if current == target {
+                start
+            } else {
+                get_line_start_acc(rest, target, current + 1)
+            }
+    }
+}
+
+/// Get the end offset of a specific line (1-indexed).
+pub fn get_line_end(src: SourceInfo, line: Nat) -> Nat {
+    get_line_end_acc(src.lines, line, 1, string_len(src.contents))
+}
+
+fn get_line_end_acc(lines: List<Nat>, target: Nat, current: Nat, total_len: Nat) -> Nat {
+    match lines {
+        Nil() => total_len,
+        Cons(start, rest) =>
+            if current == target {
+                match rest {
+                    Nil() => total_len,
+                    Cons(next_start, _) => next_start - 1  // Exclude newline
+                }
+            } else {
+                get_line_end_acc(rest, target, current + 1, total_len)
+            }
+    }
+}
+
+/// Get the content of a specific line (1-indexed).
+pub fn get_line_content(src: SourceInfo, line: Nat) -> String {
+    let start = get_line_start(src, line);
+    let end_pos = get_line_end(src, line);
+    string_slice(src.contents, start, end_pos)
+}
+
+/// Count the number of lines in source info.
+pub fn line_count(src: SourceInfo) -> Nat {
+    list_len(src.lines)
+}
+
+/// Drop first n characters (bytes) from string.
+extern "C" fn tg_string_drop(s: String, n: Nat) -> String
+fn string_drop(s: String, n: Nat) -> String {
+    tg_string_drop(s, n)
+}
+
+/// Take a slice of a string [start, end).
+extern "C" fn tg_string_slice(s: String, start: Nat, end_pos: Nat) -> String
+fn string_slice(s: String, start: Nat, end_pos: Nat) -> String {
+    tg_string_slice(s, start, end_pos)
+}

@@ -1,0 +1,11 @@
+// child2 module - imports from sibling child1
+use child1::{Point, origin};
+
+pub fn distance_from_origin(p: Point) -> Nat {
+    p.x + p.y  // Manhattan distance
+}
+
+pub fn test() -> Nat {
+    let o = origin();
+    distance_from_origin(o)
+}

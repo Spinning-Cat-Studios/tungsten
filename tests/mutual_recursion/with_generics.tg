@@ -1,0 +1,32 @@
+// Test: Mutual recursion with generics
+// Bug #2: Mutual type recursion support
+//
+// Tree and Forest types with type parameters.
+// Forest<T> is a list of Tree<T>, Tree<T> contains a Forest<T>.
+
+type Tree<T> = 
+    | Leaf(T)
+    | Node(T, Forest<T>)
+
+type Forest<T> =
+    | Empty
+    | Trees(Tree<T>, Forest<T>)
+
+fn count_leaves(t: Tree<Nat>) -> Nat {
+    match t {
+        Leaf(_) => 1,
+        Node(_, f) => count_forest(f)
+    }
+}
+
+fn count_forest(f: Forest<Nat>) -> Nat {
+    match f {
+        Empty() => 0,
+        Trees(t, rest) => count_leaves(t) + count_forest(rest)
+    }
+}
+
+fn main() -> Nat {
+    let t = Leaf(42);
+    count_leaves(t)
+}

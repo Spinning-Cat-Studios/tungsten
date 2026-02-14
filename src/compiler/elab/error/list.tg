@@ -1,0 +1,121 @@
+// src/compiler/elab/error/list.tg
+// List types and operations for errors, strings, and suggestions.
+
+use lexer::span::Span;
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_len, list_is_empty, list_reverse, list_append};
+use elab::error::kinds::{ElabErrorKind};
+use elab::error::expected::{MaybeExpectedBecause, NoExpectedBecause};
+use parser::ast::common::{MaybeString, NoString, SomeString};
+
+// ===========================================================================
+// STRING LIST OPERATIONS
+// ===========================================================================
+
+/// Join a string list with a separator.
+pub fn string_list_join(list: List<String>, sep: String) -> String {
+    match list {
+        Nil() => "",
+        Cons(s, Nil()) => s,
+        Cons(s, rest) => s ++ sep ++ string_list_join(rest, sep)
+    }
+}
+
+// ===========================================================================
+// SUGGESTION
+// ===========================================================================
+
+/// A suggestion for fixing an error.
+pub type Suggestion = {
+    span: Span,
+    replacement: String,
+    message: String
+}
+
+/// Create a suggestion.
+pub fn suggestion_new(span: Span, replacement: String, message: String) -> Suggestion {
+    { span: span, replacement: replacement, message: message }
+}
+
+// SuggestionList is now List<Suggestion> using driver::ffi::{List, Nil, Cons}
+
+// ===========================================================================
+// ELAB ERROR TYPE
+// ===========================================================================
+
+/// An elaboration error with full context.
+pub type ElabError = {
+    kind: ElabErrorKind,
+    span: Span,
+    notes: List<String>,
+    suggestions: List<Suggestion>,
+    help: MaybeString,
+    expected_because: MaybeExpectedBecause
+}
+
+// ElabErrorList is now List<ElabError> using driver::ffi::{List, Nil, Cons}
+// Helper functions use generic versions from driver::util:
+//   - list_len<T> replaces elab_error_list_len
+//   - list_is_empty<T> replaces elab_error_list_is_empty
+//   - list_append<T> replaces elab_error_list_append
+//   - list_reverse<T> replaces elab_error_list_reverse
+
+// ===========================================================================
+// ERROR DEDUPLICATION
+// ===========================================================================
+
+/// Deduplicate errors by span start and end.
+/// Keeps the first error encountered for each unique span location.
+/// 
+/// This matches bootstrap behavior (deduplicate_errors in diagnostics.rs).
+/// Note: When multi-file support is added, ElabError should gain a
+/// file_path field, and deduplication should key on (start, end, file_path).
+pub fn errors_deduplicate(list: List<ElabError>) -> List<ElabError> {
+    errors_deduplicate_acc(list, Nil, SpanSetEmpty)
+}
+
+/// Set of spans for deduplication.
+type SpanSet =
+    | SpanSetEmpty
+    | SpanSetCons(Span, SpanSet)
+
+/// Check if a span is in the set (by start AND end).
+fn span_set_contains(set: SpanSet, span: Span) -> Bool {
+    match set {
+        SpanSetEmpty() => false,
+        SpanSetCons(s, rest) => 
+            if spans_equal(s, span) {
+                true
+            } else {
+                span_set_contains(rest, span)
+            }
+    }
+}
+
+/// Check if two spans are equal.
+fn spans_equal(a: Span, b: Span) -> Bool {
+    a.start == b.start && a.end == b.end
+}
+
+/// Accumulator-based deduplication.
+fn errors_deduplicate_acc(
+    list: List<ElabError>, 
+    acc: List<ElabError>,
+    seen: SpanSet
+) -> List<ElabError> {
+    match list {
+        Nil() => list_reverse(acc),
+        Cons(err, rest) =>
+            if span_set_contains(seen, err.span) {
+                // Skip duplicate
+                errors_deduplicate_acc(rest, acc, seen)
+            } else {
+                // Keep this error
+                errors_deduplicate_acc(
+                    rest, 
+                    Cons(err, acc),
+                    SpanSetCons(err.span, seen)
+                )
+            }
+    }
+}

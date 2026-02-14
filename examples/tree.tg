@@ -1,0 +1,36 @@
+// Binary tree data structure
+pub type Tree<T> = Leaf | Node(T, Tree<T>, Tree<T>)
+
+// Check if a tree is a leaf
+pub fn is_leaf(t: Tree<Nat>) -> Bool {
+    match t {
+        Leaf() => true,
+        Node(v, l, r) => false,
+    }
+}
+
+// Get the root value (if any)
+pub type Option<T> = None | Some(T)
+
+pub fn root(t: Tree<Nat>) -> Option<Nat> {
+    match t {
+        Leaf() => None,
+        Node(v, l, r) => Some(v),
+    }
+}
+
+// Build a simple tree:
+//       1
+//      / \
+//     2   3
+pub fn example_tree() -> Tree<Nat> {
+    Node(1, 
+        Node(2, Leaf, Leaf),
+        Node(3, Leaf, Leaf))
+}
+
+fn main() -> Bool {
+    let t = example_tree();
+    // is_leaf(Node(1, ...)) => false
+    is_leaf(t)
+}

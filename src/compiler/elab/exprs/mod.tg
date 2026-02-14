@@ -1,0 +1,425 @@
+// src/compiler/elab/exprs/mod.tg
+// Expression elaboration for the self-hosted elaborator.
+//
+// This module transforms surface syntax Expr into Core terms (TermHandle).
+// It implements bidirectional type checking with check and synth modes.
+//
+// ## Bidirectional Type Checking
+//
+// - `synth`: Synthesize (infer) the type of an expression
+// - `check`: Verify an expression has an expected type
+//
+// The two modes work together. For example:
+// - Lambda in check mode uses the expected Arrow type for the parameter
+// - Lambda in synth mode requires a type annotation
+// - Application synthesizes the function type, then checks arguments
+//
+// ## State Threading
+//
+// All functions return `(Env, TermHandle, TypeHandle)` to support functional
+// state threading. The environment may change when:
+// - Binding local variables in let or lambda
+// - Entering/exiting scopes in blocks
+//
+// ## Module Structure
+//
+// - result.tg:    Result types and helpers
+// - literals.tg:  Literal elaboration (int, bool, string, unit)
+// - vars.tg:      Variable/path elaboration  
+// - bindings.tg:  Let and lambda
+// - app.tg:       Function and type application
+// - operators.tg: Binary and unary operators
+// - control.tg:   If-then-else
+// - blocks.tg:    Blocks and statements
+// - annot.tg:     Type annotations
+// - tuples.tg:    Tuple elaboration (3C-5)
+// - match.tg:     Match expression elaboration (3C-5)
+// - patterns.tg:  Pattern elaboration utilities (3C-5)
+// - proofs.tg:    Proof term elaboration (3C-5)
+// - records.tg:   Record literals and field access (3C-5)
+
+// Submodule declarations
+pub mod result;
+pub mod literals;
+pub mod vars;
+pub mod bindings;
+pub mod app;
+pub mod operators;
+pub mod control;
+pub mod blocks;
+pub mod annot;
+pub mod tuples;
+pub mod matches;
+pub mod records;
+pub mod proofs;
+pub mod patterns;
+
+pub use elab::exprs::result::*;
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, ExprPath, ExprIntLit, ExprBoolLit, ExprStringLit, ExprUnit,
+    ExprLambda, ExprApp, ExprTypeApp, ExprBinary, ExprUnary,
+    ExprLet, ExprBlock, ExprIf, ExprMatch, ExprTuple, ExprRecordLit,
+    ExprField, ExprAnnot, ExprParen, ExprHave, ExprShow, ExprAssume,
+    ExprRefl, ExprSorry, ExprReturn, ExprError,
+    MaybeExpr, NoExpr, SomeExpr,
+    expr_span,
+    LambdaParam,
+    TypeExpr,
+    Path, MkPath, Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle, INVALID_HANDLE,
+    tg_types_equal, tg_cstr_eq,
+    tg_type_is_forall, tg_type_get_forall_var, tg_type_get_forall_body,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_is_arrow, tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_is_tyvar, tg_type_get_tyvar_name,
+    tg_type_is_mu, tg_type_get_mu_body,
+    tg_type_substitute, tg_term_type_app
+};
+use elab::cir::{CodegenIR, CIRTypeApp, CTUnit};
+
+// Import from submodules
+use elab::exprs::literals::{
+    synth_int_lit, synth_bool_lit, synth_string_lit, synth_unit, synth_sorry
+};
+use elab::exprs::vars::synth_path;
+
+use elab::exprs::bindings::{synth_let, synth_lambda, check_lambda};
+use elab::exprs::app::{synth_app, synth_type_app};
+use elab::exprs::operators::{synth_binary, synth_unary};
+use elab::exprs::control::{synth_if, check_if, synth_return, synth_return_unit};
+use elab::exprs::blocks::{synth_block, check_block};
+use elab::exprs::annot::synth_annot;
+use elab::exprs::tuples::{synth_tuple, check_tuple};
+use elab::exprs::matches::{synth_match, check_match};
+use elab::exprs::records::{synth_record_lit, check_record_lit, synth_field, get_structural_type, deep_types_equal};
+use elab::exprs::proofs::{synth_refl, check_refl, synth_have, synth_show, synth_assume};
+
+// ===========================================================================
+// MAIN ENTRY POINTS
+// ===========================================================================
+
+/// Synthesize the type of an expression.
+/// Returns (Env, TermHandle, TypeHandle) on success.
+pub fn synth(env: Env, expr: Expr) -> ElabExprResult {
+    match expr {
+        // Literals - can always synthesize
+        ExprIntLit(n, span) => synth_int_lit(env, n, span),
+        ExprBoolLit(b, span) => synth_bool_lit(env, b, span),
+        ExprStringLit(s, span) => synth_string_lit(env, s, span),
+        ExprUnit(span) => synth_unit(env, span),
+        
+        // Variables - look up in environment
+        ExprPath(path) => synth_path(env, path),
+        
+        // Let bindings - synthesize RHS, bind, synthesize body
+        ExprLet(pat, ty_annot, rhs, body, span) =>
+            synth_let(env, pat, ty_annot, rhs, body, span),
+        
+        // Lambda - requires annotation in synth mode
+        ExprLambda(params, body, span) =>
+            synth_lambda(env, params, body, span),
+        
+        // Application - synthesize function, check arguments
+        ExprApp(func, args, span) => synth_app(env, func, args, span),
+        
+        // Type application - instantiate forall
+        ExprTypeApp(inner, type_args, span) =>
+            synth_type_app(env, inner, type_args, span),
+        
+        // Binary operators - depends on operator
+        ExprBinary(op, left, right, span) =>
+            synth_binary(env, op, left, right, span),
+        
+        // Unary operators
+        ExprUnary(op, operand, span) => synth_unary(env, op, operand, span),
+        
+        // If-then-else - synthesize from branches
+        ExprIf(cond, then_e, else_e, span) =>
+            synth_if(env, cond, then_e, else_e, span),
+        
+        // Block - synthesize final expression
+        ExprBlock(stmts, final_expr, span) =>
+            synth_block(env, stmts, final_expr, span),
+        
+        // Annotation - has explicit type
+        ExprAnnot(inner, ty, span) => synth_annot(env, inner, ty, span),
+        
+        // Parentheses - transparent
+        ExprParen(inner, span) => synth(env, inner),
+        
+        // --- Match expressions (3C-5) ---
+        ExprMatch(scrutinee, arms, span) =>
+            synth_match(env, scrutinee, arms, span),
+        
+        // --- Tuples (3C-5) ---
+        ExprTuple(elems, span) =>
+            synth_tuple(env, elems, span),
+        
+        // --- Record literals and field access (3C-5) ---
+        ExprRecordLit(spread, fields, span) =>
+            synth_record_lit(env, spread, fields, span),
+        ExprField(base, field, span) =>
+            synth_field(env, base, field, span),
+        
+        // --- Proof terms (3C-5) ---
+        ExprHave(name, prop, proof, body, span) =>
+            synth_have(env, name, prop, proof, body, span),
+        ExprShow(prop, proof, span) =>
+            synth_show(env, prop, proof, span),
+        ExprAssume(name, prop, body, span) =>
+            synth_assume(env, name, prop, body, span),
+        ExprRefl(span) =>
+            synth_refl(env, span),
+        ExprSorry(span) => synth_sorry(env, span),
+        
+        // Return - elaborate value and check against expected return type
+        ExprReturn(maybe_value, span) =>
+            match maybe_value {
+                SomeExpr(value) => synth_return(env, value, span),
+                NoExpr => synth_return_unit(env, span)
+            },
+        
+        // Error recovery
+        ExprError(span) =>
+            ElabExprErr(elab_expr_error("parse error in expression", span))
+    }
+}
+
+/// Check that an expression has the expected type.
+/// Returns (Env, TermHandle, TypeHandle) where TypeHandle equals expected.
+pub fn check(env: Env, expr: Expr, expected: TypeHandle) -> ElabExprResult {
+    
+    // Early check: if expected is INVALID, don't cascade errors
+    if expected == INVALID_HANDLE {
+        let span = expr_span(expr);
+        ElabExprErr(elab_expr_error("cannot check against invalid type (cascading error)", span))
+    } else {
+    
+    let _ = env.depth; // force a read
+    match expr {
+        // Lambda - use expected type for parameter
+        ExprLambda(params, body, span) =>
+            check_lambda(env, params, body, expected, span),
+        
+        // If - check both branches against expected
+        ExprIf(cond, then_e, else_e, span) =>
+            check_if(env, cond, then_e, else_e, expected, span),
+        
+        // Block - check final expression against expected
+        ExprBlock(stmts, final_expr, span) =>
+            check_block(env, stmts, final_expr, expected, span),
+        
+        // Parentheses - transparent
+        ExprParen(inner, span) => check(env, inner, expected),
+        
+        // Match - check all arms against expected (3C-5)
+        ExprMatch(scrutinee, arms, span) =>
+            check_match(env, scrutinee, arms, expected, span),
+        
+        // Tuple - check elements against product type (3C-5)
+        ExprTuple(elems, span) =>
+            check_tuple(env, elems, expected, span),
+        
+        // Record literal - check against expected record type (3C-5)
+        ExprRecordLit(spread, fields, span) =>
+            check_record_lit(env, spread, fields, expected, span),
+        
+        // Refl - check against expected equality type (3C-5)
+        ExprRefl(span) =>
+            check_refl(env, expected, span),
+        
+        // Default: synthesize and compare
+        _ => synth_and_compare(env, expr, expected)
+    }
+    }
+}
+
+/// Synthesize type then compare with expected.
+/// Handles polymorphic instantiation when synthesized type is forall but expected is not.
+pub fn synth_and_compare(env: Env, expr: Expr, expected: TypeHandle) -> ElabExprResult {
+    let span = expr_span(expr);
+    match synth(env, expr) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, actual, cir) => {
+            // First try direct comparison with top-level structural resolution
+            let struct_actual = get_structural_type(env2, actual);
+            let struct_expected = get_structural_type(env2, expected);
+            if tg_types_equal(struct_actual, struct_expected) {
+                // Return the expected type (nominal) for consistency
+                ElabExprOk(env2, term, expected, cir)
+            } else if tg_type_is_forall(actual) {
+                // Actual is forall, expected is not - try to instantiate
+                // For nullary generic constructors like None : forall T. Option<T>
+                // checked against Option<Nat>, we instantiate T = Nat
+                try_instantiate_forall(env2, term, actual, expected, cir, span)
+            } else {
+                // Try deep type equality as fallback.
+                // get_structural_type only resolves the top-level TyVar.
+                // deep_types_equal compares types with on-the-fly TyVar resolution,
+                // searching globally across all modules. This handles cases where:
+                // - One side has TyVar("X") and the other has the expanded form
+                // - Types cross module boundaries without direct imports
+                if deep_types_equal(env2, struct_actual, struct_expected) {
+                    ElabExprOk(env2, term, expected, cir)
+                } else {
+                    ElabExprErr(elab_expr_error("type mismatch", span))
+                }
+            }
+        }
+    }
+}
+
+/// Get the innermost non-forall body of a (possibly nested) forall type.
+/// For Forall("T", Forall("E", body)), returns body.
+fn get_innermost_forall_body(ty: TypeHandle) -> TypeHandle {
+    if tg_type_is_forall(ty) {
+        get_innermost_forall_body(tg_type_get_forall_body(ty))
+    } else {
+        ty
+    }
+}
+
+/// Try to instantiate a forall type to match an expected type.
+/// For example: forall T. Option<T> instantiated with T = Nat to get Option<Nat>
+/// Handles multi-parameter foralls like forall T. forall E. Result<T, E> by
+/// recursively peeling and instantiating one forall at a time.
+fn try_instantiate_forall(
+    env: Env,
+    term: TermHandle,
+    forall_ty: TypeHandle,
+    expected: TypeHandle,
+    cir: CodegenIR,
+    span: Span
+) -> ElabExprResult {
+    if tg_type_is_forall(forall_ty) {
+        let var = tg_type_get_forall_var(forall_ty);
+        let body = tg_type_get_forall_body(forall_ty);
+        
+        // Use innermost body (past all nested foralls) for extraction.
+        // This lets us find the type variable even in multi-parameter foralls
+        // like forall T. forall E. Sum(T, E).
+        let inner_body = get_innermost_forall_body(forall_ty);
+        
+        // Extract type argument by matching innermost body structure against expected
+        let type_arg = extract_type_arg_from_match(inner_body, expected, var);
+        
+        if type_arg == INVALID_HANDLE {
+            // Couldn't extract type argument
+            ElabExprErr(elab_expr_error("cannot instantiate polymorphic type to match expected type", span))
+        } else {
+            // Substitute in the immediate body (not innermost)
+            let instantiated = tg_type_substitute(body, var, type_arg);
+            let type_app_term = tg_term_type_app(term, type_arg);
+            let type_app_cir = CIRTypeApp(cir, CTUnit());
+            
+            if tg_type_is_forall(instantiated) {
+                // Still a forall (multi-parameter generic) — recurse
+                try_instantiate_forall(env, type_app_term, instantiated, expected, type_app_cir, span)
+            } else {
+                // Fully instantiated — verify the result matches expected
+                let struct_instantiated = get_structural_type(env, instantiated);
+                let struct_expected = get_structural_type(env, expected);
+                
+                if tg_types_equal(struct_instantiated, struct_expected) {
+                    ElabExprOk(env, type_app_term, expected, type_app_cir)
+                } else if deep_types_equal(env, struct_instantiated, struct_expected) {
+                    ElabExprOk(env, type_app_term, expected, type_app_cir)
+                } else {
+                    ElabExprErr(elab_expr_error("cannot instantiate polymorphic type to match expected type", span))
+                }
+            }
+        }
+    } else {
+        ElabExprErr(elab_expr_error("expected forall type", span))
+    }
+}
+
+/// Extract a type argument by matching a forall body against an expected type.
+/// For example, matching `Sum(Unit, TyVar("T"))` against `Sum(Unit, Nat)` with var_name "T"
+/// returns `Nat`.
+fn extract_type_arg_from_match(
+    pattern: TypeHandle,
+    actual: TypeHandle,
+    var_name: Nat  // The forall variable name as a CStr pointer
+) -> TypeHandle {
+    // If pattern is the type variable we're looking for, return actual
+    if tg_type_is_tyvar(pattern) {
+        let pat_var = tg_type_get_tyvar_name(pattern);
+        if tg_cstr_eq(pat_var, var_name) {
+            actual
+        } else {
+            // Different variable, structures don't match
+            INVALID_HANDLE
+        }
+    // Recurse into structural types
+    } else if tg_type_is_sum(pattern) && tg_type_is_sum(actual) {
+        // Check left branch first, then right if not found
+        let left_result = extract_type_arg_from_match(
+            tg_type_get_sum_left(pattern),
+            tg_type_get_sum_left(actual),
+            var_name
+        );
+        if left_result != INVALID_HANDLE {
+            left_result
+        } else {
+            // Check right branch
+            extract_type_arg_from_match(
+                tg_type_get_sum_right(pattern),
+                tg_type_get_sum_right(actual),
+                var_name
+            )
+        }
+    } else if tg_type_is_arrow(pattern) && tg_type_is_arrow(actual) {
+        // Check domain first, then codomain
+        let dom_result = extract_type_arg_from_match(
+            tg_type_get_arrow_domain(pattern),
+            tg_type_get_arrow_domain(actual),
+            var_name
+        );
+        if dom_result != INVALID_HANDLE {
+            dom_result
+        } else {
+            // Check codomain
+            extract_type_arg_from_match(
+                tg_type_get_arrow_codomain(pattern),
+                tg_type_get_arrow_codomain(actual),
+                var_name
+            )
+        }
+    } else if tg_type_is_product(pattern) && tg_type_is_product(actual) {
+        // Check left first, then right
+        let left_result = extract_type_arg_from_match(
+            tg_type_get_product_left(pattern),
+            tg_type_get_product_left(actual),
+            var_name
+        );
+        if left_result != INVALID_HANDLE {
+            left_result
+        } else {
+            // Check right
+            extract_type_arg_from_match(
+                tg_type_get_product_right(pattern),
+                tg_type_get_product_right(actual),
+                var_name
+            )
+        }
+    } else if tg_type_is_mu(pattern) && tg_type_is_mu(actual) {
+        // Recursive types: recurse into Mu bodies
+        // e.g., Mu("List", Sum(Unit, Product(TyVar("T"), TyVar("List"))))
+        //    vs Mu("List", Sum(Unit, Product(Nat, TyVar("List"))))
+        extract_type_arg_from_match(
+            tg_type_get_mu_body(pattern),
+            tg_type_get_mu_body(actual),
+            var_name
+        )
+    } else {
+        // Structures don't match or type variable not found
+        INVALID_HANDLE
+    }
+}

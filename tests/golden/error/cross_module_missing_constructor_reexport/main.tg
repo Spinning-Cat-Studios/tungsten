@@ -1,0 +1,17 @@
+// Error test for ADR 31: Cross-Module Generic Type Resolution
+// Tests: Missing re-export causes undefined constructor error
+//
+// When a type is re-exported but its constructors are not,
+// using the constructors should fail with an appropriate error.
+
+pub mod core;
+pub mod middle;
+
+use middle::Option;  // Only the type, not constructors
+
+fn main() -> Nat {
+    // Try to use constructor Some which is not in scope
+    // This should fail since Some was not imported
+    let opt: Option<Nat> = middle::Some(42);  // Trying to use middle::Some
+    0
+}

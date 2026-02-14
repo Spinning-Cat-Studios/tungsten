@@ -1,0 +1,130 @@
+// src/compiler/parser/items/extern_fn.tg
+// Extern function declaration parsing.
+
+use lexer::token::{TokenKind, TokExtern, TokFn, TokArrow, TokStringLit};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    ParseResultToken, ParseOkToken, ParseErrToken,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, Visibility, MaybeString, NoString};
+use parser::ast::nodes::{Item, ItemExtern, TypeExpr, type_expr_span, MaybeTypeExpr, SomeTypeExpr, NoTypeExpr};
+use result::{ParseResultItem, ParseOkItem, ParseErrItem,
+    ParseResultExternParams, ParseOkExternParams, ParseErrExternParams};
+use parser::items::params::{parse_extern_params};
+use parser::types::{parse_type, ParseResultType, ParseOkType, ParseErrType};
+
+// ===========================================================================
+// EXTERN FUNCTION PARSING
+// ===========================================================================
+
+/// Parse an extern function declaration.
+///
+/// Grammar:
+///   Extern = "extern" ABI? "fn" IDENT ExternParams ("->" Type)?
+///   ABI = STRING
+pub fn parse_extern(cur: Cursor, vis: Visibility, start_span: Span) -> ParseResultItem {
+    // Consume "extern" keyword
+    let cur2 = cursor_advance(cur);
+    
+    // Parse optional ABI string
+    match parse_optional_abi(cur2) {
+        ParseErrAbi(e) => ParseErrItem(e),
+        ParseOkAbi(abi, cur3) => {
+            // Expect "fn" keyword
+            match cursor_expect(cur3, TokFn()) {
+                ParseErrToken(e) => ParseErrItem(e),
+                ParseOkToken(_, cur4) => {
+                    // Parse function name
+                    match cursor_eat_ident(cur4) {
+                        NoIdentResult() => {
+                            let found = match cursor_peek_kind(cur4) {
+                                None() => "end of file",
+                                Some(k) => token_kind_name(k)
+                            };
+                            ParseErrItem(parse_error_expected("function name", found, cursor_peek_span(cur4)))
+                        },
+                        SomeIdentResult(name, cur5) => {
+                            let name_span = cursor_peek_span(cur4);
+                            parse_extern_fn_body(cur5, ident_new(name, name_span), abi, vis, start_span)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Result of parsing an optional ABI string.
+type ParseResultAbi =
+    | ParseOkAbi(Option<String>, Cursor)
+    | ParseErrAbi(ParseError)
+
+/// Parse an optional ABI string.
+fn parse_optional_abi(cur: Cursor) -> ParseResultAbi {
+    match cursor_peek(cur) {
+        None() => ParseOkAbi(None(), cur),
+        Some(tok) => {
+            match tok.kind {
+                TokStringLit(s) => {
+                    let cur2 = cursor_advance(cur);
+                    ParseOkAbi(Some(s), cur2)
+                },
+                _ => ParseOkAbi(None(), cur)
+            }
+        }
+    }
+}
+
+/// Parse the body of an extern function (params, return type, semicolon).
+fn parse_extern_fn_body(cur: Cursor, name: Ident, abi: Option<String>, 
+                        vis: Visibility, start_span: Span) -> ParseResultItem {
+    // Parse parameters
+    match parse_extern_params(cur) {
+        ParseErrExternParams(e) => ParseErrItem(e),
+        ParseOkExternParams(params, cur2) => {
+            // Parse optional return type
+            match parse_extern_optional_return(cur2) {
+                ParseErrExternReturn(e) => ParseErrItem(e),
+                ParseOkExternReturn(ret_type, cur3) => {
+                    // Compute end span from return type if present, otherwise from params
+                    let end_span = match ret_type {
+                        SomeTypeExpr(ty) => type_expr_span(ty),
+                        NoTypeExpr() => cursor_peek_span(cur2)
+                    };
+                    let extern_def: ExternFnDef = {
+                        vis: vis,
+                        name: name,
+                        symbol: NoString(),
+                        abi: abi,
+                        params: params,
+                        return_type: ret_type,
+                        span: span_merge(start_span, end_span)
+                    };
+                    let extern_fn = ItemExtern(extern_def);
+                    ParseOkItem(extern_fn, cur3)
+                }
+            }
+        }
+    }
+}
+
+/// Result of parsing an extern function's return type.
+type ParseResultExternReturn =
+    | ParseOkExternReturn(MaybeTypeExpr, Cursor)
+    | ParseErrExternReturn(ParseError)
+
+/// Parse an optional return type for extern function.
+fn parse_extern_optional_return(cur: Cursor) -> ParseResultExternReturn {
+    if cursor_check(cur, TokArrow()) {
+        let cur2 = cursor_advance(cur);
+        match parse_type(cur2) {
+            ParseErrType(e) => ParseErrExternReturn(e),
+            ParseOkType(ty, cur3) => ParseOkExternReturn(SomeTypeExpr(ty), cur3)
+        }
+    } else {
+        ParseOkExternReturn(NoTypeExpr(), cur)
+    }
+}

@@ -1,0 +1,458 @@
+// src/compiler/elab/exprs/operators.tg
+// Binary and unary operator elaboration.
+// Produces both Core terms (TermHandle) and CodegenIR in lockstep.
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, ExprApp,
+    BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod,
+    OpEq, OpNe, OpLt, OpLe, OpGt, OpGe,
+    OpAnd, OpOr, OpPipe, OpConcat,
+    UnaryOp, OpNot, OpNeg,
+    expr_span
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_nat_add, tg_term_nat_sub, tg_term_nat_mul, tg_term_nat_div, tg_term_nat_mod,
+    tg_term_nat_eq, tg_term_nat_lt, tg_term_nat_le, tg_term_nat_gt, tg_term_nat_ge,
+    tg_term_bool_and, tg_term_bool_or, tg_term_bool_not,
+    tg_term_str_concat, tg_term_str_eq,
+    tg_type_nat, tg_type_bool, tg_type_string,
+    tg_types_equal
+};
+use elab::env::Env;
+use elab::exprs::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, 
+    elab_expr_error, elab_expr_binary_type_error, add_expected_because
+};
+use elab::error::{ExpBinaryOperand, ExpUnaryOperand};
+use elab::cir::{
+    CodegenIR,
+    CIRNatAdd, CIRNatSub, CIRNatMul, CIRNatDiv, CIRNatMod,
+    CIRNatEq, CIRNatLt, CIRNatLe, CIRNatGt, CIRNatGe,
+    CIRBoolAnd, CIRBoolOr, CIRBoolNot,
+    CIRStrConcat, CIRStrEq
+};
+
+// Import synth/check from parent module for mutual recursion
+use elab::exprs::{synth, check};
+
+// ===========================================================================
+// BINARY OPERATOR DISPATCH
+// ===========================================================================
+
+/// Synthesize a binary operation.
+pub fn synth_binary(
+    env: Env,
+    op: BinOp,
+    left: Expr,
+    right: Expr,
+    span: Span
+) -> ElabExprResult {
+    match op {
+        // Arithmetic: Nat -> Nat -> Nat
+        OpAdd() => synth_nat_add(env, left, right, span),
+        OpSub() => synth_nat_sub(env, left, right, span),
+        OpMul() => synth_nat_mul(env, left, right, span),
+        OpDiv() => synth_nat_div(env, left, right, span),
+        OpMod() => synth_nat_mod(env, left, right, span),
+        
+        // Comparison: Nat -> Nat -> Bool
+        OpLt() => synth_nat_lt(env, left, right, span),
+        OpLe() => synth_nat_le(env, left, right, span),
+        OpGt() => synth_nat_gt(env, left, right, span),
+        OpGe() => synth_nat_ge(env, left, right, span),
+        
+        // Equality: polymorphic - infer from left side
+        OpEq() => synth_polymorphic_eq(env, left, right, span),
+        OpNe() => synth_polymorphic_ne(env, left, right, span),
+        
+        // Logical: Bool -> Bool -> Bool
+        OpAnd() => synth_bool_and(env, left, right, span),
+        OpOr() => synth_bool_or(env, left, right, span),
+        
+        // String: String -> String -> String
+        OpConcat() => synth_str_concat(env, left, right, span),
+        
+        // Pipeline: a |> f  =  f(a)
+        OpPipe() => synth_pipe(env, left, right, span)
+    }
+}
+
+// ===========================================================================
+// ARITHMETIC OPERATIONS: Nat -> Nat -> Nat
+// ===========================================================================
+
+fn synth_nat_add(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    let left_span = expr_span(left);
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("+", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            let right_span = expr_span(right);
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("+", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_add(left_term, right_term);
+                    let result_cir = CIRNatAdd(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, nat_ty, result_cir)
+            }
+    }
+}
+
+fn synth_nat_sub(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("-", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("-", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_sub(left_term, right_term);
+                    let result_cir = CIRNatSub(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, nat_ty, result_cir)
+            }
+    }
+}
+
+fn synth_nat_mul(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("*", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("*", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_mul(left_term, right_term);
+                    let result_cir = CIRNatMul(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, nat_ty, result_cir)
+            }
+    }
+}
+
+fn synth_nat_div(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("/", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("/", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_div(left_term, right_term);
+                    let result_cir = CIRNatDiv(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, nat_ty, result_cir)
+            }
+    }
+}
+
+fn synth_nat_mod(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("%", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("%", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_mod(left_term, right_term);
+                    let result_cir = CIRNatMod(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, nat_ty, result_cir)
+            }
+    }
+}
+
+// ===========================================================================
+// POLYMORPHIC EQUALITY: infer left type, check right, dispatch
+// ===========================================================================
+
+/// Polymorphic equality: infer type from left operand, check right matches.
+fn synth_polymorphic_eq(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    let nat_ty = tg_type_nat();
+    let string_ty = tg_type_string();
+    
+    // Infer the type of the left operand
+    match synth(env, left) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("==", span))),
+        ElabExprOk(env2, left_term, left_ty, left_cir) =>
+            // Check right operand against left's type
+            match check(env2, right, left_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("==", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    // Dispatch based on type
+                    if tg_types_equal(left_ty, nat_ty) {
+                        let result_term = tg_term_nat_eq(left_term, right_term);
+                        let result_cir = CIRNatEq(left_cir, right_cir);
+                        ElabExprOk(env3, result_term, bool_ty, result_cir)
+                    } else if tg_types_equal(left_ty, string_ty) {
+                        let result_term = tg_term_str_eq(left_term, right_term);
+                        let result_cir = CIRStrEq(left_cir, right_cir);
+                        ElabExprOk(env3, result_term, bool_ty, result_cir)
+                    } else if tg_types_equal(left_ty, bool_ty) {
+                        // Bool equality: a == b iff (a && b) || (!a && !b)
+                        // Simplified: use XOR then negate, or just compare directly
+                        // For now, use the pattern: (a && b) || ((!a) && (!b))
+                        let a_and_b = tg_term_bool_and(left_term, right_term);
+                        let not_a = tg_term_bool_not(left_term);
+                        let not_b = tg_term_bool_not(right_term);
+                        let not_a_and_not_b = tg_term_bool_and(not_a, not_b);
+                        let result_term = tg_term_bool_or(a_and_b, not_a_and_not_b);
+                        // CIR doesn't have a direct bool_eq, so build the same pattern
+                        let cir_a_and_b = CIRBoolAnd(left_cir, right_cir);
+                        let cir_not_a = CIRBoolNot(left_cir);
+                        let cir_not_b = CIRBoolNot(right_cir);
+                        let cir_not_a_and_not_b = CIRBoolAnd(cir_not_a, cir_not_b);
+                        let result_cir = CIRBoolOr(cir_a_and_b, cir_not_a_and_not_b);
+                        ElabExprOk(env3, result_term, bool_ty, result_cir)
+                    } else {
+                        ElabExprErr(elab_expr_error(
+                            "equality not supported for this type",
+                            span
+                        ))
+                    }
+            }
+    }
+}
+
+/// Polymorphic inequality: uses polymorphic_eq then negates.
+fn synth_polymorphic_ne(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    let nat_ty = tg_type_nat();
+    let string_ty = tg_type_string();
+    
+    // Infer the type of the left operand
+    match synth(env, left) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("!=", span))),
+        ElabExprOk(env2, left_term, left_ty, left_cir) =>
+            // Check right operand against left's type
+            match check(env2, right, left_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("!=", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    // Dispatch based on type, then negate
+                    if tg_types_equal(left_ty, nat_ty) {
+                        let eq_term = tg_term_nat_eq(left_term, right_term);
+                        let result_term = tg_term_bool_not(eq_term);
+                        let eq_cir = CIRNatEq(left_cir, right_cir);
+                        let result_cir = CIRBoolNot(eq_cir);
+                        ElabExprOk(env3, result_term, bool_ty, result_cir)
+                    } else if tg_types_equal(left_ty, string_ty) {
+                        let eq_term = tg_term_str_eq(left_term, right_term);
+                        let result_term = tg_term_bool_not(eq_term);
+                        let eq_cir = CIRStrEq(left_cir, right_cir);
+                        let result_cir = CIRBoolNot(eq_cir);
+                        ElabExprOk(env3, result_term, bool_ty, result_cir)
+                    } else if tg_types_equal(left_ty, bool_ty) {
+                        // Bool inequality: a != b iff XOR
+                        // (a || b) && (!a || !b)  equivalent to  (a && !b) || (!a && b)
+                        let not_a = tg_term_bool_not(left_term);
+                        let not_b = tg_term_bool_not(right_term);
+                        let a_and_not_b = tg_term_bool_and(left_term, not_b);
+                        let not_a_and_b = tg_term_bool_and(not_a, right_term);
+                        let result_term = tg_term_bool_or(a_and_not_b, not_a_and_b);
+                        // CIR version
+                        let cir_not_a = CIRBoolNot(left_cir);
+                        let cir_not_b = CIRBoolNot(right_cir);
+                        let cir_a_and_not_b = CIRBoolAnd(left_cir, cir_not_b);
+                        let cir_not_a_and_b = CIRBoolAnd(cir_not_a, right_cir);
+                        let result_cir = CIRBoolOr(cir_a_and_not_b, cir_not_a_and_b);
+                        ElabExprOk(env3, result_term, bool_ty, result_cir)
+                    } else {
+                        ElabExprErr(elab_expr_error(
+                            "inequality not supported for this type",
+                            span
+                        ))
+                    }
+            }
+    }
+}
+
+// ===========================================================================
+// COMPARISON OPERATIONS: Nat -> Nat -> Bool
+// ===========================================================================
+
+fn synth_nat_eq(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    let bool_ty = tg_type_bool();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("==", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("==", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_eq(left_term, right_term);
+                    let result_cir = CIRNatEq(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, bool_ty, result_cir)
+            }
+    }
+}
+
+fn synth_nat_ne(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    // a != b  =  !(a == b)
+    let nat_ty = tg_type_nat();
+    let bool_ty = tg_type_bool();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("!=", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("!=", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let eq_term = tg_term_nat_eq(left_term, right_term);
+                    let ne_term = tg_term_bool_not(eq_term);
+                    let eq_cir = CIRNatEq(left_cir, right_cir);
+                    let ne_cir = CIRBoolNot(eq_cir);
+                    ElabExprOk(env3, ne_term, bool_ty, ne_cir)
+            }
+    }
+}
+
+fn synth_nat_lt(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    let bool_ty = tg_type_bool();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("<", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("<", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_lt(left_term, right_term);
+                    let result_cir = CIRNatLt(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, bool_ty, result_cir)
+            }
+    }
+}
+
+fn synth_nat_le(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    let bool_ty = tg_type_bool();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("<=", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("<=", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_le(left_term, right_term);
+                    let result_cir = CIRNatLe(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, bool_ty, result_cir)
+            }
+    }
+}
+
+fn synth_nat_gt(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    let bool_ty = tg_type_bool();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(">", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(">", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_gt(left_term, right_term);
+                    let result_cir = CIRNatGt(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, bool_ty, result_cir)
+            }
+    }
+}
+
+fn synth_nat_ge(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    let bool_ty = tg_type_bool();
+    match check(env, left, nat_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(">=", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, nat_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(">=", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_nat_ge(left_term, right_term);
+                    let result_cir = CIRNatGe(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, bool_ty, result_cir)
+            }
+    }
+}
+
+// ===========================================================================
+// BOOLEAN OPERATIONS: Bool -> Bool -> Bool
+// ===========================================================================
+
+fn synth_bool_and(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, left, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("&&", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, bool_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("&&", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_bool_and(left_term, right_term);
+                    let result_cir = CIRBoolAnd(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, bool_ty, result_cir)
+            }
+    }
+}
+
+fn synth_bool_or(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, left, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("||", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, bool_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("||", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_bool_or(left_term, right_term);
+                    let result_cir = CIRBoolOr(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, bool_ty, result_cir)
+            }
+    }
+}
+
+// ===========================================================================
+// STRING AND OTHER OPERATIONS
+// ===========================================================================
+
+/// Synthesize string concatenation.
+fn synth_str_concat(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let string_ty = tg_type_string();
+    match check(env, left, string_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("++", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            match check(env2, right, string_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("++", span))),
+                ElabExprOk(env3, right_term, _, right_cir) =>
+                    let result_term = tg_term_str_concat(left_term, right_term);
+                    let result_cir = CIRStrConcat(left_cir, right_cir);
+                    ElabExprOk(env3, result_term, string_ty, result_cir)
+            }
+    }
+}
+
+/// Synthesize pipe operator: a |> f  =  f(a)
+fn synth_pipe(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    // Desugar to application: f(a)
+    let app_expr = ExprApp(right, Cons(left, Nil), span);
+    synth(env, app_expr)
+}
+
+// ===========================================================================
+// UNARY OPERATORS
+// ===========================================================================
+
+/// Synthesize a unary operation.
+pub fn synth_unary(env: Env, op: UnaryOp, operand: Expr, span: Span) -> ElabExprResult {
+    match op {
+        OpNot() =>
+            // ! : Bool -> Bool
+            let bool_ty = tg_type_bool();
+            match check(env, operand, bool_ty) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, term, _, operand_cir) =>
+                    let result = tg_term_bool_not(term);
+                    let result_cir = CIRBoolNot(operand_cir);
+                    ElabExprOk(env2, result, bool_ty, result_cir)
+            },
+        OpNeg() =>
+            // - : Nat -> Nat (for now; should be for signed integers)
+            // TODO: Nat subtraction from 0 would require special handling
+            ElabExprErr(elab_expr_error(
+                "unary negation not yet implemented for Nat",
+                span
+            ))
+    }
+}

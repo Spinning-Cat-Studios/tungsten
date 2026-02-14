@@ -1,0 +1,33 @@
+// Cursor - the critical test case
+// Imports from:
+// - lexer::span (cross-module, from crate root)
+// - lexer::token (cross-module, from crate root) 
+// - parser::error (sibling module)
+//
+// Note: super:: not yet implemented, use absolute paths from crate root
+// This is exactly the pattern that fails in the real self-hosted compiler.
+
+use lexer::span::Span;
+use lexer::token::Token;
+use error::ParseError;
+
+pub type Cursor = { 
+    current: Token,
+    pos: Nat 
+}
+
+pub fn make_cursor(t: Token) -> Cursor {
+    { current: t, pos: 0 }
+}
+
+pub fn token_kind(t: Token) -> Nat {
+    t.kind
+}
+
+pub fn current_span(c: Cursor) -> Span {
+    c.current.span
+}
+
+pub fn make_error(c: Cursor, code: Nat, msg: Nat) -> ParseError {
+    { code: code, message: msg, span: current_span(c) }
+}

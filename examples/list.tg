@@ -1,0 +1,7 @@
+// Test recursive ADT: List<T>
+pub type List<T> = Nil | Cons(T, List<T>)
+
+// Test using the Nil constructor - should output "fold(inl(()))" for μ-type
+fn main() -> List<Nat> {
+    Nil
+}

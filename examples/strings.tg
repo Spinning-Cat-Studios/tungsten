@@ -1,0 +1,19 @@
+// String operations example
+
+pub fn greet(name: String) -> String {
+    "Hello, " ++ name ++ "!"
+}
+
+pub fn is_greeting(s: String) -> Bool {
+    // Check string equality
+    s == "Hello, World!"
+}
+
+pub fn is_empty_string(s: String) -> Bool {
+    s == ""
+}
+
+fn main() -> String {
+    let greeting = greet("World");
+    greeting
+}

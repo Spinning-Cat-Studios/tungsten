@@ -1,0 +1,19 @@
+/// Module system example.
+///
+/// Demonstrates pub mod for subfolders and use for imports.
+/// Structure:
+///   module_example/
+///     mod.tg          (this file — entry point)
+///     math/
+///       mod.tg        (declares sub-modules)
+///       ops.tg        (add, double implementations)
+///     greet.tg        (uses math to compute a result)
+
+pub mod math;
+pub mod greet;
+
+use greet::answer;
+
+fn main() -> Nat {
+    answer()
+}

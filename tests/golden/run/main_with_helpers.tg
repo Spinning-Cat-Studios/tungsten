@@ -1,0 +1,15 @@
+// Test run pipeline with helper functions
+// Verifies that eval environment properly includes helper definitions
+
+pub fn double(n: Nat) -> Nat {
+    n + n
+}
+
+pub fn add_three(n: Nat) -> Nat {
+    n + 3
+}
+
+pub fn main() -> Nat {
+    // 5 + 5 = 10, then 10 + 3 = 13
+    add_three(double(5))
+}

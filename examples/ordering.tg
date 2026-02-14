@@ -1,0 +1,40 @@
+// Three-way comparison result
+pub type Ordering = Less | Equal | Greater
+
+// Compare two natural numbers
+pub fn compare(a: Nat, b: Nat) -> Ordering {
+    if a < b {
+        Less
+    } else if a == b {
+        Equal
+    } else {
+        Greater
+    }
+}
+
+// Check if ordering is "less"
+pub fn is_less(ord: Ordering) -> Bool {
+    match ord {
+        Less() => true,
+        Equal() => false,
+        Greater() => false,
+    }
+}
+
+// Check if ordering is "equal"
+pub fn is_equal(ord: Ordering) -> Bool {
+    match ord {
+        Less() => false,
+        Equal() => true,
+        Greater() => false,
+    }
+}
+
+fn main() -> Bool {
+    let cmp1 = compare(3, 5);   // Less
+    let cmp2 = compare(5, 5);   // Equal
+    let cmp3 = compare(7, 5);   // Greater
+    
+    // is_less(compare(3, 5)) => true
+    is_less(cmp1)
+}

@@ -1,0 +1,229 @@
+// src/compiler/elab/error/kinds.tg
+// Error kinds for the elaborator.
+//
+// This module defines ElabErrorKind, the enum of all error types,
+// along with functions to get error codes and messages.
+
+use lexer::span::Span;
+use elab::ffi::{TypeHandle, INVALID_HANDLE};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{nat_to_string};
+
+// ===========================================================================
+// ERROR KINDS
+// ===========================================================================
+
+/// Error kinds for elaboration.
+/// Each variant carries relevant contextual data.
+///
+/// Error code ranges:
+/// - E0001-E0099: Type errors
+/// - E0100-E0199: Name resolution errors
+/// - E0200-E0299: Item/definition errors
+/// - E0300-E0399: Pattern matching errors
+/// - E0400-E0499: Proof errors
+/// - E0500-E0599: Reference/mutability errors
+/// - E0600-E0699: Entry point errors
+/// - E0900-E0999: Other/internal errors
+pub type ElabErrorKind =
+    // Type errors (E0001-E0099)
+    | ErrTypeMismatch(TypeHandle, TypeHandle)       // (expected, actual)
+    | ErrArityMismatch(Nat, Nat)                    // (expected, actual)
+    | ErrNotAFunction(TypeHandle)                   // Type that was expected to be function
+    | ErrNotAType(String)                           // Name that was expected to be a type
+    | ErrNotAnAdt(TypeHandle)                       // Type that was expected to be ADT
+    | ErrNotASum(TypeHandle)                        // Type that was expected to be sum
+    | ErrNotAPair(TypeHandle)                       // Type that was expected to be pair
+    | ErrCannotInfer(String)                        // What couldn't be inferred
+    
+    // Name resolution errors (E0100-E0199)
+    | ErrUnresolvedType(String)                     // Type name not found
+    | ErrUnresolvedValue(String)                    // Value name not found
+    | ErrUnresolvedModule(String)                   // Module not found
+    | ErrDuplicateDef(String)                       // Name already defined
+    | ErrDuplicateImport(String, Span, Span, String, String)  // (name, first_span, second_span, first_module, second_module)
+    | ErrPrivateAccess(String, String, String)      // (item_name, defined_in, accessed_from)
+    | ErrAmbiguousName(String, List<String>)        // Name with multiple candidates
+    
+    // Item/definition errors (E0200-E0299)
+    | ErrMissingReturnType(String)                  // Function missing return type annotation
+    | ErrInvalidExtern(String)                      // Extern function error
+    | ErrImportNotFound(String)                     // Import path not found
+    | ErrGlobImportEmpty(String)                    // Glob import found nothing
+    | ErrCyclicDependency(List<String>)             // Cycle in type definitions
+    | ErrInvalidVisibility(String)                  // pub on invalid item
+    | ErrMissingBody(String)                        // Function/theorem without body
+    
+    // Pattern matching errors (E0300-E0399)
+    | ErrInexhaustiveMatch(List<String>)            // Missing patterns
+    | ErrUnreachablePattern                         // Pattern can never match
+    | ErrConstructorNotFound(String, String)        // (constructor, type)
+    | ErrDuplicateField(String)                     // Field name repeated
+    | ErrMissingField(String)                       // Required field missing
+    | ErrExtraField(String)                         // Unexpected field
+    | ErrMultiArmMatch(Nat)                         // Match with too many arms (>2)
+    
+    // Proof errors (E0400-E0499)
+    | ErrProofRequired(String)                      // Expected proof term
+    | ErrSorryInProd                                // sorry used in production
+    | ErrInvalidRefl(TypeHandle, TypeHandle)        // refl on non-equal types
+    
+    // Reference/mutability errors (E0500-E0599)
+    | ErrRefInPureContext                           // ref in pure code
+    | ErrCannotMutate(String)                       // Trying to mutate immutable
+    
+    // Expression errors (E0600-E0699)
+    | ErrNoReturnContext                            // return outside function
+    | ErrNoMainFunction                             // No main function found
+    | ErrInvalidMainSig(TypeHandle)                 // main has wrong signature
+    
+    // Other errors (E0900-E0999)
+    | ErrRecursionLimitExceeded(Nat)                // Hit recursion limit
+    | ErrPhase1Violation(String)                    // Violation of phase 1 rules
+    | ErrNotImplemented(String)                     // Feature not yet implemented
+    | ErrOther(String)                              // Catch-all for misc errors
+
+// ===========================================================================
+// ERROR CODES
+// ===========================================================================
+
+/// Get the error code for an error kind.
+pub fn error_kind_code(kind: ElabErrorKind) -> String {
+    match kind {
+        // Type errors (E0001-E0099)
+        ErrTypeMismatch(_, _) => "E0001",
+        ErrArityMismatch(_, _) => "E0002",
+        ErrNotAFunction(_) => "E0003",
+        ErrNotAType(_) => "E0004",
+        ErrNotAnAdt(_) => "E0005",
+        ErrNotASum(_) => "E0006",
+        ErrNotAPair(_) => "E0007",
+        ErrCannotInfer(_) => "E0008",
+        
+        // Name resolution errors (E0100-E0199)
+        ErrUnresolvedType(_) => "E0100",
+        ErrUnresolvedValue(_) => "E0101",
+        ErrUnresolvedModule(_) => "E0102",
+        ErrDuplicateDef(_) => "E0103",
+        ErrDuplicateImport(_, _, _, _, _) => "E0106",
+        ErrPrivateAccess(_, _, _) => "E0104",
+        ErrAmbiguousName(_, _) => "E0105",
+        
+        // Item/definition errors (E0200-E0299)
+        ErrMissingReturnType(_) => "E0200",
+        ErrInvalidExtern(_) => "E0201",
+        ErrImportNotFound(_) => "E0202",
+        ErrGlobImportEmpty(_) => "E0203",
+        ErrCyclicDependency(_) => "E0204",
+        ErrInvalidVisibility(_) => "E0205",
+        ErrMissingBody(_) => "E0206",
+        
+        // Pattern matching errors (E0300-E0399)
+        ErrInexhaustiveMatch(_) => "E0300",
+        ErrUnreachablePattern() => "E0301",
+        ErrConstructorNotFound(_, _) => "E0302",
+        ErrDuplicateField(_) => "E0303",
+        ErrMissingField(_) => "E0304",
+        ErrExtraField(_) => "E0305",
+        ErrMultiArmMatch(_) => "E0306",
+        
+        // Proof errors (E0400-E0499)
+        ErrProofRequired(_) => "E0400",
+        ErrSorryInProd() => "E0401",
+        ErrInvalidRefl(_, _) => "E0402",
+        
+        // Reference/mutability errors (E0500-E0599)
+        ErrRefInPureContext() => "E0500",
+        ErrCannotMutate(_) => "E0501",
+        
+        // Expression errors (E0600-E0699)
+        ErrNoReturnContext() => "E0600",
+        ErrNoMainFunction() => "E0601",
+        ErrInvalidMainSig(_) => "E0602",
+        
+        // Other errors (E0900-E0999)
+        ErrRecursionLimitExceeded(_) => "E0900",
+        ErrPhase1Violation(_) => "E0901",
+        ErrNotImplemented(_) => "E0902",
+        ErrOther(_) => "E0999"
+    }
+}
+
+// ===========================================================================
+// ERROR MESSAGES
+// ===========================================================================
+
+/// Get the base message for an error kind (without context).
+pub fn error_kind_message(kind: ElabErrorKind) -> String {
+    match kind {
+        // Type errors
+        ErrTypeMismatch(_, _) => "type mismatch",
+        ErrArityMismatch(expected, actual) => 
+            "arity mismatch: expected " ++ nat_to_string(expected) ++ 
+            " arguments, found " ++ nat_to_string(actual),
+        ErrNotAFunction(_) => "expected function type",
+        ErrNotAType(name) => "'" ++ name ++ "' is not a type",
+        ErrNotAnAdt(_) => "expected algebraic data type",
+        ErrNotASum(_) => "expected sum type",
+        ErrNotAPair(_) => "expected pair/tuple type",
+        ErrCannotInfer(what) => "cannot infer " ++ what,
+        
+        // Name resolution errors
+        ErrUnresolvedType(name) => "unresolved type: '" ++ name ++ "'",
+        ErrUnresolvedValue(name) => "unresolved name: '" ++ name ++ "'",
+        ErrUnresolvedModule(name) => "unresolved module: '" ++ name ++ "'",
+        ErrDuplicateDef(name) => "duplicate definition: '" ++ name ++ "'",
+        ErrDuplicateImport(name, _, _, first_module, second_module) =>
+            if first_module == second_module {
+                "the name `" ++ name ++ "` is imported multiple times"
+            } else {
+                "the name `" ++ name ++ "` is imported from both `" ++ first_module ++ "` and `" ++ second_module ++ "`"
+            },
+        ErrPrivateAccess(name, defined_in, accessed_from) =>
+            "type `" ++ name ++ "` is private (defined in `" ++ defined_in ++ "`) and cannot be accessed from `" ++ accessed_from ++ "`",
+        ErrAmbiguousName(name, _) => "ambiguous name: '" ++ name ++ "'",
+        
+        // Item/definition errors
+        ErrMissingReturnType(name) => "missing return type for function '" ++ name ++ "'",
+        ErrInvalidExtern(msg) => "invalid extern: " ++ msg,
+        ErrImportNotFound(path) => "import not found: '" ++ path ++ "'",
+        ErrGlobImportEmpty(path) => "glob import matched nothing: '" ++ path ++ "::*'",
+        ErrCyclicDependency(_) => "cyclic dependency in type definitions",
+        ErrInvalidVisibility(item) => "visibility modifier not allowed on " ++ item,
+        ErrMissingBody(name) => "missing body for '" ++ name ++ "'",
+        
+        // Pattern matching errors
+        ErrInexhaustiveMatch(_) => "non-exhaustive match",
+        ErrUnreachablePattern() => "unreachable pattern",
+        ErrConstructorNotFound(ctor, ty) => 
+            "constructor '" ++ ctor ++ "' not found in type '" ++ ty ++ "'",
+        ErrDuplicateField(name) => "duplicate field: '" ++ name ++ "'",
+        ErrMissingField(name) => "missing field: '" ++ name ++ "'",
+        ErrExtraField(name) => "unexpected field: '" ++ name ++ "'",
+        ErrMultiArmMatch(n) => 
+            "match with " ++ nat_to_string(n) ++ " arms not yet supported (max 2)",
+        
+        // Proof errors
+        ErrProofRequired(what) => "proof required for " ++ what,
+        ErrSorryInProd() => "'sorry' is not allowed in production code",
+        ErrInvalidRefl(_, _) => "refl requires both sides to be equal",
+        
+        // Reference/mutability errors
+        ErrRefInPureContext() => "reference operation in pure context",
+        ErrCannotMutate(name) => "cannot mutate '" ++ name ++ "'",
+        
+        // Expression errors
+        ErrNoReturnContext() => "'return' used outside of function",
+        ErrNoMainFunction() => "no 'main' function found",
+        ErrInvalidMainSig(_) => "main function has invalid signature",
+        
+        // Other errors
+        ErrRecursionLimitExceeded(limit) => 
+            "recursion limit exceeded (" ++ nat_to_string(limit) ++ ")",
+        ErrPhase1Violation(msg) => "phase 1 restriction: " ++ msg,
+        ErrNotImplemented(what) => "not yet implemented: " ++ what,
+        ErrOther(msg) => msg
+    }
+}
+
+

@@ -1,0 +1,160 @@
+// src/compiler/parser/exprs/records.tg
+// Record literal parsing.
+
+use lexer::token::{TokenKind, TokLBrace, TokRBrace, TokColon, TokComma, TokDotDotDot};
+use lexer::span::{Span, span_merge};
+use parser::error::{ParseError, parse_error_expected, parse_error_eof};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_check, cursor_check_ahead, cursor_check_ident,
+    cursor_is_eof, cursor_advance, cursor_expect, cursor_eat_ident, token_kind_name,
+    ParseResultToken, ParseOkToken, ParseErrToken,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new};
+use parser::ast::nodes::{Expr, ExprRecordLit, expr_span,
+    MaybeExpr, NoExpr, SomeExpr,
+    FieldInit};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use result::{ParseResultExpr, ParseOkExpr, ParseErrExpr, cursor_peek_span};
+use parser::exprs::postfix::parse_postfix;
+use pratt::parse_expr;
+
+// ===========================================================================
+// RECORD LITERAL DETECTION
+// ===========================================================================
+
+/// Check if current position starts a record literal.
+/// 
+/// Record literals start with:
+/// - `{ ident :` (field init)
+/// - `{ ... ` (spread)
+/// - `{ }` (empty record)
+pub fn is_record_literal_start(cur: Cursor) -> Bool {
+    // Must start with `{`
+    if cursor_check(cur, TokLBrace()) {
+        let cur2 = cursor_advance(cur);  // after `{`
+        
+        // Check for empty record: `{ }`
+        if cursor_check(cur2, TokRBrace()) {
+            true
+        }
+        // Check for spread: `{ ...`
+        else if cursor_check(cur2, TokDotDotDot()) {
+            true
+        }
+        // Check for field init: `{ ident :`
+        else if cursor_check_ident(cur2) {
+            cursor_check_ahead(cur2, TokColon())
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+// ===========================================================================
+// RECORD LITERAL
+// ===========================================================================
+
+/// Parse a record literal: `{ field: expr, ... }` or `{ ...spread, field: expr }`
+pub fn parse_record_literal(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    let cur2 = cursor_advance(cur);  // consume `{`
+    
+    // Check for spread at start: `{ ...spread, ... }`
+    if cursor_check(cur2, TokDotDotDot()) {
+        let cur3 = cursor_advance(cur2);  // consume `...`
+        // Parse spread expression (using postfix to avoid ambiguity)
+        match parse_postfix(cur3) {
+            ParseErrExpr(e) => ParseErrExpr(e),
+            ParseOkExpr(spread_expr, cur4) => {
+                // After spread, expect `,` or `}`
+                if cursor_check(cur4, TokRBrace()) {
+                    let cur5 = cursor_advance(cur4);
+                    let span = span_merge(start_span, cursor_peek_span(cur4));
+                    ParseOkExpr(ExprRecordLit(SomeExpr(spread_expr), Nil, span), cur5)
+                } else if cursor_check(cur4, TokComma()) {
+                    let cur5 = cursor_advance(cur4);
+                    parse_record_fields(cur5, start_span, SomeExpr(spread_expr), Nil)
+                } else {
+                    let found = match cursor_peek_kind(cur4) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    ParseErrExpr(parse_error_expected("',' or '}'", found, cursor_peek_span(cur4)))
+                }
+            }
+        }
+    } else {
+        // No spread, parse fields directly
+        parse_record_fields(cur2, start_span, NoExpr, Nil)
+    }
+}
+
+/// Parse record field initializations until `}`.
+fn parse_record_fields(cur: Cursor, start_span: Span, spread: MaybeExpr, acc: List<FieldInit>) -> ParseResultExpr {
+    // Check for closing brace
+    if cursor_check(cur, TokRBrace()) {
+        let cur2 = cursor_advance(cur);
+        let span = span_merge(start_span, cursor_peek_span(cur));
+        ParseOkExpr(ExprRecordLit(spread, list_reverse(acc), span), cur2)
+    } else if cursor_is_eof(cur) {
+        ParseErrExpr(parse_error_eof("'}'", cursor_peek_span(cur)))
+    } else {
+        // Parse field: `name: expr`
+        match cursor_eat_ident(cur) {
+            NoIdentResult() => {
+                let found = match cursor_peek_kind(cur) {
+                    None() => "end of file",
+                    Some(k) => token_kind_name(k)
+                };
+                ParseErrExpr(parse_error_expected("field name", found, cursor_peek_span(cur)))
+            },
+            SomeIdentResult(name, cur2) => {
+                let name_span = cursor_peek_span(cur);
+                match cursor_expect(cur2, TokColon()) {
+                    ParseErrToken(e) => ParseErrExpr(e),
+                    ParseOkToken(_, cur3) => {
+                        match parse_expr(cur3) {
+                            ParseErrExpr(e) => ParseErrExpr(e),
+                            ParseOkExpr(value, cur4) => {
+                                let field_span = span_merge(name_span, expr_span(value));
+                                let field: FieldInit = {
+                                    name: ident_new(name, name_span),
+                                    value: value,
+                                    span: field_span
+                                };
+                                let new_acc = Cons(field, acc);
+                                
+                                // Check for comma or closing brace
+                                if cursor_check(cur4, TokComma()) {
+                                    let cur5 = cursor_advance(cur4);
+                                    // Allow trailing comma
+                                    if cursor_check(cur5, TokRBrace()) {
+                                        let cur6 = cursor_advance(cur5);
+                                        let span = span_merge(start_span, cursor_peek_span(cur5));
+                                        ParseOkExpr(ExprRecordLit(spread, list_reverse(new_acc), span), cur6)
+                                    } else {
+                                        parse_record_fields(cur5, start_span, spread, new_acc)
+                                    }
+                                } else if cursor_check(cur4, TokRBrace()) {
+                                    let cur5 = cursor_advance(cur4);
+                                    let span = span_merge(start_span, cursor_peek_span(cur4));
+                                    ParseOkExpr(ExprRecordLit(spread, list_reverse(new_acc), span), cur5)
+                                } else {
+                                    let found = match cursor_peek_kind(cur4) {
+                                        None() => "end of file",
+                                        Some(k) => token_kind_name(k)
+                                    };
+                                    ParseErrExpr(parse_error_expected("',' or '}'", found, cursor_peek_span(cur4)))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

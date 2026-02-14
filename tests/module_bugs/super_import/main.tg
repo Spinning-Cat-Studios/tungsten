@@ -1,0 +1,11 @@
+// Test: Import from sibling via super (main entry point)
+// Bug #1: Cross-module type resolution
+//
+// utils/inner imports from types via super::super path.
+
+mod types;
+mod utils;
+
+fn main() -> Nat {
+    utils::run_test()
+}

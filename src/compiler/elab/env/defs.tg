@@ -1,0 +1,225 @@
+// src/compiler/elab/env/defs.tg
+// Type, value, and constructor definitions for the environment.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_get;
+use lexer::span::Span;
+use parser::ast::Visibility;
+use elab::ffi::TypeHandle;
+
+// ===========================================================================
+// RECORD FIELD INFO (for named field access)
+// ===========================================================================
+
+/// Information about a single record field.
+pub type RecordFieldInfo = { name: String, ty: TypeHandle, index: Nat }
+
+/// Create a new record field info.
+pub fn record_field_info_new(name: String, ty: TypeHandle, index: Nat) -> RecordFieldInfo {
+    { name: name, ty: ty, index: index }
+}
+
+/// Optional list of record fields.
+pub type MaybeRecordFields =
+    | NoRecordFields
+    | SomeRecordFields(List<RecordFieldInfo>)
+
+/// Look up a field by name in a record field list.
+pub fn record_field_lookup(fields: List<RecordFieldInfo>, name: String) -> MaybeRecordField {
+    match fields {
+        Nil() => NoRecordField,
+        Cons(field, rest) =>
+            if field.name == name {
+                SomeRecordField(field)
+            } else {
+                record_field_lookup(rest, name)
+            }
+    }
+}
+
+/// Optional single record field result.
+pub type MaybeRecordField =
+    | NoRecordField
+    | SomeRecordField(RecordFieldInfo)
+
+// ===========================================================================
+// TYPE DEFINITION
+// ===========================================================================
+
+/// Information about a registered type.
+pub type TypeDefInfo = {
+    name: String,
+    arity: Nat,              // Number of type parameters
+    params: List<String>,    // Type parameter names (e.g., ["T"] for List<T>)
+    kind: TypeHandle,        // The kind of this type (Type, Type -> Type, etc.)
+    visibility: Visibility,
+    span: Span,
+    encoded_type: TypeHandle, // The Core type representation (for aliases)
+    record_fields: MaybeRecordFields  // Field info for records, NoRecordFields for sum types/aliases
+}
+
+/// Create a new type definition.
+pub fn type_def_info_new(
+    name: String,
+    arity: Nat,
+    params: List<String>,
+    kind: TypeHandle,
+    visibility: Visibility,
+    span: Span,
+    encoded_type: TypeHandle
+) -> TypeDefInfo {
+    { name: name, arity: arity, params: params, kind: kind, visibility: visibility, span: span, encoded_type: encoded_type, record_fields: NoRecordFields }
+}
+
+/// Create a new type definition with record fields.
+pub fn type_def_info_with_fields(
+    name: String,
+    arity: Nat,
+    params: List<String>,
+    kind: TypeHandle,
+    visibility: Visibility,
+    span: Span,
+    encoded_type: TypeHandle,
+    fields: List<RecordFieldInfo>
+) -> TypeDefInfo {
+    { name: name, arity: arity, params: params, kind: kind, visibility: visibility, span: span, encoded_type: encoded_type, record_fields: SomeRecordFields(fields) }
+}
+
+/// Get type parameter name at index, or empty string if out of bounds.
+pub fn type_def_info_param_at(info: TypeDefInfo, index: Nat) -> String {
+    match list_get(info.params, index) {
+        Some(name) => name,
+        None() => ""
+    }
+}
+
+/// Optional type definition.
+pub type MaybeTypeDef =
+    | NoTypeDef
+    | SomeTypeDef(TypeDefInfo)
+
+/// Look up a type definition by name.
+pub fn type_def_list_lookup(list: List<TypeDefInfo>, name: String) -> MaybeTypeDef {
+    
+    match list {
+        Nil() => NoTypeDef,
+        Cons(def, rest) =>
+            if def.name == name {
+                SomeTypeDef(def)
+            } else {
+                type_def_list_lookup(rest, name)
+            }
+    }
+}
+
+// ===========================================================================
+// VALUE DEFINITION
+// ===========================================================================
+
+/// Information about a registered value (function, constant).
+pub type ValueDefInfo = {
+    name: String,
+    ty: TypeHandle,
+    visibility: Visibility,
+    span: Span
+}
+
+/// Create a new value definition.
+pub fn value_def_info_new(
+    name: String,
+    ty: TypeHandle,
+    visibility: Visibility,
+    span: Span
+) -> ValueDefInfo {
+    { name: name, ty: ty, visibility: visibility, span: span }
+}
+
+/// Optional value definition.
+pub type MaybeValueDef =
+    | NoValueDef
+    | SomeValueDef(ValueDefInfo)
+
+/// Look up a value definition by name.
+pub fn value_def_list_lookup(list: List<ValueDefInfo>, name: String) -> MaybeValueDef {
+    
+    match list {
+        Nil() => NoValueDef,
+        Cons(def, rest) =>
+            if def.name == name {
+                SomeValueDef(def)
+            } else {
+                value_def_list_lookup(rest, name)
+            }
+    }
+}
+
+// ===========================================================================
+// CONSTRUCTOR INFO
+// ===========================================================================
+
+/// Information about a constructor.
+pub type ConstructorInfo = {
+    name: String,
+    parent_type: String,     // Name of the parent ADT
+    index: Nat,              // Constructor index (0, 1, 2, ...)
+    arity: Nat,              // Number of fields
+    field_types: TypeHandle, // Product type of fields (or Unit for nullary)
+    result_type: TypeHandle, // The fully applied ADT type
+    visibility: Visibility,
+    span: Span
+}
+
+/// Create a new constructor info.
+pub fn constructor_info_new(
+    name: String,
+    parent_type: String,
+    index: Nat,
+    arity: Nat,
+    field_types: TypeHandle,
+    result_type: TypeHandle,
+    visibility: Visibility,
+    span: Span
+) -> ConstructorInfo {
+    {
+        name: name,
+        parent_type: parent_type,
+        index: index,
+        arity: arity,
+        field_types: field_types,
+        result_type: result_type,
+        visibility: visibility,
+        span: span
+    }
+}
+
+/// Optional constructor info.
+pub type MaybeConstructor =
+    | NoConstructor
+    | SomeConstructor(ConstructorInfo)
+
+/// Look up a constructor by name.
+pub fn constructor_list_lookup(list: List<ConstructorInfo>, name: String) -> MaybeConstructor {
+    match list {
+        Nil() => NoConstructor,
+        Cons(info, rest) =>
+            if info.name == name {
+                SomeConstructor(info)
+            } else {
+                constructor_list_lookup(rest, name)
+            }
+    }
+}
+
+/// Count constructors belonging to a specific ADT.
+pub fn constructor_list_count_for_type(list: List<ConstructorInfo>, parent_type: String) -> Nat {
+    match list {
+        Nil() => 0,
+        Cons(info, rest) =>
+            let rest_count = constructor_list_count_for_type(rest, parent_type);
+            if info.parent_type == parent_type {
+                1 + rest_count
+            } else {
+                rest_count
+            }
+    }
+}

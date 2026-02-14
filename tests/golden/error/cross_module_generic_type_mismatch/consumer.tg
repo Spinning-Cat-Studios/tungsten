@@ -1,0 +1,8 @@
+// Consumer: tries to pass List<Nat> where List<String> is expected
+
+use list::{List, Nil, Cons, process_strings};
+
+pub fn test_type_mismatch() -> Nat {
+    let nums: List<Nat> = Cons(42, Nil);
+    process_strings(nums)  // Error: expected List<String>, found List<Nat>
+}

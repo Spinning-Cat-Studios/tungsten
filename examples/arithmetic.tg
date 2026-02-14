@@ -1,0 +1,16 @@
+// Arithmetic examples
+
+// Simple constant
+fn forty_two() -> Nat {
+    42
+}
+
+// Identity function
+fn id(x: Nat) -> Nat {
+    x
+}
+
+fn main() -> Nat {
+    // 20 + 20 + 2
+    20 + 20 + 2
+}

@@ -1,0 +1,12 @@
+// Test: Use statement near whitespace and comments (main entry point)
+// Bug #1: Cross-module type resolution (span heuristic killer)
+//
+// Tests that use statements work correctly even with lots of
+// surrounding whitespace and comments.
+
+mod helper;
+mod consumer;
+
+fn main() -> Nat {
+    consumer::test()  // Expected: 42
+}

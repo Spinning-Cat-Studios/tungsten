@@ -1,0 +1,49 @@
+// Constructor type inference example
+// Demonstrates that constructors infer their type parameters from context
+
+pub enum Option<T> {
+    None,
+    Some(T)
+}
+
+pub enum Result<T, E> {
+    Ok(T),
+    Err(E)
+}
+
+pub enum List<T> {
+    Nil,
+    Cons(T, List<T>)
+}
+
+// The compiler infers T = Nat for None based on the return type
+pub fn get_none() -> Option<Nat> {
+    None  // No need to write None::<Nat>
+}
+
+// The compiler infers T = Nat for Some based on the argument
+pub fn wrap_nat(n: Nat) -> Option<Nat> {
+    Some(n)  // T inferred from n: Nat
+}
+
+// Works with multiple type parameters too
+pub fn ok_value(x: Nat) -> Result<Nat, String> {
+    Ok(x)  // T = Nat, E = String inferred from return type
+}
+
+pub fn err_message(msg: String) -> Result<Nat, String> {
+    Err(msg)  // T = Nat, E = String inferred from return type
+}
+
+// Works with recursive types
+pub fn singleton(x: Nat) -> List<Nat> {
+    Cons(x, Nil)  // Both Cons and Nil get T = Nat
+}
+
+fn main() -> Bool {
+    let opt = get_none();
+    let wrapped = wrap_nat(42);
+    let result = ok_value(100);
+    let list = singleton(1);
+    true
+}

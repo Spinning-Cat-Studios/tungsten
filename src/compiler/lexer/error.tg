@@ -1,0 +1,98 @@
+// src/compiler/lexer/error.tg
+// Lexer error types for the Tungsten compiler.
+
+use lexer::span::Span;
+
+// Record type for lexer errors
+pub type LexError = { message: String, span: Span }
+
+pub fn lex_error_new(message: String, span: Span) -> LexError {
+    { message: message, span: span }
+}
+
+pub fn lex_error_message(e: LexError) -> String {
+    e.message
+}
+
+pub fn lex_error_span(e: LexError) -> Span {
+    e.span
+}
+
+pub fn lex_error_at(message: String, pos: Nat, file: String) -> LexError {
+    lex_error_new(message, span_new(pos, pos, file))
+}
+
+pub type LexErrors =
+    | NoLexErrors
+    | ConsLexError(LexError, LexErrors)
+
+// Backward compatibility aliases
+pub fn NoErrors() -> LexErrors { NoLexErrors }
+pub fn ConsError(err: LexError, errs: LexErrors) -> LexErrors { ConsLexError(err, errs) }
+
+pub fn errors_empty() -> LexErrors { NoLexErrors }
+
+pub fn errors_push(err: LexError, errs: LexErrors) -> LexErrors {
+    ConsLexError(err, errs)
+}
+
+pub fn has_errors(errs: LexErrors) -> Bool {
+    match errs {
+        NoLexErrors() => {
+            false
+        },
+        ConsLexError(_, _) => {
+            true
+        }
+    }
+}
+
+pub fn error_count(errs: LexErrors) -> Nat {
+    match errs {
+        NoLexErrors() => 0,
+        ConsLexError(_, rest) => 1 + error_count(rest)
+    }
+}
+
+pub fn errors_reverse(errs: LexErrors) -> LexErrors {
+    errors_reverse_acc(errs, NoLexErrors)
+}
+
+fn errors_reverse_acc(errs: LexErrors, acc: LexErrors) -> LexErrors {
+    match errs {
+        NoLexErrors() => acc,
+        ConsLexError(e, rest) => errors_reverse_acc(rest, ConsLexError(e, acc))
+    }
+}
+
+pub fn err_unexpected_char(ch: Nat, pos: Nat, file: String) -> LexError {
+    lex_error_at("unexpected character", pos, file)
+}
+
+pub fn err_unterminated_string(start: Nat, file: String) -> LexError {
+    lex_error_at("unterminated string literal", start, file)
+}
+
+pub fn err_unterminated_char(start: Nat, file: String) -> LexError {
+    lex_error_at("unterminated character literal", start, file)
+}
+
+pub fn err_unterminated_block_comment(start: Nat, file: String) -> LexError {
+    lex_error_at("unterminated block comment", start, file)
+}
+
+pub fn err_invalid_number(text: String, pos: Nat, file: String) -> LexError {
+    lex_error_new("invalid number literal: " ++ text, span_new(pos, pos, file))
+}
+
+pub fn err_empty_char_literal(start: Nat, file: String) -> LexError {
+    lex_error_at("empty character literal", start, file)
+}
+
+pub fn err_invalid_escape(ch: Nat, pos: Nat, file: String) -> LexError {
+    lex_error_at("invalid escape sequence", pos, file)
+}
+
+pub fn err_reserved_keyword(kw: String, pos: Nat, len: Nat, file: String) -> LexError {
+    lex_error_new("`" ++ kw ++ "` is a reserved keyword", span_new(pos, pos + len, file))
+}

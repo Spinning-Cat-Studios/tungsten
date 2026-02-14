@@ -1,0 +1,147 @@
+// Self-Parse Test Driver
+// ======================
+// This module drives self-parse verification for the Tungsten parser.
+//
+// STATUS: Skeleton - requires Phase 3D (Driver) to execute
+//
+// When Phase 3D is complete, this module can be compiled and executed
+// to verify that the self-hosted parser can parse all Tungsten source files.
+
+// Imports will be enabled when the module system supports them
+// use crate::compiler::parser::lib::{parse_source, file_parse_ok}
+// use crate::compiler::parser::error::{format_parse_errors}
+// use crate::compiler::lexer::lib::{tokenize_no_trivia}
+
+// ============================================================================
+// Result tracking
+// ============================================================================
+
+type TestResult = {
+    name: String,
+    passed: Bool,
+    message: String,
+}
+
+type TestResultList =
+    | TestResultNil
+    | TestResultCons(TestResult, TestResultList)
+
+fn test_result_passed(name: String) -> TestResult {
+    { name: name, passed: true, message: "" }
+}
+
+fn test_result_failed(name: String, message: String) -> TestResult {
+    { name: name, passed: false, message: message }
+}
+
+// ============================================================================
+// Test helpers
+// ============================================================================
+
+// Test that a source string parses without errors
+// Uncomment when imports are available:
+//
+// pub fn test_parse_succeeds(source: String, name: String) -> TestResult {
+//     let result = parse_source(source, name);
+//     if file_parse_ok(result) {
+//         test_result_passed(name)
+//     } else {
+//         test_result_failed(name, format_parse_errors(result.errors))
+//     }
+// }
+
+// Test that a source string fails to parse
+// pub fn test_parse_fails(source: String, name: String) -> TestResult {
+//     let result = parse_source(source, name);
+//     if file_parse_ok(result) {
+//         test_result_failed(name, "Expected parse error but parsing succeeded")
+//     } else {
+//         test_result_passed(name)
+//     }
+// }
+
+// ============================================================================
+// Test runner
+// ============================================================================
+
+fn count_passed(results: TestResultList) -> Nat {
+    match results {
+        TestResultNil() => 0,
+        TestResultCons(r, rest) => {
+            let n = count_passed(rest);
+            if r.passed { n + 1 } else { n }
+        }
+    }
+}
+
+fn count_failed(results: TestResultList) -> Nat {
+    match results {
+        TestResultNil() => 0,
+        TestResultCons(r, rest) => {
+            let n = count_failed(rest);
+            if r.passed { n } else { n + 1 }
+        }
+    }
+}
+
+fn count_total(results: TestResultList) -> Nat {
+    match results {
+        TestResultNil() => 0,
+        TestResultCons(_, rest) => 1 + count_total(rest),
+    }
+}
+
+// ============================================================================
+// Main entry point (Phase 3D)
+// ============================================================================
+
+// Entry point for self-test runner
+// This will be the main function when compiled as an executable
+//
+// pub fn main() -> Nat {
+//     // Collect test results
+//     let results = run_all_tests();
+//     
+//     // Print summary
+//     let total = count_total(results);
+//     let passed = count_passed(results);
+//     let failed = count_failed(results);
+//     
+//     print("=== Self-Parse Test Results ===");
+//     print("Total:  " ++ nat_to_string(total));
+//     print("Passed: " ++ nat_to_string(passed));
+//     print("Failed: " ++ nat_to_string(failed));
+//     
+//     if failed == 0 {
+//         print("✅ All self-parse tests passed");
+//         0
+//     } else {
+//         print("❌ Self-parse tests failed");
+//         print_failures(results);
+//         1
+//     }
+// }
+
+// ============================================================================
+// Test suite
+// ============================================================================
+
+// Run all parser tests
+// fn run_all_tests() -> TestResultList {
+//     // Parser source files (would be generated or hardcoded)
+//     let parser_files = [
+//         "src/compiler/parser/mod.tg",
+//         "src/compiler/parser/cursor.tg",
+//         "src/compiler/parser/error.tg",
+//         "src/compiler/parser/lib.tg",
+//         "src/compiler/parser/types.tg",
+//         "src/compiler/parser/patterns.tg",
+//         // ... etc
+//     ];
+//     
+//     // For each file: read contents, parse, check for errors
+//     test_files(parser_files)
+// }
+
+// Placeholder until Phase 3D
+fn placeholder() -> Nat { 0 }

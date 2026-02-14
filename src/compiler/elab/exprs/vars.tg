@@ -1,0 +1,372 @@
+// src/compiler/elab/exprs/vars.tg
+// Variable and path elaboration.
+// Produces both Core terms (TermHandle) and CodegenIR in lockstep.
+
+use lexer::span::Span;
+use parser::ast::{Path, path_span};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_var, tg_term_global, tg_term_unit, tg_term_inl, tg_term_inr,
+    tg_term_fold, tg_term_abs, tg_term_pair,
+    tg_type_sum, tg_type_arrow, tg_type_mu, tg_type_forall,
+    tg_type_is_mu, tg_type_get_mu_body, tg_type_get_mu_var,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_substitute,
+    tg_string_to_cstr
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::env::{
+    Env, env_resolve_value_path, env_count_constructors, env_lookup_type_def,
+    ValuePathResult, ValuePathOk, ValuePathErr,
+    ResolvedValue, ResolvedLocal, ResolvedGlobal, ResolvedConstructor,
+    ConstructorInfo,
+    MaybeTypeDef, SomeTypeDef, NoTypeDef
+};
+use elab::exprs::result::{ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error};
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CIRVar, CIRGlobal, CIRUnit, CIRLambda, CIRInl, CIRInr, CIRFold,
+    CTUnit, CTSum, CTArrow, CTMu,
+    cir_var, cir_global, cir_lambda, cir_inl, cir_inr, cir_fold,
+    ct_unit, ct_sum, ct_arrow, ct_mu
+};
+
+// ===========================================================================
+// VARIABLE ELABORATION
+// ===========================================================================
+
+/// Synthesize a path (variable lookup).
+pub fn synth_path(env: Env, path: Path) -> ElabExprResult {
+    let span = path_span(path);
+    let result = env_resolve_value_path(env, path);
+    match result {
+        ValuePathOk(resolved) => {
+            match resolved {
+                ResolvedLocal(index, ty, name) => {
+                    // Local variable - use de Bruijn index for Core, name for CIR
+                    let term = tg_term_var(index);
+                    let cir = CIRVar(name);
+                    ElabExprOk(env, term, ty, cir)
+                },
+                ResolvedGlobal(name, ty) => {
+                    // Global definition - use global reference
+                    let term = tg_term_global(tg_string_to_cstr(name));
+                    let cir = CIRGlobal(name);
+                    ElabExprOk(env, term, ty, cir)
+                },
+                ResolvedConstructor(info) => {
+                    // Constructor elaboration
+                    synth_constructor(env, info, span)
+                }
+            }
+        },
+        ValuePathErr(err) => {
+            ElabExprErr(elab_expr_error(err.message, err.span))
+        }
+    }
+}
+
+// ===========================================================================
+// CONSTRUCTOR ELABORATION
+// ===========================================================================
+
+/// Synthesize a constructor reference.
+/// - Nullary constructors become injected Unit values
+/// - N-ary constructors become curried lambdas
+fn synth_constructor(env: Env, info: ConstructorInfo, span: Span) -> ElabExprResult {
+    let total = env_count_constructors(env, info.parent_type);
+    
+    if info.arity == 0 {
+        // Nullary constructor: build Unit, inject, and fold
+        synth_nullary_constructor(env, info, total, span)
+    } else {
+        // N-ary constructor: build a lambda that constructs the value
+        synth_nary_constructor(env, info, total, span)
+    }
+}
+
+/// Synthesize a nullary constructor (no fields).
+/// For generic ADTs, wraps result in foralls: forall T. Option<T>
+fn synth_nullary_constructor(
+    env: Env,
+    info: ConstructorInfo,
+    total: Nat,
+    span: Span
+) -> ElabExprResult {
+    // Value is Unit for both Core and CIR
+    let value = tg_term_unit();
+    let cir_value = CIRUnit;
+    
+    // Get the ADT type (result_type is the full ADT type)
+    let adt_type = info.result_type;
+    let cir_adt_type = ct_unit();  // TODO: Get actual CIR type from info
+    
+    // Inject into the sum type
+    let injected = build_injection(value, info.index, total, adt_type);
+    let cir_injected = build_cir_injection(cir_value, info.index, total, cir_adt_type);
+    
+    // Fold if recursive
+    let (term, cir) = if tg_type_is_mu(adt_type) {
+        (tg_term_fold(adt_type, injected), CIRFold(cir_adt_type, cir_injected))
+    } else {
+        (injected, cir_injected)
+    };
+    
+    // Look up parent type to get type parameters and wrap in foralls
+    let final_type = match env_lookup_type_def(env, info.parent_type) {
+        SomeTypeDef(type_info) => {
+            // Wrap in foralls for each type parameter
+            wrap_type_in_foralls(adt_type, type_info.params)
+        },
+        NoTypeDef() => adt_type
+    };
+    
+    ElabExprOk(env, term, final_type, cir)
+}
+
+/// Synthesize an n-ary constructor (has fields).
+/// This builds a curried lambda: λx1. λx2. ... inject(x1, x2, ...)
+/// For generic ADTs, wraps in foralls: forall T. T -> Option<T>
+fn synth_nary_constructor(
+    env: Env,
+    info: ConstructorInfo,
+    total: Nat,
+    span: Span
+) -> ElabExprResult {
+    // The constructor type is: field1 -> field2 -> ... -> ADT
+    // We build: λarg. inject(arg) for single field
+    // Or: λa1. λa2. ... inject(pair(a1, pair(a2, ...))) for multiple fields
+    
+    // Build the constructor function type: fields -> ADT
+    let ctor_type = build_constructor_type(info.field_types, info.arity, info.result_type);
+    
+    // Look up parent type to get type parameters
+    let final_type = match env_lookup_type_def(env, info.parent_type) {
+        SomeTypeDef(type_info) => {
+            // Wrap in foralls for each type parameter (in reverse order)
+            wrap_type_in_foralls(ctor_type, type_info.params)
+        },
+        NoTypeDef() => {
+            // Parent type not found - shouldn't happen, just use ctor_type
+            ctor_type
+        }
+    };
+    
+    // Build the lambda term that creates the constructor
+    let term = build_constructor_lambda(info, total);
+    
+    // Build CIR version
+    let cir_adt_type = ct_unit();  // TODO: Get actual CIR type from info
+    let cir_field_type = ct_unit();  // TODO: Get actual CIR field type
+    let cir = build_cir_constructor_lambda(info, total, cir_adt_type, cir_field_type);
+    
+    ElabExprOk(env, term, final_type, cir)
+}
+
+/// Wrap a type in foralls for a list of type parameter names.
+/// Given params ["T", "U"] and type `T -> U -> Pair<T,U>`,
+/// produces `forall T. forall U. T -> U -> Pair<T,U>`.
+fn wrap_type_in_foralls(ty: TypeHandle, params: List<String>) -> TypeHandle {
+    match params {
+        Nil() => ty,
+        Cons(param, rest) => {
+            let inner = wrap_type_in_foralls(ty, rest);
+            tg_type_forall(tg_string_to_cstr(param), inner)
+        }
+    }
+}
+
+/// Build injection chain for constructor at given index.
+/// For n constructors with right-nested sums A + (B + (C + D)):
+///   index 0: inl(value)
+///   index 1: inr(inl(value))
+///   index 2: inr(inr(inl(value)))
+///   index 3: inr(inr(inr(value)))  // last, no inl
+fn build_injection(
+    value: TermHandle,
+    index: Nat,
+    total: Nat,
+    adt_type: TypeHandle
+) -> TermHandle {
+    if total <= 1 {
+        // Single constructor: no injection needed
+        value
+    } else {
+        // Get the sum type (unfold μ if needed)
+        let sum_type = if tg_type_is_mu(adt_type) {
+            tg_type_get_mu_body(adt_type)
+        } else {
+            adt_type
+        };
+        
+        // Navigate to the target depth in the sum type and inject
+        build_injection_at_depth(value, index, total, sum_type)
+    }
+}
+
+/// Build injection at specific depth in nested sum.
+fn build_injection_at_depth(
+    value: TermHandle,
+    index: Nat,
+    remaining: Nat,
+    sum_type: TypeHandle
+) -> TermHandle {
+    if remaining <= 1 {
+        // At the bottom, just return value
+        value
+    } else if index == 0 {
+        // First variant: inl
+        tg_term_inl(sum_type, value)
+    } else {
+        // Later variant: inr followed by recursive injection
+        // The inner sum type is the right component
+        let inner_inj = build_injection_at_depth(value, index - 1, remaining - 1, sum_type);
+        tg_term_inr(sum_type, inner_inj)
+    }
+}
+
+/// Build the function type for a constructor: field1 -> field2 -> ... -> ADT
+/// For multi-field constructors, this CURRIES the product type into
+/// a chain of arrow types.
+/// For recursive types, field types may contain TyVar references to the
+/// mu-bound variable (e.g., TyVar("List") in List's Cons). These must be
+/// substituted with the actual Mu type when building parameter types.
+fn build_constructor_type(
+    field_types: TypeHandle,
+    arity: Nat,
+    result_type: TypeHandle
+) -> TypeHandle {
+    if arity == 0 {
+        result_type
+    } else if arity == 1 {
+        // Single field: substitute mu self-ref and build arrow
+        let subst_field = substitute_mu_self_ref(field_types, result_type);
+        tg_type_arrow(subst_field, result_type)
+    } else {
+        // Multiple fields: curry the product type with mu self-ref substitution
+        product_to_curried_arrow(field_types, result_type)
+    }
+}
+
+/// Substitute mu self-references in a field type.
+/// When a field type contains TyVar("X") where "X" is the mu-bound variable
+/// of the enclosing recursive type, replace it with the actual Mu type.
+/// This is necessary because field types are expressed inside the Mu body,
+/// but constructor parameter types are outside it.
+fn substitute_mu_self_ref(field_ty: TypeHandle, result_type: TypeHandle) -> TypeHandle {
+    if tg_type_is_mu(result_type) {
+        let mu_var = tg_type_get_mu_var(result_type);
+        tg_type_substitute(field_ty, mu_var, result_type)
+    } else {
+        field_ty
+    }
+}
+
+/// Convert a right-nested product type into a curried arrow chain.
+/// Product(A, Product(B, C)) with result R becomes A -> B -> C -> R
+/// Also substitutes mu self-references in each field type.
+fn product_to_curried_arrow(product_ty: TypeHandle, result_type: TypeHandle) -> TypeHandle {
+    if tg_type_is_product(product_ty) {
+        let first = tg_type_get_product_left(product_ty);
+        let subst_first = substitute_mu_self_ref(first, result_type);
+        let rest = tg_type_get_product_right(product_ty);
+        tg_type_arrow(subst_first, product_to_curried_arrow(rest, result_type))
+    } else {
+        // Last field (not a product anymore)
+        let subst_last = substitute_mu_self_ref(product_ty, result_type);
+        tg_type_arrow(subst_last, result_type)
+    }
+}
+
+/// Build a lambda term for the constructor.
+/// This creates: λfields. inject(fields)
+fn build_constructor_lambda(info: ConstructorInfo, total: Nat) -> TermHandle {
+    // Create a lambda that takes the fields and injects
+    // For now, we create a simple lambda for single-argument constructors
+    // and rely on the field_types being a product for multi-arg ones
+    
+    let adt_type = info.result_type;
+    
+    // Variable referencing the lambda parameter (de Bruijn index 0)
+    let param_var = tg_term_var(0);
+    
+    // Build the injection
+    let injected = build_injection(param_var, info.index, total, adt_type);
+    
+    // Fold if recursive
+    let body = if tg_type_is_mu(adt_type) {
+        tg_term_fold(adt_type, injected)
+    } else {
+        injected
+    };
+    
+    // Wrap in lambda
+    tg_term_abs(tg_string_to_cstr("x"), info.field_types, body)
+}
+
+// ===========================================================================
+// CIR CONSTRUCTOR HELPERS
+// ===========================================================================
+
+/// Build CIR injection chain for constructor at given index.
+fn build_cir_injection(
+    value: CodegenIR,
+    index: Nat,
+    total: Nat,
+    adt_type: CodegenType
+) -> CodegenIR {
+    if total <= 1 {
+        // Single constructor: no injection needed
+        value
+    } else {
+        // Navigate to the target depth in the sum type and inject
+        build_cir_injection_at_depth(value, index, total, adt_type)
+    }
+}
+
+/// Build CIR injection at specific depth in nested sum.
+fn build_cir_injection_at_depth(
+    value: CodegenIR,
+    index: Nat,
+    remaining: Nat,
+    sum_type: CodegenType
+) -> CodegenIR {
+    if remaining <= 1 {
+        // At the bottom, just return value
+        value
+    } else if index == 0 {
+        // First variant: inl
+        CIRInl(value, sum_type)
+    } else {
+        // Later variant: inr followed by recursive injection
+        let inner_inj = build_cir_injection_at_depth(value, index - 1, remaining - 1, sum_type);
+        CIRInr(inner_inj, sum_type)
+    }
+}
+
+/// Build a CIR lambda term for the constructor.
+fn build_cir_constructor_lambda(
+    info: ConstructorInfo,
+    total: Nat,
+    adt_type: CodegenType,
+    field_type: CodegenType
+) -> CodegenIR {
+    // Create a lambda that takes the fields and injects
+    let param_name = "x";
+    
+    // Variable referencing the lambda parameter by name
+    let param_var = CIRVar(param_name);
+    
+    // Build the injection
+    let injected = build_cir_injection(param_var, info.index, total, adt_type);
+    
+    // Fold if the Core type is recursive (we check via FFI)
+    let body = if tg_type_is_mu(info.result_type) {
+        CIRFold(adt_type, injected)
+    } else {
+        injected
+    };
+    
+    // Wrap in lambda
+    CIRLambda(param_name, field_type, body)
+}

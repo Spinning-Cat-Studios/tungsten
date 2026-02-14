@@ -1,0 +1,53 @@
+// src/compiler/parser/mod.tg
+// Parser module for the Tungsten self-hosted compiler.
+
+// ---------------------------------------------------------------------------
+// SUBMODULE IMPORTS
+// ---------------------------------------------------------------------------
+
+pub mod option;
+pub mod error;
+pub mod cursor;
+pub mod ast;
+pub mod types;
+pub mod patterns;
+pub mod exprs;
+pub mod items;
+pub mod lib;
+
+// ---------------------------------------------------------------------------
+// PUBLIC API
+// ---------------------------------------------------------------------------
+
+// Main entry points (from lib.tg):
+// - parser::lib::parse_file(tokens, filename) -> FileParseResult
+// - parser::lib::parse_source(source, filename) -> FullParseResult
+// - parser::lib::parse_to_source_file(source, filename) -> (SourceFile, ParseErrors, LexErrors)
+//
+// Result checking:
+// - parser::lib::file_parse_ok(result) -> Bool
+// - parser::lib::full_parse_ok(result) -> Bool
+// - parser::lib::file_parse_error_count(result) -> Nat
+
+// Re-export main API for convenient access
+pub use lib::{
+    parse_file, parse_source, parse_to_source_file,
+    FileParseResult, FullParseResult,
+    file_parse_ok, full_parse_ok, file_parse_error_count,
+    file_parse_result_new, file_parse_result_items, file_parse_result_errors
+};
+
+// Re-export error types and formatting
+pub use error::{
+    ParseError, ParseErrors, NoParseErrors, ConsParseError,
+    parse_error_new, parse_error_expected, parse_error_eof,
+    parse_errors_empty, parse_errors_push, parse_error_count,
+    format_parse_error, format_parse_errors
+};
+
+// Types and functions are also accessed via module hierarchy.
+// E.g., parser::cursor::Cursor, parser::error::ParseError, parser::ast::Expr
+// Type parsing: parser::types::parse_type, parser::types::parse_path
+// Pattern parsing: parser::patterns::parse_pattern, parser::patterns::parse_pattern_atom
+// Expression parsing: parser::exprs::parse_expr, parser::exprs::parse_expr_prec
+// Item parsing: parser::items::parse_item, parser::items::parse_items

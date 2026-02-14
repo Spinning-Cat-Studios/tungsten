@@ -1,0 +1,6 @@
+// utils module - contains inner submodule
+pub mod inner;
+
+pub fn run_test() -> Nat {
+    inner::test()
+}

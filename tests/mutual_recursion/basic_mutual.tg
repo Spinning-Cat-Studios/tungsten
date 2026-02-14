@@ -1,0 +1,13 @@
+// Test: Basic mutual type recursion
+// Bug #2: Mutual type recursion support
+//
+// Two record types that reference each other.
+// Currently fails because types must be defined before use.
+
+type A = { b: B, value: Nat }
+type B = { a: A, value: Nat }
+
+fn main() -> Nat {
+    // Just test that types elaborate - no value construction needed
+    0
+}

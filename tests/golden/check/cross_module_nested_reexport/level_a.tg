@@ -1,0 +1,5 @@
+// Level A: Original definition of Result<T, E>
+
+pub type Result<T, E> =
+    | Ok(T)
+    | Err(E)

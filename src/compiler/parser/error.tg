@@ -1,0 +1,241 @@
+// src/compiler/parser/error.tg
+// Parser error types for the Tungsten compiler.
+//
+// Follows the same pattern as lexer/error.tg for consistency.
+//
+// Note: Span type is imported from lexer::span (available via module hierarchy)
+
+use lexer::span::Span;
+use driver::util::{nat_to_string, string_is_empty};
+use elab::error::{SourceInfo, offset_to_line_col};
+
+// ---------------------------------------------------------------------------
+// PARSE ERROR
+// ---------------------------------------------------------------------------
+
+/// A single parse error with location and context.
+pub type ParseError = {
+    message: String,
+    span: Span,
+    expected: String,    // What the parser expected (e.g., "identifier", "')'")
+    found: String        // What was actually found (e.g., "'{'", "end of file")
+}
+
+/// Create a new parse error with full context.
+pub fn parse_error_new(message: String, span: Span, expected: String, found: String) -> ParseError {
+    { message: message, span: span, expected: expected, found: found }
+}
+
+/// Create a simple parse error (when expected/found aren't needed).
+pub fn parse_error_simple(message: String, span: Span) -> ParseError {
+    { message: message, span: span, expected: "", found: "" }
+}
+
+/// Create an "expected X, found Y" error.
+pub fn parse_error_expected(expected: String, found: String, span: Span) -> ParseError {
+    {
+        message: "expected " ++ expected ++ ", found " ++ found,
+        span: span,
+        expected: expected,
+        found: found
+    }
+}
+
+/// Create an "unexpected token" error.
+pub fn parse_error_unexpected(found: String, span: Span) -> ParseError {
+    {
+        message: "unexpected " ++ found,
+        span: span,
+        expected: "",
+        found: found
+    }
+}
+
+/// Create an "unexpected end of file" error.
+pub fn parse_error_eof(expected: String, span: Span) -> ParseError {
+    {
+        message: "unexpected end of file, expected " ++ expected,
+        span: span,
+        expected: expected,
+        found: "end of file"
+    }
+}
+
+/// Create an "unexpected end of file" error (alternate name for compatibility).
+pub fn parse_error_unexpected_eof(span: Span) -> ParseError {
+    {
+        message: "unexpected end of file",
+        span: span,
+        expected: "",
+        found: "end of file"
+    }
+}
+
+// Accessors
+pub fn parse_error_message(e: ParseError) -> String { e.message }
+pub fn parse_error_span(e: ParseError) -> Span { e.span }
+pub fn parse_error_expected_str(e: ParseError) -> String { e.expected }
+pub fn parse_error_found_str(e: ParseError) -> String { e.found }
+
+// ---------------------------------------------------------------------------
+// PARSE ERRORS LIST
+// ---------------------------------------------------------------------------
+
+/// A linked list of parse errors (accumulated during parsing).
+pub type ParseErrors =
+    | NoParseErrors
+    | ConsParseError(ParseError, ParseErrors)
+
+/// Create an empty error list.
+pub fn parse_errors_empty() -> ParseErrors {
+    NoParseErrors
+}
+
+/// Add an error to the front of the list.
+pub fn parse_errors_push(err: ParseError, errs: ParseErrors) -> ParseErrors {
+    ConsParseError(err, errs)
+}
+
+/// Check if there are any errors.
+pub fn parse_has_errors(errs: ParseErrors) -> Bool {
+    match errs {
+        NoParseErrors() => {
+            false
+        },
+        ConsParseError(_, _) => {
+            true
+        }
+    }
+}
+
+/// Count the number of errors.
+pub fn parse_error_count(errs: ParseErrors) -> Nat {
+    match errs {
+        NoParseErrors() => 0,
+        ConsParseError(_, rest) => 1 + parse_error_count(rest)
+    }
+}
+
+/// Reverse the error list (to get errors in source order).
+pub fn parse_errors_reverse(errs: ParseErrors) -> ParseErrors {
+    parse_errors_reverse_acc(errs, NoParseErrors)
+}
+
+fn parse_errors_reverse_acc(errs: ParseErrors, acc: ParseErrors) -> ParseErrors {
+    match errs {
+        NoParseErrors() => acc,
+        ConsParseError(e, rest) => parse_errors_reverse_acc(rest, ConsParseError(e, acc))
+    }
+}
+
+/// Append two error lists.
+/// WARNING: This function is O(n) in the length of the first list.
+/// Acceptable here since error lists are typically small.
+pub fn parse_errors_append(a: ParseErrors, b: ParseErrors) -> ParseErrors {
+    match a {
+        NoParseErrors() => b,
+        ConsParseError(e, rest) => ConsParseError(e, parse_errors_append(rest, b))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CONVENIENCE ERROR CONSTRUCTORS
+// ---------------------------------------------------------------------------
+
+/// Create an "unexpected token" error with just the token name.
+pub fn parse_error_token(token_name: String, span: Span) -> ParseError {
+    {
+        message: "unexpected " ++ token_name,
+        span: span,
+        expected: "",
+        found: token_name
+    }
+}
+
+/// Create a custom error message without expected/found context.
+pub fn parse_error_msg(message: String, span: Span) -> ParseError {
+    {
+        message: message,
+        span: span,
+        expected: "",
+        found: ""
+    }
+}
+
+/// Create an error for an invalid token in a specific context.
+pub fn parse_error_invalid(context: String, found: String, span: Span) -> ParseError {
+    {
+        message: "invalid " ++ found ++ " in " ++ context,
+        span: span,
+        expected: "",
+        found: found
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ERROR HELPERS FOR COMMON PATTERNS
+// ---------------------------------------------------------------------------
+
+/// Create error when a required element is missing.
+pub fn parse_error_missing(element: String, span: Span) -> ParseError {
+    {
+        message: "missing " ++ element,
+        span: span,
+        expected: element,
+        found: ""
+    }
+}
+
+/// Create error when something appears where it shouldn't.
+pub fn parse_error_unexpected_here(what: String, context: String, span: Span) -> ParseError {
+    {
+        message: what ++ " not allowed " ++ context,
+        span: span,
+        expected: "",
+        found: what
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ERROR FORMATTING
+// ---------------------------------------------------------------------------
+
+/// Format a parse error for display.
+/// Returns: "filename:line:col: error: message"
+pub fn format_parse_error(err: ParseError, src: SourceInfo) -> String {
+    let loc = format_span_location(err.span, src);
+    loc ++ ": error: " ++ err.message
+}
+
+/// Format span as "filename:line:col".
+fn format_span_location(s: Span, src: SourceInfo) -> String {
+    let lc = offset_to_line_col(src, s.start);
+    s.file ++ ":" ++ nat_to_string(lc.line) ++ ":" ++ nat_to_string(lc.col)
+}
+
+/// Format all parse errors as a newline-separated string.
+pub fn format_parse_errors(errors: ParseErrors, src: SourceInfo) -> String {
+    format_parse_errors_acc(errors, src, "")
+}
+
+fn format_parse_errors_acc(errors: ParseErrors, src: SourceInfo, acc: String) -> String {
+    match errors {
+        NoParseErrors() => acc,
+        ConsParseError(err, rest) => {
+            let msg = format_parse_error(err, src);
+            let new_acc = if string_is_empty(acc) { msg } else { acc ++ "\n" ++ msg };
+            format_parse_errors_acc(rest, src, new_acc)
+        }
+    }
+}
+
+/// Get first error from list (if any).
+pub fn parse_errors_first(errors: ParseErrors) -> Option<ParseError> {
+    match errors {
+        NoParseErrors() => None(),
+        ConsParseError(e, _) => Some(e)
+    }
+}
+
+// Import Option for parse_errors_first
+use parser::option::{Option, None, Some};

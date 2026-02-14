@@ -1,0 +1,35 @@
+name: Stale
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  # Auto-close PRs during v1.0 (contributions open in v1.5)
+  stale:
+    name: Close Stale PRs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          # PRs: comment after 14 days, close after 7 more
+          days-before-stale: 14
+          days-before-close: 7
+          stale-pr-label: stale
+          stale-pr-message: >
+            Thanks for your interest in Tungsten! v1.0 isn't accepting PRs yet —
+            contributions will open in v1.5. Please open an issue to discuss your
+            idea instead. See [CONTRIBUTING.md](https://github.com/SpinningCatStudios/tungsten/blob/main/CONTRIBUTING.md) for details.
+            This PR will be closed in 7 days if there is no further activity.
+          close-pr-message: >
+            Closing this PR per the v1.0 contribution policy. Your idea is still
+            welcome as an issue — feel free to open one.
+          # Issues: leave alone (bug reports and questions are welcome)
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          # Don't close PRs marked for upstream (v1.5 contribution workflow)
+          exempt-pr-labels: upstream

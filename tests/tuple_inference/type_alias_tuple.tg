@@ -1,0 +1,23 @@
+// Test: Type alias expansion for tuple types
+// This tests whether type aliases like Entry = (String, Nat) are
+// correctly expanded during type inference for generics.
+
+type List<T> = | Nil | Cons(T, List<T>)
+type Entry = (String, Nat)
+
+fn make_entry(name: String, val: Nat) -> Entry {
+    (name, val)
+}
+
+fn prepend(entry: Entry, list: List<Entry>) -> List<Entry> {
+    Cons(entry, list)
+}
+
+fn main() -> Nat {
+    let e = make_entry("test", 42);
+    let list = prepend(e, Nil);
+    match list {
+        Nil() => 0,
+        Cons((_, v), _) => v
+    }
+}

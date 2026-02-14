@@ -1,0 +1,89 @@
+// src/compiler/elab/items/mod.tg
+// Item elaboration module.
+//
+// This module orchestrates the two-pass item elaboration algorithm:
+// - Pass 1 (Collection): Register types, process imports, collect value signatures
+// - Pass 2 (Elaboration): Elaborate item bodies to Core terms
+//
+// The main entry point is `elaborate_items`, which takes a source file
+// and produces an ElabResult containing all definitions and any errors.
+
+pub mod result;
+pub mod collect;
+pub mod elaborate;
+pub mod imports;
+
+pub use elab::items::result::*;
+pub use elab::items::collect::*;
+pub use elab::items::elaborate::*;
+pub use elab::items::imports::*;
+
+use parser::ast::{SourceFile, source_file_items, Item};
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// MAIN ENTRY POINT
+// ===========================================================================
+
+/// Elaborate all items in a source file.
+///
+/// This is the main entry point for item elaboration. It:
+/// 1. Runs the collection phase (6 sub-phases)
+/// 2. Runs the elaboration phase (body elaboration)
+/// 3. Returns the final result with definitions and errors
+pub fn elaborate_file(env: Env, file: SourceFile) -> ElabResult {
+    let items = source_file_items(file);
+    let result = elaborate_items(env, items);
+    result
+}
+
+/// Elaborate a list of items.
+///
+/// Two-pass algorithm:
+/// - Pass 1: Collection (types, imports, signatures)
+/// - Pass 2: Elaboration (function/theorem bodies)
+pub fn elaborate_items(env: Env, items: List<Item>) -> ElabResult {
+    let ctx = elab_context_new(env);
+    
+    // Pass 1: Collection
+    let collect_result = collect_items(ctx, items);
+    let ctx2 = collect_result_context(collect_result);
+    
+    // Pass 2: Elaboration
+    let (ctx3, defs) = elaborate_item_bodies(ctx2, items);
+    
+    // Build final result
+    let result = elab_result_new(defs, ctx3.errors);
+    result
+}
+
+/// Elaborate items starting from a fresh environment.
+pub fn elaborate_items_fresh(items: List<Item>) -> ElabResult {
+    let env = env_new();
+    elaborate_items(env, items)
+}
+
+/// Elaborate a single file with a fresh environment.
+pub fn elaborate_file_fresh(file: SourceFile) -> ElabResult {
+    let env = env_new();
+    elaborate_file(env, file)
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Check if elaboration was successful (no errors).
+pub fn elaboration_successful(result: ElabResult) -> Bool {
+    elab_result_ok(result)
+}
+
+/// Get the number of definitions produced.
+pub fn elaboration_def_count(result: ElabResult) -> Nat {
+    elab_result_def_count(result)
+}
+
+/// Get the number of errors encountered.
+pub fn elaboration_error_count(result: ElabResult) -> Nat {
+    elab_result_error_count(result)
+}

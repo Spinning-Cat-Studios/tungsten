@@ -1,0 +1,56 @@
+// Test tuple destructuring in let bindings
+// This tests the `let (a, b) = expr` syntax added in ADR 29.1.26
+
+fn make_pair() -> (Nat, Nat) {
+    (1, 2)
+}
+
+fn make_triple() -> (Nat, Nat, Nat) {
+    (10, 20, 30)
+}
+
+fn make_nested() -> (Nat, (Nat, Nat)) {
+    (100, (200, 300))
+}
+
+// Test simple pair destructuring
+fn test_simple() -> Nat {
+    let (a, b) = make_pair();
+    a + b  // 1 + 2 = 3
+}
+
+// Test triple destructuring
+fn test_triple() -> Nat {
+    let (x, y, z) = make_triple();
+    x + y + z  // 10 + 20 + 30 = 60
+}
+
+// Test nested tuple destructuring
+fn test_nested() -> Nat {
+    let (a, (b, c)) = make_nested();
+    a + b + c  // 100 + 200 + 300 = 600
+}
+
+// Test with wildcard
+fn test_wildcard() -> Nat {
+    let (_, b) = make_pair();
+    b  // 2
+}
+
+// Test let expression (not statement)
+fn test_let_expr() -> Nat {
+    let result = {
+        let (x, y) = make_pair();
+        x * y  // 1 * 2 = 2
+    };
+    result
+}
+
+fn main() -> Nat {
+    let r1 = test_simple();   // 3
+    let r2 = test_triple();   // 60
+    let r3 = test_nested();   // 600
+    let r4 = test_wildcard(); // 2
+    let r5 = test_let_expr(); // 2
+    r1 + r2 + r3 + r4 + r5    // 3 + 60 + 600 + 2 + 2 = 667
+}

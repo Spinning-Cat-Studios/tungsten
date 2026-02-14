@@ -1,0 +1,26 @@
+// Test case: Option<Point> where Point is a record type
+// The pattern variable `p` in `Some(p)` should have type Point
+// allowing field access p.x and p.y
+
+type Point = { x: Nat, y: Nat }
+type Option<T> = | None | Some(T)
+
+fn get_x(opt: Option<Point>) -> Nat {
+    match opt {
+        None() => 0,
+        Some(p) => p.x
+    }
+}
+
+fn get_y(opt: Option<Point>) -> Nat {
+    match opt {
+        None() => 0,
+        Some(p) => p.y
+    }
+}
+
+fn main() -> Nat {
+    let pt: Point = { x: 42, y: 10 };
+    let opt: Option<Point> = Some(pt);
+    get_x(opt)
+}

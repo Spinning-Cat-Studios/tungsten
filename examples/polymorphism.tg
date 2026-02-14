@@ -1,0 +1,48 @@
+// Polymorphism and generic function instantiation examples
+
+// Identity function - polymorphic
+pub fn id<T>(x: T) -> T { x }
+
+// Const function - ignores second argument
+pub fn const_fn<A, B>(x: A, y: B) -> A { x }
+
+// Apply a function to an argument
+pub fn apply<A, B>(f: A -> B, x: A) -> B { f(x) }
+
+// Flip argument order
+pub fn flip<A, B, C>(f: A -> B -> C, y: B, x: A) -> C { f(x, y) }
+
+// Compose two functions
+pub fn compose<A, B, C>(f: B -> C, g: A -> B, x: A) -> C { f(g(x)) }
+
+// Examples of generic function instantiation (no explicit type args needed)
+
+pub fn test_id_nat() -> Nat {
+    // T is inferred as Nat from the argument
+    id(42)
+}
+
+pub fn test_id_string() -> String {
+    // T is inferred as String from the argument  
+    id("hello")
+}
+
+pub fn test_const() -> Nat {
+    // A is inferred as Nat, B is inferred as String
+    const_fn(42, "ignored")
+}
+
+pub fn test_apply() -> Nat {
+    // A and B are inferred from the function and argument
+    let succ = |x: Nat| x + 1;
+    apply(succ, 5)
+}
+
+// Note: explicit type arguments (turbofish syntax) are not yet supported.
+// Use type inference instead:
+//   id::<Nat>(42)  -- not yet supported
+//   id(42)         -- works, T inferred as Nat
+
+fn main() -> Nat {
+    test_id_nat()
+}

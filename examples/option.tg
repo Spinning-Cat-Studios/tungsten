@@ -1,0 +1,19 @@
+// Option type - the classic nullable value pattern
+pub type Option<T> = None | Some(T)
+
+// Safely unwrap an option with a default
+pub fn unwrap_or(opt: Option<Nat>, default: Nat) -> Nat {
+    match opt {
+        None() => default,
+        Some(x) => x,
+    }
+}
+
+fn main() -> Nat {
+    let some_val = Some(42);
+    let none_val: Option<Nat> = None;
+    
+    // unwrap_or(Some(42), 0) => 42
+    // unwrap_or(None, 99) => 99
+    unwrap_or(some_val, 0)
+}

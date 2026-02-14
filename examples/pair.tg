@@ -1,0 +1,28 @@
+// Pair type - product of two values
+pub type Pair<A, B> = MkPair(A, B)
+
+// Extract first element
+pub fn fst(p: Pair<Nat, Bool>) -> Nat {
+    match p {
+        MkPair(a, b) => a,
+    }
+}
+
+// Extract second element  
+pub fn snd(p: Pair<Nat, Bool>) -> Bool {
+    match p {
+        MkPair(a, b) => b,
+    }
+}
+
+// Swap the elements
+pub fn swap(p: Pair<Nat, Bool>) -> Pair<Bool, Nat> {
+    match p {
+        MkPair(a, b) => MkPair(b, a),
+    }
+}
+
+fn main() -> Nat {
+    let p = MkPair(42, true);
+    fst(p)
+}

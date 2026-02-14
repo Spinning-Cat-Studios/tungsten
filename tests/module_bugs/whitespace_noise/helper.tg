@@ -1,0 +1,23 @@
+// Helper module with lots of whitespace
+
+
+
+
+// Lots of blank lines above
+
+// Comment before type
+
+/* Multi-line
+   comment */
+
+pub type Data = { value: Nat }
+
+// Comment after type
+
+pub fn make_data(v: Nat) -> Data {
+    { value: v }
+}
+
+// Trailing comment
+
+

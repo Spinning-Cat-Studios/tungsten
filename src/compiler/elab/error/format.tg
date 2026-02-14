@@ -1,0 +1,85 @@
+// src/compiler/elab/error/format.tg
+// Basic plain-text error formatting.
+//
+// For the full Rust-style renderer, see render.tg.
+
+use lexer::span::Span;
+use elab::error::kinds::{ElabErrorKind, error_kind_code, error_kind_message};
+use elab::error::expected::{ExpectedBecause, MaybeExpectedBecause, NoExpectedBecause, 
+                      SomeExpectedBecause, expected_because_message};
+use elab::error::list::{ElabError};
+use parser::ast::common::{MaybeString, NoString, SomeString};
+use driver::util::{nat_to_string};
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// BASIC ERROR FORMATTING (Plain text)
+// ===========================================================================
+
+/// Format an error as a plain text string.
+/// For the full Rust-style renderer, see render_diagnostic() in render.tg.
+pub fn format_elab_error(err: ElabError) -> String {
+    let code = error_kind_code(err.kind);
+    let msg = error_kind_message(err.kind);
+    let location = format_span(err.span);
+    
+    // Basic format: error[E0001]: message
+    //   --> file:line:col
+    let base = "error[" ++ code ++ "]: " ++ msg ++ "\n  --> " ++ location;
+    
+    // Add notes
+    let with_notes = format_notes(base, err.notes);
+    
+    // Add expected-because context
+    let with_context = format_expected_because(with_notes, err.expected_because);
+    
+    // Add help
+    let with_help = format_help(with_context, err.help);
+    
+    with_help
+}
+
+/// Format a span as a location string.
+fn format_span(span: Span) -> String {
+    // Basic format: start-end
+    // In the full renderer, this resolves to file:line:col
+    nat_to_string(span.start) ++ "-" ++ nat_to_string(span.end)
+}
+
+/// Format notes, each on its own line.
+fn format_notes(base: String, notes: List<String>) -> String {
+    match notes {
+        Nil() => base,
+        Cons(note, rest) =>
+            format_notes(base ++ "\n  = note: " ++ note, rest)
+    }
+}
+
+/// Format expected-because context if present.
+fn format_expected_because(base: String, eb: MaybeExpectedBecause) -> String {
+    match eb {
+        NoExpectedBecause() => base,
+        SomeExpectedBecause(ctx) =>
+            base ++ "\n  = note: " ++ expected_because_message(ctx)
+    }
+}
+
+/// Format help text if present.
+fn format_help(base: String, help: MaybeString) -> String {
+    match help {
+        NoString() => base,
+        SomeString(h) => base ++ "\n  = help: " ++ h
+    }
+}
+
+/// Format all errors in a list.
+pub fn format_elab_errors(list: List<ElabError>) -> String {
+    match list {
+        Nil() => "",
+        Cons(err, Nil()) => format_elab_error(err),
+        Cons(err, rest) =>
+            format_elab_error(err) ++ "\n\n" ++ format_elab_errors(rest)
+    }
+}
+
+

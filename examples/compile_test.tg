@@ -1,0 +1,11 @@
+// Example: Simple compilation test
+// Tests basic features that can be compiled to native code
+
+pub fn double(x: Nat) -> Nat {
+    x + x
+}
+
+fn main() -> Nat {
+    // Test simple arithmetic
+    double(21)
+}

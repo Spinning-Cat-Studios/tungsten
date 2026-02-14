@@ -1,0 +1,6 @@
+// child1 module - exports Point type
+pub type Point = { x: Nat, y: Nat }
+
+pub fn origin() -> Point {
+    { x: 0, y: 0 }
+}

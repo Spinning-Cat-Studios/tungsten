@@ -1,0 +1,19 @@
+// Test case: Option<Option<Nat>> - nested generics
+// Both layers of Option should have correct type substitution
+
+type Option<T> = | None | Some(T)
+
+fn unwrap_nested(opt: Option<Option<Nat>>) -> Nat {
+    match opt {
+        None() => 0,
+        Some(inner) => match inner {
+            None() => 0,
+            Some(n) => n
+        }
+    }
+}
+
+fn main() -> Nat {
+    // Simplified: just test the function type-checks
+    unwrap_nested(None)
+}

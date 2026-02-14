@@ -1,0 +1,11 @@
+[E0010] Error: expected `List<String>`, found `List<Nat>`
+   ╭─[tests/golden/error/cross_module_generic_type_mismatch/consumer.tg:7:21]
+   │
+ 7 │     process_strings(nums)  // Error: expected List<String>, found List<Nat>
+   │                     ──┬─  
+   │                       ╰─── expected `List<String>`, found `List<Nat>`
+   │                       │   
+   │                       ╰─── expected due to argument 1
+───╯
+
+error: aborting due to 1 error

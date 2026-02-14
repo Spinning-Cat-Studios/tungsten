@@ -1,0 +1,44 @@
+// Test: Variable patterns in constructors and as standalone catch-all arms
+// Variable patterns bind the matched value to a name.
+
+// Simple option type
+type Option = None | Some(Nat)
+
+// A result-like type
+type Result = Ok(Nat) | Err(Nat)
+
+// Variable pattern inside constructor (binds the value)
+fn get_or_zero(opt: Option) -> Nat {
+    match opt {
+        None() => 0,
+        Some(x) => x,
+    }
+}
+
+// Variable pattern as catch-all arm (binds entire value)
+type TokenKind = TokEof | TokIdent | TokNumber
+
+// Using variable catch-all to bind the unmatched value
+fn is_eof(kind: TokenKind) -> Bool {
+    match kind {
+        TokEof() => true,
+        other => false,  // 'other' binds to TokIdent or TokNumber
+    }
+}
+
+// Result handling with variable bindings
+fn result_value(r: Result) -> Nat {
+    match r {
+        Ok(n) => n,
+        Err(e) => e,
+    }
+}
+
+// Direct test in main - returns 100 if variable catch-all works
+fn main() -> Nat {
+    let opt = Some(42);
+    match opt {
+        None() => 0,
+        x => 100,  // Variable catch-all - should return 100
+    }
+}

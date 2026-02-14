@@ -1,0 +1,25 @@
+// Test generic function parsing with type parameters.
+// Exercises the full parse_fn pipeline: type params, params, return types, bodies.
+
+// Generic identity function
+pub fn identity<T>(x: T) -> T { x }
+
+// Generic function with multiple type params
+pub fn make_pair<A, B>(a: A, b: B) -> (A, B) { (a, b) }
+
+// Generic function with constrained body
+pub fn apply<A, B>(f: A -> B, x: A) -> B { f(x) }
+
+// Generic function with statement in body
+pub fn apply_twice<A>(f: A -> A, x: A) -> A {
+    let once = f(x);
+    f(once)
+}
+
+// Test usage
+pub fn main() -> Nat {
+    let id_result = identity(42);
+    let p = make_pair(1, 2);
+    let applied = apply(fn (n: Nat) => n + 1, 10);
+    id_result
+}

@@ -1,0 +1,5 @@
+// Core module: defines Option<T>
+
+pub type Option<T> =
+    | None
+    | Some(T)

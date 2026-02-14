@@ -1,0 +1,150 @@
+// src/compiler/elab/exprs/control.tg
+// Control flow elaboration: if-then-else, return.
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_if,
+    tg_term_unit,
+    tg_type_bool,
+    tg_type_unit,
+    tg_types_equal
+};
+use elab::env::{Env, env_return_type, env_get_fn_span, MaybeTypeHandle, NoTypeHandle, SomeTypeHandle, MaybeSpan, NoSpan, SomeSpan};
+use elab::exprs::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, 
+    elab_expr_error, elab_expr_if_cond_error, elab_expr_if_branch_error,
+    elab_expr_return_type_error, add_expected_because
+};
+use elab::error::{ExpIfCondition, ExpIfBranch, ExpFunctionReturn};
+use elab::cir::{CodegenIR, CIRIf, CIRUnit};
+
+// Import synth/check from parent module for mutual recursion
+use elab::exprs::{synth, check};
+
+// ===========================================================================
+// IF-THEN-ELSE ELABORATION
+// ===========================================================================
+
+/// Synthesize if-then-else.
+pub fn synth_if(
+    env: Env,
+    cond: Expr,
+    then_e: Expr,
+    else_e: Expr,
+    span: Span
+) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    let cond_span = expr_span(cond);
+    
+    // Check condition is Bool
+    match check(env, cond, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpIfCondition(span))),
+        ElabExprOk(env2, cond_term, _, cond_cir) =>
+            let then_span = expr_span(then_e);
+            // Synthesize both branches
+            match synth(env2, then_e) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env3, then_term, then_ty, then_cir) =>
+                    let else_span = expr_span(else_e);
+                    // Check else branch matches then branch type
+                    match check(env3, else_e, then_ty) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpIfBranch(then_span))),
+                        ElabExprOk(env4, else_term, _, else_cir) =>
+                            let if_term = tg_term_if(cond_term, then_term, else_term);
+                            let if_cir = CIRIf(cond_cir, then_cir, else_cir);
+                            ElabExprOk(env4, if_term, then_ty, if_cir)
+                    }
+            }
+    }
+}
+
+/// Check if-then-else against expected type.
+pub fn check_if(
+    env: Env,
+    cond: Expr,
+    then_e: Expr,
+    else_e: Expr,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    let cond_span = expr_span(cond);
+    
+    match check(env, cond, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpIfCondition(span))),
+        ElabExprOk(env2, cond_term, _, cond_cir) =>
+            let then_span = expr_span(then_e);
+            match check(env2, then_e, expected) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env3, then_term, _, then_cir) =>
+                    let else_span = expr_span(else_e);
+                    match check(env3, else_e, expected) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpIfBranch(then_span))),
+                        ElabExprOk(env4, else_term, _, else_cir) =>
+                            let if_term = tg_term_if(cond_term, then_term, else_term);
+                            let if_cir = CIRIf(cond_cir, then_cir, else_cir);
+                            ElabExprOk(env4, if_term, expected, if_cir)
+                    }
+            }
+    }
+}
+
+// ===========================================================================
+// RETURN ELABORATION
+// ===========================================================================
+
+/// Synthesize return expression.
+/// Uses the return type from the environment (set when entering a function body).
+pub fn synth_return(
+    env: Env,
+    value: Expr,
+    span: Span
+) -> ElabExprResult {
+    match env_return_type(env) {
+        NoTypeHandle() =>
+            ElabExprErr(elab_expr_error(
+                "return statement outside of function body",
+                span
+            )),
+        SomeTypeHandle(return_ty) =>
+            // Get the function span for context (if available)
+            let fn_span = match env_get_fn_span(env) {
+                NoSpan() => span,
+                SomeSpan(s) => s
+            };
+            // Check that the return value has the expected return type
+            match check(env, value, return_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpFunctionReturn(fn_span))),
+                ElabExprOk(env2, term, _, cir) =>
+                    // Return the term with the return type
+                    // CIR: return is just the value (no special CIR node needed)
+                    ElabExprOk(env2, term, return_ty, cir)
+            }
+    }
+}
+
+/// Synthesize return expression without a value (return;).
+/// Checks that the expected return type is Unit.
+pub fn synth_return_unit(env: Env, span: Span) -> ElabExprResult {
+    match env_return_type(env) {
+        NoTypeHandle() =>
+            ElabExprErr(elab_expr_error(
+                "return statement outside of function body",
+                span
+            )),
+        SomeTypeHandle(return_ty) =>
+            let unit_ty = tg_type_unit();
+            if tg_types_equal(return_ty, unit_ty) {
+                // Return type is Unit, return unit value
+                ElabExprOk(env, tg_term_unit(), unit_ty, CIRUnit)
+            } else {
+                // Return type is not Unit, need a value
+                ElabExprErr(elab_expr_error(
+                    "return without value requires Unit return type",
+                    span
+                ))
+            }
+    }
+}

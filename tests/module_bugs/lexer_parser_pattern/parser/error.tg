@@ -1,0 +1,10 @@
+// ParseError type - uses Span from lexer
+// Note: super:: not yet implemented, use absolute path from crate root
+use lexer::span::Span;
+
+// Added 'code' field to make structure unique from Token (avoids ambiguity)
+pub type ParseError = { code: Nat, message: Nat, span: Span }
+
+pub fn error_at(span: Span, code: Nat, msg: Nat) -> ParseError {
+    { code: code, message: msg, span: span }
+}

@@ -1,0 +1,21 @@
+// Test file to verify nested match elaboration (multiple arms same constructor)
+pub type TokenKind =
+    | TokBang
+    | TokMinus
+    | TokPlus
+
+pub type Option<T> =
+    | None
+    | Some(T)
+
+pub fn parse_unary(opt: Option<TokenKind>) -> Nat {
+    match opt {
+        Some(TokBang()) => 1,
+        Some(TokMinus()) => 2,
+        _ => 0
+    }
+}
+
+pub fn main() -> Nat {
+    parse_unary(Some(TokBang()))
+}

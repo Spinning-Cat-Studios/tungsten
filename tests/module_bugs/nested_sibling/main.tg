@@ -1,0 +1,12 @@
+// Test: Nested module structure (main entry point)
+// Bug #1: Cross-module type resolution
+//
+// This multi-file test reproduces the nested module sibling import pattern.
+// parser/consumer.tg imports from parser/list.tg via `use list::{...}`.
+
+mod parser;
+
+fn main() -> Nat {
+    let xs = parser::list::Cons(1, parser::list::Cons(2, parser::list::Nil()));
+    parser::consumer::length(xs)  // Expected: 2
+}

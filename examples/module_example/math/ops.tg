@@ -1,0 +1,9 @@
+/// Arithmetic operations.
+
+pub fn add(a: Nat, b: Nat) -> Nat {
+    a + b
+}
+
+pub fn double(n: Nat) -> Nat {
+    n + n
+}

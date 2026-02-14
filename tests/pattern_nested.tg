@@ -1,0 +1,44 @@
+// Test: Nested constructor patterns
+// Nested patterns allow matching on constructors within constructors.
+
+// Simple types for testing
+type Token = TokEof | TokIdent(Nat) | TokNumber(Nat)
+
+// A result type holding a token
+type ParseResult = ParseOk(Token) | ParseErr
+
+// Single nested constructor - match on nullary nested ctor
+fn is_eof_result(r: ParseResult) -> Bool {
+    match r {
+        ParseOk(TokEof()) => true,
+        _ => false,
+    }
+}
+
+// Single nested constructor - match on unary nested ctor with binding
+fn get_ident_value(r: ParseResult) -> Nat {
+    match r {
+        ParseOk(TokIdent(n)) => n,
+        _ => 0,
+    }
+}
+
+// Multiple arms with nested patterns
+fn classify_result(r: ParseResult) -> Nat {
+    match r {
+        ParseOk(TokEof()) => 1,
+        ParseOk(TokIdent(n)) => n,
+        ParseOk(TokNumber(n)) => n,
+        ParseErr() => 0,
+    }
+}
+
+// Test main - returns 42 if nested pattern binding works
+fn main() -> Nat {
+    let tok = TokIdent(42);
+    let result = ParseOk(tok);
+    match result {
+        ParseOk(TokIdent(x)) => x,
+        _ => 0,
+    }
+}

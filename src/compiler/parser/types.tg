@@ -1,0 +1,575 @@
+// src/compiler/parser/types.tg
+// Type expression parsing for the Tungsten self-hosted compiler.
+//
+// Implements parsing of all type expressions with proper precedence:
+// - Arrow types (right-associative): A -> B -> C = A -> (B -> C)
+// - Type application: List<T>, Map<K, V>
+// - Atomic types: paths, Unit, Prop, Void, pointers, refs, parens, forall
+
+// Re-export parse_type_item from items/types.tg for convenience
+pub use parser::items::types::parse_type_item;
+
+use lexer::token::{Token, TokenKind, TokIdent, TokIntLit, TokStringLit,
+    TokLParen, TokRParen, TokLBrace, TokRBrace, TokLAngle, TokRAngle,
+    TokComma, TokColon, TokColonColon, TokArrow, TokDot,
+    TokStar, TokAmp, TokProp, TokVoid, TokUnit, TokForall, TokRef,
+    TokFn, TokType, TokTheorem, TokLemma, TokAxiom, TokExtern, TokMod,
+    TokSemi, TokEof, TokNat, TokBool};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, ParseErrors, NoParseErrors, ConsParseError,
+    parse_error_expected, parse_error_eof, parse_error_simple};
+use parser::cursor::{Cursor, MaybeCursor, SomeCursor, NoCursor,
+    cursor_new, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_is_eof,
+    cursor_advance, cursor_eat, cursor_eat_ident, cursor_expect, cursor_expect_ident,
+    cursor_check_ident, token_kind_name,
+    ParseResultToken, ParseOkToken, ParseErrToken,
+    ParseResultString, ParseOkString, ParseErrString,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, ident_span,
+    ident_list_empty, ident_list_cons, ident_list_singleton,
+    Path, MkPath, path_new, path_simple, path_span};
+use parser::ast::nodes::{TypeExpr, TyPath, TyArrow, TyProduct, TySum, TyApp, TyForall,
+    TyProp, TyUnit, TyVoid, TyPtr, TyRef, TyParen, TyError,
+    type_expr_span};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+
+// ===========================================================================
+// PARSE RESULT TYPE FOR TYPE EXPRESSIONS
+// ===========================================================================
+
+/// Result of parsing a type expression.
+pub type ParseResultType =
+    | ParseOkType(TypeExpr, Cursor)
+    | ParseErrType(ParseError)
+
+/// Result of parsing a type expression list.
+pub type ParseResultTypeList =
+    | ParseOkTypeList(List<TypeExpr>, Cursor)
+    | ParseErrTypeList(ParseError)
+
+/// Result of parsing a path.
+pub type ParseResultPath =
+    | ParseOkPath(Path, Cursor)
+    | ParseErrPath(ParseError)
+
+/// Result of parsing an identifier.
+pub type ParseResultIdent =
+    | ParseOkIdent(Ident, Cursor)
+    | ParseErrIdent(ParseError)
+
+// ===========================================================================
+// PATH PARSING
+// ===========================================================================
+
+/// Parse a qualified path: `foo`, `foo::bar`, `foo::bar::baz`
+/// 
+/// Grammar: Path = Ident ("::" Ident)*
+pub fn parse_path(cur: Cursor) -> ParseResultPath {
+    // First segment must be an identifier
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            ParseErrPath(parse_error_expected("identifier", found, cursor_peek_span(cur)))
+        },
+        SomeIdentResult(name, cur2) => {
+            let start_span = cursor_peek_span(cur);
+            let first_ident = ident_new(name, start_span);
+            // Parse remaining segments
+            parse_path_rest(cur2, ident_list_singleton(first_ident), start_span)
+        }
+    }
+}
+
+/// Parse remaining path segments after the first identifier.
+/// Uses cons-then-reverse pattern for O(n) total instead of O(n²).
+/// The `acc` parameter accumulates segments in reverse order.
+fn parse_path_rest(cur: Cursor, acc: List<Ident>, start_span: Span) -> ParseResultPath {
+    // Check for ::
+    if cursor_check(cur, TokColonColon()) {
+        // Consume ::
+        let cur2 = cursor_advance(cur);
+        // Expect identifier
+        match cursor_eat_ident(cur2) {
+            NoIdentResult() => {
+                let found = match cursor_peek_kind(cur2) {
+                    None() => "end of file",
+                    Some(k) => token_kind_name(k)
+                };
+                ParseErrPath(parse_error_expected("identifier after '::'", found, cursor_peek_span(cur2)))
+            },
+            SomeIdentResult(name, cur3) => {
+                let seg_span = cursor_peek_span(cur2);
+                let new_ident = ident_new(name, seg_span);
+                // Cons to front - O(1) per segment
+                let new_acc = Cons(new_ident, acc);
+                let new_span = span_merge(start_span, seg_span);
+                // Continue parsing more segments
+                parse_path_rest(cur3, new_acc, new_span)
+            }
+        }
+    } else {
+        // No more segments, reverse and return path - O(n) once
+        ParseOkPath(path_new(list_reverse(acc), start_span), cur)
+    }
+}
+
+// ===========================================================================
+// TYPE PARSING - ENTRY POINT
+// ===========================================================================
+
+/// Parse a type expression.
+/// 
+/// Grammar (precedence, lowest to highest):
+/// 1. Arrow types (right-associative): A -> B -> C
+/// 2. Type application: List<T>
+/// 3. Atomic types: paths, Unit, Prop, Void, *, &, forall, parens
+pub fn parse_type(cur: Cursor) -> ParseResultType {
+    parse_type_arrow(cur)
+}
+
+// ===========================================================================
+// TYPE PARSING - ARROW TYPES (right-associative)
+// ===========================================================================
+
+/// Parse arrow types: A -> B -> C (right-associative)
+fn parse_type_arrow(cur: Cursor) -> ParseResultType {
+    // Parse left-hand side (type application or atom)
+    match parse_type_app(cur) {
+        ParseErrType(e) => ParseErrType(e),
+        ParseOkType(lhs, cur2) => {
+            // Check for arrow
+            if cursor_check(cur2, TokArrow()) {
+                let arrow_span = cursor_peek_span(cur2);
+                let cur3 = cursor_advance(cur2);
+                // Right-associative: recurse for right-hand side
+                match parse_type_arrow(cur3) {
+                    ParseErrType(e) => ParseErrType(e),
+                    ParseOkType(rhs, cur4) => {
+                        let full_span = span_merge(type_expr_span(lhs), type_expr_span(rhs));
+                        ParseOkType(TyArrow(lhs, rhs, full_span), cur4)
+                    }
+                }
+            } else {
+                ParseOkType(lhs, cur2)
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// TYPE PARSING - TYPE APPLICATION
+// ===========================================================================
+
+/// Parse type application: T, T<U>, T<U, V>
+fn parse_type_app(cur: Cursor) -> ParseResultType {
+    // Parse base type (atomic)
+    match parse_type_atom(cur) {
+        ParseErrType(e) => ParseErrType(e),
+        ParseOkType(base, cur2) => {
+            // Check for type arguments <...>
+            if cursor_check(cur2, TokLAngle()) {
+                // Parse type arguments
+                match parse_type_args(cur2) {
+                    ParseErrTypeList(e) => ParseErrType(e),
+                    ParseOkTypeList(args, cur3) => {
+                        let base_span = type_expr_span(base);
+                        let end_span = cursor_peek_span(cur3);  // Position after >
+                        // Note: span_merge may not work perfectly here since we already advanced past >
+                        // We'll use the last type arg's span if available, otherwise base
+                        let full_span = compute_app_span(base_span, args);
+                        ParseOkType(TyApp(base, args, full_span), cur3)
+                    }
+                }
+            } else {
+                ParseOkType(base, cur2)
+            }
+        }
+    }
+}
+
+/// Compute span for type application by finding the rightmost type.
+fn compute_app_span(base_span: Span, args: List<TypeExpr>) -> Span {
+    match args {
+        Nil() => base_span,
+        Cons(t, rest) => {
+            match rest {
+                Nil() => span_merge(base_span, type_expr_span(t)),
+                Cons(_, _) => compute_app_span(base_span, rest)
+            }
+        }
+    }
+}
+
+/// Parse type arguments: <T>, <T, U>, <T, U, V>
+pub fn parse_type_args(cur: Cursor) -> ParseResultTypeList {
+    // Expect <
+    match cursor_expect(cur, TokLAngle()) {
+        ParseErrToken(e) => ParseErrTypeList(e),
+        ParseOkToken(_, cur2) => {
+            // Parse comma-separated types until >
+            match parse_type_list_until_rangle(cur2) {
+                ParseErrTypeList(e) => ParseErrTypeList(e),
+                ParseOkTypeList(types, cur3) => {
+                    // Expect >
+                    match cursor_expect(cur3, TokRAngle()) {
+                        ParseErrToken(e) => ParseErrTypeList(e),
+                        ParseOkToken(_, cur4) => ParseOkTypeList(types, cur4)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse comma-separated type list until we see >
+fn parse_type_list_until_rangle(cur: Cursor) -> ParseResultTypeList {
+    // Check for empty list
+    if cursor_check(cur, TokRAngle()) {
+        ParseOkTypeList(Nil, cur)
+    } else {
+        // Parse first type
+        match parse_type(cur) {
+            ParseErrType(e) => ParseErrTypeList(e),
+            ParseOkType(t, cur2) => {
+                // Parse rest of list
+                parse_type_list_rest(cur2, Cons(t, Nil))
+            }
+        }
+    }
+}
+
+/// Parse rest of comma-separated type list (accumulator version).
+fn parse_type_list_rest(cur: Cursor, acc: List<TypeExpr>) -> ParseResultTypeList {
+    // Check for comma
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma before >
+        if cursor_check(cur2, TokRAngle()) {
+            ParseOkTypeList(list_reverse(acc), cur2)
+        } else {
+            // Parse next type
+            match parse_type(cur2) {
+                ParseErrType(e) => ParseErrTypeList(e),
+                ParseOkType(t, cur3) => {
+                    parse_type_list_rest(cur3, Cons(t, acc))
+                }
+            }
+        }
+    } else {
+        // No more items, reverse accumulator
+        ParseOkTypeList(list_reverse(acc), cur)
+    }
+}
+
+// ===========================================================================
+// TYPE PARSING - ATOMIC TYPES
+// ===========================================================================
+
+/// Parse an atomic type expression.
+/// 
+/// Atomic types:
+/// - Unit keyword or ()
+/// - Prop keyword
+/// - Void keyword  
+/// - * T (pointer)
+/// - & T (reference)
+/// - forall T. U
+/// - ( T ) (parenthesized)
+/// - Path (includes identifiers and qualified paths)
+pub fn parse_type_atom(cur: Cursor) -> ParseResultType {
+    match cursor_peek_kind(cur) {
+        None() => {
+            ParseErrType(parse_error_eof("type", cursor_peek_span(cur)))
+        },
+        Some(kind) => parse_type_atom_by_kind(cur, kind)
+    }
+}
+
+/// Dispatch atomic type parsing based on the token kind.
+fn parse_type_atom_by_kind(cur: Cursor, kind: TokenKind) -> ParseResultType {
+    match kind {
+        // Unit keyword
+        TokUnit() => {
+            let span = cursor_peek_span(cur);
+            ParseOkType(TyUnit(span), cursor_advance(cur))
+        },
+        
+        // Prop keyword
+        TokProp() => {
+            let span = cursor_peek_span(cur);
+            ParseOkType(TyProp(span), cursor_advance(cur))
+        },
+        
+        // Void keyword
+        TokVoid() => {
+            let span = cursor_peek_span(cur);
+            ParseOkType(TyVoid(span), cursor_advance(cur))
+        },
+        
+        // Nat keyword - parse as path type for consistency with bootstrap
+        TokNat() => {
+            let span = cursor_peek_span(cur);
+            let ident = ident_new("Nat", span);
+            let path = path_simple(ident);
+            ParseOkType(TyPath(path), cursor_advance(cur))
+        },
+        
+        // Bool keyword - parse as path type for consistency with bootstrap
+        TokBool() => {
+            let span = cursor_peek_span(cur);
+            let ident = ident_new("Bool", span);
+            let path = path_simple(ident);
+            ParseOkType(TyPath(path), cursor_advance(cur))
+        },
+        
+        // Parenthesized type or unit ()
+        TokLParen() => parse_type_paren_or_unit(cur),
+        
+        // Pointer type: *T
+        TokStar() => parse_type_pointer(cur),
+        
+        // Reference type: &T
+        TokAmp() => parse_type_reference(cur),
+        
+        // Forall type: forall T. U
+        TokForall() => parse_type_forall(cur),
+        
+        // Ref type (keyword form): Ref<T>
+        // This is handled by path parsing since Ref is an identifier
+        
+        // Path type (identifier or qualified path)
+        TokIdent(_) => parse_type_path(cur),
+        
+        // Unknown - error
+        _ => {
+            let found = token_kind_name(kind);
+            ParseErrType(parse_error_expected("type", found, cursor_peek_span(cur)))
+        }
+    }
+}
+
+// ===========================================================================
+// TYPE PARSING - SPECIFIC FORMS
+// ===========================================================================
+
+/// Parse a path type: Foo, Foo::Bar, etc.
+fn parse_type_path(cur: Cursor) -> ParseResultType {
+    match parse_path(cur) {
+        ParseErrPath(e) => ParseErrType(e),
+        ParseOkPath(path, cur2) => ParseOkType(TyPath(path), cur2)
+    }
+}
+
+/// Parse parenthesized type, unit, or tuple: (T), (), (A, B, C)
+/// Tuple types desugar to nested Product types: (A, B, C) -> A * (B * C)
+fn parse_type_paren_or_unit(cur: Cursor) -> ParseResultType {
+    let start_span = cursor_peek_span(cur);
+    // Consume (
+    let cur2 = cursor_advance(cur);
+    
+    // Check for immediate ) meaning ()
+    if cursor_check(cur2, TokRParen()) {
+        let end_span = cursor_peek_span(cur2);
+        let cur3 = cursor_advance(cur2);
+        ParseOkType(TyUnit(span_merge(start_span, end_span)), cur3)
+    } else {
+        // Parse first type
+        match parse_type(cur2) {
+            ParseErrType(e) => ParseErrType(e),
+            ParseOkType(first, cur3) => {
+                // Check for comma (tuple) or ) (parenthesized)
+                if cursor_check(cur3, TokComma()) {
+                    // Tuple type: (A, B, C) -> A * (B * C)
+                    parse_tuple_type_rest(cur3, first, start_span)
+                } else {
+                    // Parenthesized type: (T)
+                    match cursor_expect(cur3, TokRParen()) {
+                        ParseErrToken(e) => ParseErrType(e),
+                        ParseOkToken(_, cur4) => {
+                            let end_span = cursor_peek_span(cur3);
+                            let full_span = span_merge(start_span, end_span);
+                            ParseOkType(TyParen(first, full_span), cur4)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse the rest of a tuple type after the first element and seeing a comma.
+/// Collects remaining types and folds into nested Product types.
+fn parse_tuple_type_rest(cur: Cursor, first: TypeExpr, start_span: Span) -> ParseResultType {
+    // Collect all types into a list, starting with the first
+    parse_tuple_types_collect(cur, Cons(first, Nil), start_span)
+}
+
+/// Collect tuple type elements, consuming commas.
+fn parse_tuple_types_collect(cur: Cursor, acc: List<TypeExpr>, start_span: Span) -> ParseResultType {
+    // Check for comma
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma: (A, B,)
+        if cursor_check(cur2, TokRParen()) {
+            let end_span = cursor_peek_span(cur2);
+            let cur3 = cursor_advance(cur2);
+            // Fold accumulated types into Product
+            fold_tuple_types(acc, span_merge(start_span, end_span), cur3)
+        } else {
+            // Parse next type
+            match parse_type(cur2) {
+                ParseErrType(e) => ParseErrType(e),
+                ParseOkType(t, cur3) => {
+                    parse_tuple_types_collect(cur3, Cons(t, acc), start_span)
+                }
+            }
+        }
+    } else {
+        // Expect closing )
+        match cursor_expect(cur, TokRParen()) {
+            ParseErrToken(e) => ParseErrType(e),
+            ParseOkToken(_, cur2) => {
+                let end_span = cursor_peek_span(cur);
+                fold_tuple_types(acc, span_merge(start_span, end_span), cur2)
+            }
+        }
+    }
+}
+
+/// Fold a list of types (in reverse order) into nested Product types.
+/// Input: [C, B, A] -> Output: A * (B * C)
+fn fold_tuple_types(list: List<TypeExpr>, span: Span, cur: Cursor) -> ParseResultType {
+    // List is in reverse order from accumulator, so reverse first to restore source order.
+    // Then fold right-associatively: [A, B, C] -> A * (B * C)
+    let in_order = list_reverse(list);
+    let folded = fold_tuple_types_impl(in_order, span);
+    ParseOkType(folded, cur)
+}
+
+/// Implementation of tuple type folding.
+fn fold_tuple_types_impl(list: List<TypeExpr>, span: Span) -> TypeExpr {
+    match list {
+        Nil() => TyUnit(span),  // Shouldn't happen for valid tuples
+        Cons(t, rest) => {
+            match rest {
+                Nil() => t,  // Single element - just return it
+                Cons(_, _) => {
+                    // Build Product: t * (fold rest)
+                    let rest_folded = fold_tuple_types_impl(rest, span);
+                    TyProduct(t, rest_folded, span)
+                }
+            }
+        }
+    }
+}
+
+/// Parse pointer type: *T
+fn parse_type_pointer(cur: Cursor) -> ParseResultType {
+    let start_span = cursor_peek_span(cur);
+    // Consume *
+    let cur2 = cursor_advance(cur);
+    
+    // Parse inner type (atomic to avoid precedence issues)
+    match parse_type_atom(cur2) {
+        ParseErrType(e) => ParseErrType(e),
+        ParseOkType(inner, cur3) => {
+            let full_span = span_merge(start_span, type_expr_span(inner));
+            ParseOkType(TyPtr(inner, full_span), cur3)
+        }
+    }
+}
+
+/// Parse reference type: &T
+fn parse_type_reference(cur: Cursor) -> ParseResultType {
+    let start_span = cursor_peek_span(cur);
+    // Consume &
+    let cur2 = cursor_advance(cur);
+    
+    // Parse inner type (atomic to avoid precedence issues)
+    match parse_type_atom(cur2) {
+        ParseErrType(e) => ParseErrType(e),
+        ParseOkType(inner, cur3) => {
+            let full_span = span_merge(start_span, type_expr_span(inner));
+            ParseOkType(TyRef(inner, full_span), cur3)
+        }
+    }
+}
+
+/// Parse forall type: forall T. U
+fn parse_type_forall(cur: Cursor) -> ParseResultType {
+    let start_span = cursor_peek_span(cur);
+    // Consume 'forall'
+    let cur2 = cursor_advance(cur);
+    
+    // Expect identifier (type variable)
+    match cursor_expect_ident(cur2) {
+        ParseErrString(e) => ParseErrType(e),
+        ParseOkString(name, cur3) => {
+            let id_span = cursor_peek_span(cur2);
+            let type_var = ident_new(name, id_span);
+            
+            // Expect dot
+            match cursor_expect(cur3, TokDot()) {
+                ParseErrToken(e) => ParseErrType(e),
+                ParseOkToken(_, cur4) => {
+                    // Parse body type
+                    match parse_type(cur4) {
+                        ParseErrType(e) => ParseErrType(e),
+                        ParseOkType(body, cur5) => {
+                            let full_span = span_merge(start_span, type_expr_span(body));
+                            ParseOkType(TyForall(type_var, body, full_span), cur5)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// ERROR RECOVERY
+// ===========================================================================
+
+/// Create an error type node for error recovery.
+pub fn type_error(span: Span) -> TypeExpr {
+    TyError(span)
+}
+
+// ===========================================================================
+// PARSE RESULT WITH ERROR RECOVERY
+// ===========================================================================
+
+/// Result of parsing a type with error recovery.
+/// Contains the parsed type (or TyError), the new cursor position, and any errors.
+pub type ParseRecoverType = {
+    ty: TypeExpr,
+    cursor: Cursor,
+    errors: ParseErrors
+}
+
+/// Create a successful parse recovery result.
+fn parse_recover_ok(ty: TypeExpr, cur: Cursor) -> ParseRecoverType {
+    { ty: ty, cursor: cur, errors: NoParseErrors }
+}
+
+/// Create a recovery result with an error.
+fn parse_recover_err(ty: TypeExpr, cur: Cursor, err: ParseError) -> ParseRecoverType {
+    { ty: ty, cursor: cur, errors: ConsParseError(err, NoParseErrors) }
+}
+
+/// Parse a type, recovering with TyError on failure.
+pub fn parse_type_or_error(cur: Cursor) -> ParseRecoverType {
+    match parse_type(cur) {
+        ParseOkType(t, cur2) => parse_recover_ok(t, cur2),
+        ParseErrType(e) => {
+            let span = cursor_peek_span(cur);
+            let cur2 = synchronize(cur);
+            parse_recover_err(TyError(span), cur2, e)
+        }
+    }
+}

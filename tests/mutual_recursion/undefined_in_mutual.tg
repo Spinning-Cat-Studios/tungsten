@@ -1,0 +1,18 @@
+// Test: Undefined type in mutual recursion context (NEGATIVE TEST)
+// Bug #2: Mutual type recursion support
+// @expect-error: E0001
+//
+// This test verifies that referencing a truly non-existent type
+// produces a clean error message, not an internal compiler error (ICE).
+// 
+// Expected: "unknown type `Nonexistent`" or similar
+// NOT expected: panic, ICE, or confusing error about recursion
+
+type ValidType = { x: Nat }
+
+type BrokenType = { 
+    valid: ValidType,
+    broken: Nonexistent  // This type doesn't exist anywhere
+}
+
+fn main() -> Nat { 0 }

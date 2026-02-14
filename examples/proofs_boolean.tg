@@ -1,0 +1,148 @@
+// =============================================================================
+// Proofs in Tungsten: Boolean Algebra
+// =============================================================================
+//
+// This file demonstrates Tungsten's theorem-proving capabilities by proving
+// basic properties of boolean operations.
+//
+// Note: The full equality type `Eq<T, a, b>` is defined in the core calculus
+// but not yet fully exposed in surface syntax. These examples use exhaustive
+// testing (which is valid for Bool since it only has two values) to verify
+// boolean algebra properties.
+//
+// In Tungsten:
+// - `theorem` declares a proposition to be proven
+// - `sorry` is a proof placeholder (like Lean4's sorry)
+// - When proofs are complete, they type-check as valid
+
+// -----------------------------------------------------------------------------
+// Boolean Operations
+// -----------------------------------------------------------------------------
+
+pub fn not(x: Bool) -> Bool {
+    if x { false } else { true }
+}
+
+pub fn and(a: Bool, b: Bool) -> Bool {
+    if a { b } else { false }
+}
+
+pub fn or(a: Bool, b: Bool) -> Bool {
+    if a { true } else { b }
+}
+
+pub fn implies(a: Bool, b: Bool) -> Bool {
+    if a { b } else { true }
+}
+
+pub fn xor(a: Bool, b: Bool) -> Bool {
+    if a { not(b) } else { b }
+}
+
+// -----------------------------------------------------------------------------
+// Verification by Testing
+// -----------------------------------------------------------------------------
+// While we can't yet prove general theorems with the equality type syntax,
+// we can verify properties by exhaustive testing (since Bool has only two values).
+
+// Test: not is self-inverse (double negation)
+pub fn test_double_negation() -> Bool {
+    not(not(true)) == true && not(not(false)) == false
+}
+
+// Test: and is commutative
+pub fn test_and_commutative() -> Bool {
+    and(true, false) == and(false, true) &&
+    and(true, true) == and(true, true) &&
+    and(false, false) == and(false, false)
+}
+
+// Test: or is commutative
+pub fn test_or_commutative() -> Bool {
+    or(true, false) == or(false, true) &&
+    or(true, true) == or(true, true) &&
+    or(false, false) == or(false, false)
+}
+
+// Test: De Morgan's law: not(a AND b) = not(a) OR not(b)
+pub fn test_demorgan_and() -> Bool {
+    let tt = not(and(true, true)) == or(not(true), not(true));
+    let tf = not(and(true, false)) == or(not(true), not(false));
+    let ft = not(and(false, true)) == or(not(false), not(true));
+    let ff = not(and(false, false)) == or(not(false), not(false));
+    tt && tf && ft && ff
+}
+
+// Test: De Morgan's law: not(a OR b) = not(a) AND not(b)  
+pub fn test_demorgan_or() -> Bool {
+    let tt = not(or(true, true)) == and(not(true), not(true));
+    let tf = not(or(true, false)) == and(not(true), not(false));
+    let ft = not(or(false, true)) == and(not(false), not(true));
+    let ff = not(or(false, false)) == and(not(false), not(false));
+    tt && tf && ft && ff
+}
+
+// Test: Implication truth table
+pub fn test_implication() -> Bool {
+    implies(true, true) == true &&
+    implies(true, false) == false &&
+    implies(false, true) == true &&
+    implies(false, false) == true
+}
+
+// Test: XOR truth table
+pub fn test_xor() -> Bool {
+    xor(true, true) == false &&
+    xor(true, false) == true &&
+    xor(false, true) == true &&
+    xor(false, false) == false
+}
+
+// Test: AND distributivity over OR: a AND (b OR c) = (a AND b) OR (a AND c)
+pub fn and_distrib_test(a: Bool, b: Bool, c: Bool) -> Bool {
+    and(a, or(b, c)) == or(and(a, b), and(a, c))
+}
+
+pub fn test_and_distributes_over_or() -> Bool {
+    // Test all 8 combinations
+    and_distrib_test(true, true, true) &&
+    and_distrib_test(true, true, false) &&
+    and_distrib_test(true, false, true) &&
+    and_distrib_test(true, false, false) &&
+    and_distrib_test(false, true, true) &&
+    and_distrib_test(false, true, false) &&
+    and_distrib_test(false, false, true) &&
+    and_distrib_test(false, false, false)
+}
+
+// Test: OR distributivity over AND: a OR (b AND c) = (a OR b) AND (a OR c)
+pub fn or_distrib_test(a: Bool, b: Bool, c: Bool) -> Bool {
+    or(a, and(b, c)) == and(or(a, b), or(a, c))
+}
+
+pub fn test_or_distributes_over_and() -> Bool {
+    or_distrib_test(true, true, true) &&
+    or_distrib_test(true, true, false) &&
+    or_distrib_test(true, false, true) &&
+    or_distrib_test(true, false, false) &&
+    or_distrib_test(false, true, true) &&
+    or_distrib_test(false, true, false) &&
+    or_distrib_test(false, false, true) &&
+    or_distrib_test(false, false, false)
+}
+
+// -----------------------------------------------------------------------------
+// Running All Tests
+// -----------------------------------------------------------------------------
+
+fn main() -> Bool {
+    test_double_negation() &&
+    test_and_commutative() &&
+    test_or_commutative() &&
+    test_demorgan_and() &&
+    test_demorgan_or() &&
+    test_implication() &&
+    test_xor() &&
+    test_and_distributes_over_or() &&
+    test_or_distributes_over_and()
+}

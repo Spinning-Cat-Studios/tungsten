@@ -1,0 +1,23 @@
+// Test case: Deeply nested Option patterns
+// Multiple levels of Option nesting should all substitute correctly
+
+type Option<T> = | None | Some(T)
+
+// Three levels deep: Option<Option<Option<Nat>>>
+fn extract_deeply(opt: Option<Option<Option<Nat>>>) -> Nat {
+    match opt {
+        None() => 0,
+        Some(mid) => match mid {
+            None() => 1,
+            Some(inner) => match inner {
+                None() => 2,
+                Some(n) => n
+            }
+        }
+    }
+}
+
+fn main() -> Nat {
+    // Note: Using None without calling - just testing the type extraction
+    extract_deeply(None)
+}

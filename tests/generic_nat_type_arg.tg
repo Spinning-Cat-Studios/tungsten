@@ -1,0 +1,16 @@
+// Test: Generic Option<Nat> - does this work?
+pub type Option<T> =
+    | None
+    | Some(T)
+
+pub fn unwrap_or(opt: Option<Nat>, default: Nat) -> Nat {
+    match opt {
+        None() => default,
+        Some(x) => x  // Just return the value, no field access
+    }
+}
+
+pub fn main() -> Nat {
+    let opt: Option<Nat> = Some(42);
+    unwrap_or(opt, 0)
+}

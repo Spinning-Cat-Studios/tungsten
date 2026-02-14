@@ -1,0 +1,33 @@
+// List operations using recursive ADTs
+pub type List<T> = Nil | Cons(T, List<T>)
+pub type Option<T> = None | Some(T)
+
+// Check if a list is empty
+pub fn is_empty(xs: List<Nat>) -> Bool {
+    match xs {
+        Nil() => true,
+        Cons(h, t) => false,
+    }
+}
+
+// Get the first element (if any)
+pub fn head(xs: List<Nat>) -> Option<Nat> {
+    match xs {
+        Nil() => None,
+        Cons(h, t) => Some(h),
+    }
+}
+
+// Build a small list: [1, 2, 3]
+pub fn example_list() -> List<Nat> {
+    Cons(1, Cons(2, Cons(3, Nil)))
+}
+
+fn main() -> Bool {
+    let xs = example_list();
+    let empty: List<Nat> = Nil;
+    
+    // is_empty([1,2,3]) => false
+    // is_empty([]) => true
+    is_empty(empty)
+}

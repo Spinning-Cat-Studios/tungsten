@@ -1,0 +1,27 @@
+// Test: Option<T> with Token (record type) - simulates cursor refactoring
+pub type Option<T> =
+    | None
+    | Some(T)
+
+// Simplified Token-like record
+pub type Token = { kind: Nat, pos: Nat }
+
+pub fn is_some<T>(opt: Option<T>) -> Bool {
+    match opt {
+        None() => false,
+        Some(_) => true
+    }
+}
+
+pub fn get_kind(opt: Option<Token>) -> Nat {
+    match opt {
+        None() => 0,
+        Some(tok) => tok.kind
+    }
+}
+
+pub fn main() -> Nat {
+    let tok: Token = { kind: 42, pos: 10 };
+    let opt: Option<Token> = Some(tok);
+    get_kind(opt)
+}

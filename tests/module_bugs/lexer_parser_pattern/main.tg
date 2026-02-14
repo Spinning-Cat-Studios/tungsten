@@ -1,0 +1,25 @@
+// Test: Lexer/Parser pattern (kitchen sink)
+// Bug #1: Cross-module type resolution
+//
+// This multi-file test mirrors the actual self-hosted compiler layout:
+// - lexer/span.tg defines Span
+// - lexer/token.tg defines Token (uses Span)
+// - parser/error.tg defines ParseError (uses Span)
+// - parser/cursor.tg imports from both lexer and parser siblings
+//
+// This is the "kitchen sink" integration test for Bug #1.
+
+mod lexer;
+mod parser;
+
+use lexer::span::Span;
+use lexer::token::Token;
+
+fn main() -> Nat {
+    // Create a simple token and cursor
+    let span: Span = { start: 0, end: 5 };
+    let token: Token = { kind: 1, span: span };
+    
+    // Test that cursor can use both lexer and parser types
+    parser::cursor::token_kind(token)
+}

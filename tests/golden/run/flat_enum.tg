@@ -1,0 +1,26 @@
+// Test flat enum representation (ADR 2.2.26)
+// ADTs with n≥3 constructors use flat { i32 tag, [max_payload x i8] } representation
+
+pub type Color = Red | Green | Blue | Yellow | Purple
+
+pub fn color_to_nat(c: Color) -> Nat {
+    match c {
+        Red() => 1,
+        Green() => 2,
+        Blue() => 3,
+        Yellow() => 4,
+        Purple() => 5,
+    }
+}
+
+pub fn main() -> Nat {
+    // Test each constructor to verify tag + payload handling
+    let r = color_to_nat(Red());
+    let g = color_to_nat(Green());
+    let b = color_to_nat(Blue());
+    let y = color_to_nat(Yellow());
+    let p = color_to_nat(Purple());
+    
+    // 1 + 2 + 3 + 4 + 5 = 15
+    r + g + b + y + p
+}

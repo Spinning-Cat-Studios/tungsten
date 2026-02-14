@@ -1,0 +1,11 @@
+// src/compiler/parser/ast/mod.tg
+// AST module - exports all AST types and helpers.
+
+pub mod common;
+pub mod pattern;
+pub mod nodes;
+
+// Re-export everything for convenient access via `use parser::ast::*`
+pub use parser::ast::common::*;
+pub use parser::ast::pattern::*;
+pub use parser::ast::nodes::*;

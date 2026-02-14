@@ -1,0 +1,6 @@
+// Module c - no imports, base of the chain
+pub type CType = { value: Nat }
+
+pub fn make_c(v: Nat) -> CType {
+    { value: v }
+}

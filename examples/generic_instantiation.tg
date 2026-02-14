@@ -1,0 +1,25 @@
+// Generic function instantiation example
+// Demonstrates automatic type parameter inference for polymorphic functions
+
+// Identity function - works for any type
+pub fn id<T>(x: T) -> T {
+    x
+}
+
+// Constant function - returns first argument, ignores second
+// Note: "const" is a reserved keyword, so we use "always"
+pub fn always<A, B>(x: A, y: B) -> A {
+    x
+}
+
+fn main() -> Bool {
+    // Type parameters are inferred from arguments
+    let x = id(42);           // T = Nat
+    let b = id(true);         // T = Bool
+    let s = id("hello");      // T = String
+    
+    // Multiple type parameters inferred
+    let c = always(1, "ignored");  // A = Nat, B = String
+    
+    x == 42
+}

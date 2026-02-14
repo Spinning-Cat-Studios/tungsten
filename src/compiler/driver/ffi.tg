@@ -1,0 +1,615 @@
+// src/compiler/driver/ffi.tg
+// Driver FFI declarations and safe wrappers.
+//
+// This module provides the Tungsten-side bindings for driver operations:
+// - File I/O (read, write, exists, directories)
+// - CLI arguments
+// - Console output (print, println, eprintln)
+// - Process control (exit)
+// - TTY detection (for colored output)
+// - Evaluator bridge (for `run` command)
+//
+// ## Memory Ownership
+//
+// Functions returning strings (read_file, argv, etc.) follow immediate-copy-then-free:
+// 1. FFI returns a C string pointer
+// 2. Tungsten copies into a managed String
+// 3. tg_free_string releases the Rust allocation
+//
+// The safe wrappers in this module handle this automatically.
+
+// ===========================================================================
+// HANDLE TYPES
+// ===========================================================================
+
+// TermHandle is now in elab::ffi - import from there if needed
+
+/// Invalid handle sentinel (u64::MAX).
+pub fn invalid_handle() -> Nat { 18446744073709551615 }
+
+/// The uninhabited type for functions that never return (e.g., exit).
+/// Has a private constructor that can never be called, making it uninhabited.
+pub type Never = | Absurd
+
+// ===========================================================================
+// RAW FFI DECLARATIONS
+// ===========================================================================
+
+// --- Memory Management ---
+
+/// Free a string returned by an FFI function.
+extern "C" fn tg_free_string(s: CString) -> Unit
+
+// --- File I/O ---
+
+/// Read file contents. Returns null on error.
+extern "C" fn tg_read_file(path: CString) -> CString
+
+/// Write content to file. Returns 0 on success, -1 on error.
+extern "C" fn tg_write_file(path: CString, content: CString, len: Nat) -> Int
+
+/// Check if file exists. Returns 1 if exists, 0 if not.
+extern "C" fn tg_file_exists(path: CString) -> Int
+
+/// Check if path is a directory. Returns 1 if directory, 0 if not.
+extern "C" fn tg_is_directory(path: CString) -> Int
+
+/// List directory contents. Returns newline-separated entries.
+extern "C" fn tg_list_directory(path: CString) -> CString
+
+/// Get parent directory of path. Returns null if no parent.
+extern "C" fn tg_parent_directory(path: CString) -> CString
+
+/// Join two path components.
+extern "C" fn tg_path_join(base: CString, child: CString) -> CString
+
+// --- CLI Arguments ---
+
+/// Initialize CLI args (called from Rust main).
+extern "C" fn tg_init_args(argc: Int, argv: Ptr) -> Unit
+
+/// Get argument count.
+extern "C" fn tg_argc() -> Int
+
+/// Get argument at index. Returns null if out of bounds.
+extern "C" fn tg_argv(index: Int) -> CString
+
+// --- Console Output ---
+
+/// Print to stdout (no newline).
+extern "C" fn tg_print(s: CString, len: Nat) -> Unit
+
+/// Print to stdout with newline.
+extern "C" fn tg_println(s: CString, len: Nat) -> Unit
+
+/// Print to stderr with newline.
+extern "C" fn tg_eprintln(s: CString, len: Nat) -> Unit
+
+// --- Process Control ---
+
+/// Exit the process with given code.
+extern "C" fn tg_exit(code: Int) -> Never
+
+/// Execute a subprocess. `program` is the executable path.
+/// `args` is a newline-delimited string of arguments.
+/// Returns process exit code, or -1 on spawn failure.
+extern "C" fn tg_exec_process(program: CString, args: CString) -> Int
+
+/// Get an environment variable value. Returns null if not set.
+extern "C" fn tg_getenv(name: CString) -> CString
+
+/// Get the directory containing the current executable.
+/// Returns null if the path cannot be determined.
+extern "C" fn tg_current_exe_dir() -> CString
+
+// --- TTY Detection ---
+
+/// Check if stdout is a TTY. Returns 1 if TTY, 0 if not.
+extern "C" fn tg_stdout_is_tty() -> Int
+
+/// Check if stderr is a TTY. Returns 1 if TTY, 0 if not.
+extern "C" fn tg_stderr_is_tty() -> Int
+
+// --- Error Retrieval ---
+
+/// Get last driver error message. Returns null if no error.
+extern "C" fn tg_driver_get_last_error() -> CString
+
+// ===========================================================================
+// SAFE WRAPPERS
+// ===========================================================================
+
+// These wrappers handle:
+// 1. Converting Tungsten String ↔ CString (null-terminated C string)
+// 2. Automatic memory management (copy-then-free pattern)
+// 3. Converting C-style return values (Int → Bool, nullable → Option)
+
+/// Opaque pointer type for raw C strings returned by FFI.
+/// These must be freed with tg_free_string after copying.
+pub type CString = Nat  // Opaque pointer represented as Nat
+
+/// Opaque pointer type for argument vector.
+pub type Ptr = Nat
+
+/// Signed integer for return codes.
+pub type Int = Nat  // TODO: Should be a signed type
+
+// --- Result Types ---
+
+/// Result of an FFI operation that may fail.
+pub type FfiResult<T> =
+    | FfiOk(T)
+    | FfiErr(String)
+
+// --- File I/O Wrappers ---
+
+/// Read a file and return its contents.
+///
+/// Returns FfiOk with contents on success, FfiErr with error message on failure.
+pub fn read_file(path: String) -> FfiResult<String> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_read_file(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error reading file")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    } else {
+        let contents = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        FfiOk(contents)
+    }
+}
+
+/// Write content to a file.
+///
+/// Returns FfiOk(Unit) on success, FfiErr with error message on failure.
+pub fn write_file(path: String, content: String) -> FfiResult<Unit> {
+    let path_c = string_to_cstring(path);
+    let content_c = string_to_cstring(content);
+    let len = string_len(content);
+    let result = tg_write_file(path_c, content_c, len);
+    tg_free_string(path_c);
+    tg_free_string(content_c);
+    
+    if result == 0 {
+        FfiOk(())
+    } else {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error writing file")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    }
+}
+
+/// Check if a file exists.
+pub fn file_exists(path: String) -> Bool {
+    let path_c = string_to_cstring(path);
+    let result = tg_file_exists(path_c);
+    tg_free_string(path_c);
+    result == 1
+}
+
+/// Check if a path is a directory.
+pub fn is_directory(path: String) -> Bool {
+    let path_c = string_to_cstring(path);
+    let result = tg_is_directory(path_c);
+    tg_free_string(path_c);
+    result == 1
+}
+
+/// List contents of a directory.
+///
+/// Returns a list of entry names (files and subdirectories).
+pub fn list_directory(path: String) -> FfiResult<List<String>> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_list_directory(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error listing directory")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    } else {
+        let entries_str = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        // Split by newline
+        FfiOk(split_by_newline(entries_str))
+    }
+}
+
+/// Get the parent directory of a path.
+///
+/// Returns None if the path has no parent (is a root path).
+pub fn parent_directory(path: String) -> Option<String> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_parent_directory(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let parent = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(parent)
+    }
+}
+
+/// Join two path components.
+pub fn path_join(base: String, child: String) -> String {
+    let base_c = string_to_cstring(base);
+    let child_c = string_to_cstring(child);
+    let result_c = tg_path_join(base_c, child_c);
+    tg_free_string(base_c);
+    tg_free_string(child_c);
+    
+    if cstring_is_null(result_c) {
+        ""  // Fallback on error
+    } else {
+        let joined = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        joined
+    }
+}
+
+// --- CLI Argument Wrappers ---
+
+/// Get the number of CLI arguments.
+pub fn argc() -> Nat {
+    tg_argc()
+}
+
+/// Get a CLI argument by index.
+///
+/// Returns None if index is out of bounds.
+pub fn argv(index: Nat) -> Option<String> {
+    let result_c = tg_argv(index);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let arg = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(arg)
+    }
+}
+
+/// Get all CLI arguments as a list.
+pub fn get_args() -> List<String> {
+    get_args_acc(0, argc(), Nil)
+}
+
+fn get_args_acc(i: Nat, n: Nat, acc: List<String>) -> List<String> {
+    if i >= n {
+        list_reverse(acc)
+    } else {
+        match argv(i) {
+            Some(arg) => get_args_acc(i + 1, n, Cons(arg, acc)),
+            None() => get_args_acc(i + 1, n, acc)
+        }
+    }
+}
+
+// --- Console Output Wrappers ---
+
+/// Print a string to stdout (no newline).
+pub fn print(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_print(c, len);
+    tg_free_string(c);
+}
+
+/// Print a string to stdout with newline.
+pub fn println(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_println(c, len);
+    tg_free_string(c);
+}
+
+/// Print a string to stderr with newline.
+pub fn eprintln(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_eprintln(c, len);
+    tg_free_string(c);
+}
+
+// --- Process Control Wrappers ---
+
+/// Exit the process with the given code.
+pub fn process_exit(code: Nat) -> Never {
+    tg_exit(code)
+}
+
+/// Execute a subprocess with the given program and argument list.
+///
+/// Returns the process exit code (0 = success), or -1 if spawn fails.
+/// The subprocess inherits stdout/stderr.
+pub fn exec_process(program: String, args: List<String>) -> Int {
+    let program_c = string_to_cstring(program);
+    let args_str = join_with_newline(args);
+    let args_c = string_to_cstring(args_str);
+    let code = tg_exec_process(program_c, args_c);
+    tg_free_string(program_c);
+    tg_free_string(args_c);
+    code
+}
+
+/// Get the value of an environment variable.
+///
+/// Returns Some(value) if set, None if not set.
+pub fn get_env_var(name: String) -> Option<String> {
+    let name_c = string_to_cstring(name);
+    let result_c = tg_getenv(name_c);
+    tg_free_string(name_c);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let val = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(val)
+    }
+}
+
+/// Get the directory containing the current executable.
+///
+/// Returns Some(path) on success, None if the path cannot be determined.
+pub fn current_exe_dir() -> Option<String> {
+    let result_c = tg_current_exe_dir();
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let dir = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(dir)
+    }
+}
+
+/// Join a list of strings with newline separators.
+fn join_with_newline(strs: List<String>) -> String {
+    match strs {
+        Nil() => "",
+        Cons(first, rest) => join_with_newline_acc(rest, first)
+    }
+}
+
+fn join_with_newline_acc(strs: List<String>, acc: String) -> String {
+    match strs {
+        Nil() => acc,
+        Cons(s, rest) => {
+            let new_acc = acc ++ "\n" ++ s;
+            join_with_newline_acc(rest, new_acc)
+        }
+    }
+}
+
+// --- TTY Detection Wrappers ---
+
+/// Check if stdout supports colored output (is a TTY).
+pub fn stdout_is_tty() -> Bool {
+    tg_stdout_is_tty() == 1
+}
+
+/// Check if stderr supports colored output (is a TTY).
+pub fn stderr_is_tty() -> Bool {
+    tg_stderr_is_tty() == 1
+}
+
+// ===========================================================================
+// INTERNAL HELPERS
+// ===========================================================================
+
+/// Check if a CString is null.
+fn cstring_is_null(s: CString) -> Bool {
+    s == 0
+}
+
+/// Convert a Tungsten String to a null-terminated CString.
+/// The caller must free the result with tg_free_string.
+///
+/// TODO: This is a placeholder. The actual implementation depends on
+/// how the codegen represents Tungsten strings and allocates C strings.
+extern "C" fn tg_string_to_cstring(s: String) -> CString
+fn string_to_cstring(s: String) -> CString {
+    tg_string_to_cstring(s)
+}
+
+/// Convert a CString to a Tungsten String by copying its contents.
+///
+/// TODO: This is a placeholder. The actual implementation depends on
+/// how the codegen represents Tungsten strings.
+extern "C" fn tg_cstring_to_string(s: CString) -> String
+pub fn cstring_to_string(s: CString) -> String {
+    tg_cstring_to_string(s)
+}
+
+/// Get the length of a String.
+extern "C" fn tg_string_len_internal(s: String) -> Nat
+pub fn string_len(s: String) -> Nat {
+    tg_string_len_internal(s)
+}
+
+// --- List Helpers ---
+
+/// Simple list type for storing results.
+pub type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+// Internal list reverse - named differently to avoid conflicts with driver::util::list_reverse
+fn ffi_list_reverse<T>(list: List<T>) -> List<T> {
+    ffi_list_reverse_acc(list, Nil)
+}
+
+fn ffi_list_reverse_acc<T>(list: List<T>, acc: List<T>) -> List<T> {
+    match list {
+        Nil() => acc,
+        Cons(x, xs) => ffi_list_reverse_acc(xs, Cons(x, acc))
+    }
+}
+
+/// Split a string by newline characters.
+fn split_by_newline(s: String) -> List<String> {
+    split_by_newline_acc(s, 0, string_len(s), "", Nil)
+}
+
+fn split_by_newline_acc(s: String, i: Nat, len: Nat, current: String, acc: List<String>) -> List<String> {
+    if i >= len {
+        // Add final segment if non-empty
+        if string_len(current) > 0 {
+            ffi_list_reverse(Cons(current, acc))
+        } else {
+            ffi_list_reverse(acc)
+        }
+    } else {
+        let c = string_char_at_internal(s, i);
+        if c == 10 {  // '\n'
+            // End of line - add current to acc (if non-empty)
+            if string_len(current) > 0 {
+                split_by_newline_acc(s, i + 1, len, "", Cons(current, acc))
+            } else {
+                split_by_newline_acc(s, i + 1, len, "", acc)
+            }
+        } else {
+            // Add character to current line
+            split_by_newline_acc(s, i + 1, len, string_append_char(current, c), acc)
+        }
+    }
+}
+
+/// Get character at index.
+extern "C" fn tg_string_char_at_internal(s: String, i: Nat) -> Nat
+pub fn string_char_at_internal(s: String, i: Nat) -> Nat {
+    tg_string_char_at_internal(s, i)
+}
+
+/// Append a character (byte value) to a string.
+pub extern "C" fn tg_string_append_char(s: String, c: Nat) -> String
+pub fn string_append_char(s: String, c: Nat) -> String {
+    tg_string_append_char(s, c)
+}
+
+// ===========================================================================
+// EVALUATOR FFI
+// ===========================================================================
+
+// These functions bridge the self-hosted driver to the Rust evaluator,
+// allowing the "run" command to actually execute programs.
+
+// --- Evaluation Environment ---
+
+/// Opaque handle to an evaluation environment.
+pub type EvalEnvHandle = Nat
+
+/// Invalid handle sentinel (u64::MAX).
+pub fn invalid_env_handle() -> EvalEnvHandle { 18446744073709551615 }
+
+/// Create a new empty evaluation environment.
+extern "C" fn tg_eval_env_new() -> EvalEnvHandle
+
+/// Add a definition to an evaluation environment.
+/// Returns 1 on success, 0 on error.
+extern "C" fn tg_eval_env_add(env: EvalEnvHandle, name: CString, term: TermHandle) -> Int
+
+/// Free an evaluation environment.
+extern "C" fn tg_eval_env_free(env: EvalEnvHandle) -> Unit
+
+// --- Evaluation ---
+
+/// Evaluate a term using an environment.
+/// Returns handle to result, or INVALID_HANDLE on error.
+extern "C" fn tg_eval_run(term: TermHandle, env: EvalEnvHandle) -> TermHandle
+
+/// Evaluate a term with a step limit.
+/// limit = 0 means no limit.
+extern "C" fn tg_eval_run_with_limit(term: TermHandle, env: EvalEnvHandle, limit: Nat) -> TermHandle
+
+// --- Result Display ---
+
+/// Get a string representation of an evaluated term.
+/// Returns null-terminated C string (must free with tg_free_string).
+extern "C" fn tg_eval_display(term: TermHandle) -> CString
+
+/// Get a user-friendly representation of an evaluated term.
+/// Formats Nat as numbers, Unit as "()", etc.
+extern "C" fn tg_eval_display_value(term: TermHandle) -> CString
+
+// --- Safe Wrappers ---
+
+/// Create a new evaluation environment.
+pub fn eval_env_new() -> EvalEnvHandle {
+    tg_eval_env_new()
+}
+
+/// Add a definition to an environment (returns Bool success).
+pub fn eval_env_add(env: EvalEnvHandle, name: String, term: TermHandle) -> Bool {
+    let name_c = string_to_cstring(name);
+    let result = tg_eval_env_add(env, name_c, term);
+    tg_free_string(name_c);
+    result == 1
+}
+
+/// Free an evaluation environment.
+pub fn eval_env_free(env: EvalEnvHandle) -> Unit {
+    tg_eval_env_free(env)
+}
+
+/// Evaluate a term using an environment.
+pub fn eval_run(term: TermHandle, env: EvalEnvHandle) -> Option<TermHandle> {
+    let result = tg_eval_run(term, env);
+    if result == invalid_handle() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Evaluate a term with a step limit.
+pub fn eval_run_with_limit(term: TermHandle, env: EvalEnvHandle, limit: Nat) -> Option<TermHandle> {
+    let result = tg_eval_run_with_limit(term, env, limit);
+    if result == invalid_handle() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+/// Get the display string for an evaluated term.
+pub fn eval_display(term: TermHandle) -> Option<String> {
+    let result_c = tg_eval_display(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+/// Get a user-friendly display string for an evaluated term.
+pub fn eval_display_value(term: TermHandle) -> Option<String> {
+    let result_c = tg_eval_display_value(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}

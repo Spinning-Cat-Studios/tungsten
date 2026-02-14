@@ -1,0 +1,11 @@
+# Tungsten Linux runtime
+# Provides gcc for linking compiled programs.
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY tungsten libtungsten_core.so ./
+
+ENV LD_LIBRARY_PATH=/app

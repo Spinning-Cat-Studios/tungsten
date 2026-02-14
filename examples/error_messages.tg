@@ -1,0 +1,88 @@
+// Error message examples
+// This file demonstrates Tungsten's helpful error messages.
+// Uncomment each section to see the corresponding error.
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXAMPLE 1: Type Mismatch with Context
+// ═══════════════════════════════════════════════════════════════════════════
+// When a type mismatch occurs, Tungsten shows WHERE the expected type
+// came from (e.g., "expected due to return type").
+//
+// fn returns_nat() -> Nat {
+//     true  // Error: expected `Nat`, found `Bool`
+// }         //        ╰── expected due to return type
+//
+// Output:
+// ┌─ error_messages.tg:10:5
+// │
+// │ fn returns_nat() -> Nat {
+// │                     ─┬─
+// │                      ╰── expected due to return type
+// │     true
+// │     ──┬─
+// │       ╰── expected `Nat`, found `Bool`
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXAMPLE 2: "Did You Mean" for Undefined Variables
+// ═══════════════════════════════════════════════════════════════════════════
+// When you reference an undefined variable that's similar to an existing one,
+// Tungsten suggests the correct name.
+//
+// fn typo_example(value: Nat) -> Nat {
+//     valu  // Error: undefined variable `valu`
+// }         //        help: did you mean `value`?
+//
+// Output:
+// ┌─ error_messages.tg:25:5
+// │
+// │     valu
+// │     ──┬─
+// │       ╰── undefined variable `valu`
+// │
+// help: did you mean `value`?
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXAMPLE 3: "Did You Mean" for Undefined Types
+// ═══════════════════════════════════════════════════════════════════════════
+// Type name typos also get suggestions.
+//
+// fn type_typo() -> Boo {  // Error: undefined type `Boo`
+//     true                 //        help: did you mean `Bool`?
+// }
+//
+// Output:
+// ┌─ error_messages.tg:38:19
+// │
+// │ fn type_typo() -> Boo {
+// │                   ─┬─
+// │                    ╰── undefined type `Boo`
+// │
+// help: did you mean `Bool`?
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXAMPLE 4: Multiple Similar Names
+// ═══════════════════════════════════════════════════════════════════════════
+// When there are multiple similar names, the closest match is suggested.
+//
+// fn multiple_vars(count: Nat, counter: Nat, counting: Nat) -> Nat {
+//     coutn  // Suggests `count` (closest match)
+// }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXAMPLE 5: No Suggestion When Nothing Similar
+// ═══════════════════════════════════════════════════════════════════════════
+// When the name isn't close to anything, no suggestion is made.
+//
+// fn no_suggestion() -> Nat {
+//     xyz  // Error: undefined variable `xyz`
+// }        // (no suggestion - nothing similar)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WORKING EXAMPLE (uncommented so file compiles)
+// ═══════════════════════════════════════════════════════════════════════════
+
+fn main() -> Bool {
+    // This file compiles successfully!
+    // Uncomment the examples above to see error messages in action.
+    true
+}

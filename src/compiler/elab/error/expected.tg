@@ -1,0 +1,80 @@
+// src/compiler/elab/error/expected.tg
+// ExpectedBecause - Tracking why a type was expected.
+//
+// Used for better error messages in bidirectional type checking.
+
+use lexer::span::Span;
+use driver::util::{nat_to_string};
+
+// ===========================================================================
+// EXPECTED BECAUSE
+// ===========================================================================
+
+/// Tracks the reason a particular type is expected.
+/// Used for better error messages in bidirectional type checking.
+pub type ExpectedBecause =
+    | ExpFunctionReturn(Span)           // Expected because of return type annotation
+    | ExpIfCondition(Span)              // Expected Bool because it's if condition
+    | ExpIfBranch(Span)                 // Expected to match other if branch
+    | ExpMatchScrutinee(Span)           // Expected because matching on this type
+    | ExpMatchBranch(Span)              // Expected to match other match branches
+    | ExpLetAnnotation(Span)            // Expected because of let type annotation
+    | ExpArgumentType(Nat, Span)        // Expected as argument N of function call
+    | ExpBinaryOperand(String, Span)    // Expected because of binary operator
+    | ExpUnaryOperand(String, Span)     // Expected because of unary operator
+    | ExpFieldType(String, Span)        // Expected because of record field type
+    | ExpConstructorArg(String, Span)   // Expected because of constructor argument
+    | ExpTypeAnnotation(Span)           // Explicit type annotation
+    | ExpProofObligation(String, Span)  // Expected as proof of a proposition
+    | ExpOther(String, Span)            // Other reason with description
+
+/// Optional expected-because context.
+pub type MaybeExpectedBecause =
+    | NoExpectedBecause
+    | SomeExpectedBecause(ExpectedBecause)
+
+// ===========================================================================
+// ACCESSORS
+// ===========================================================================
+
+/// Get the span associated with an ExpectedBecause.
+pub fn expected_because_span(eb: ExpectedBecause) -> Span {
+    match eb {
+        ExpFunctionReturn(span) => span,
+        ExpIfCondition(span) => span,
+        ExpIfBranch(span) => span,
+        ExpMatchScrutinee(span) => span,
+        ExpMatchBranch(span) => span,
+        ExpLetAnnotation(span) => span,
+        ExpArgumentType(_, span) => span,
+        ExpBinaryOperand(_, span) => span,
+        ExpUnaryOperand(_, span) => span,
+        ExpFieldType(_, span) => span,
+        ExpConstructorArg(_, span) => span,
+        ExpTypeAnnotation(span) => span,
+        ExpProofObligation(_, span) => span,
+        ExpOther(_, span) => span
+    }
+}
+
+/// Get a description of why the type was expected.
+pub fn expected_because_message(eb: ExpectedBecause) -> String {
+    match eb {
+        ExpFunctionReturn(_) => "expected because of function return type",
+        ExpIfCondition(_) => "expected Bool because this is an if condition",
+        ExpIfBranch(_) => "expected to match the other branch",
+        ExpMatchScrutinee(_) => "expected because this is the match scrutinee",
+        ExpMatchBranch(_) => "expected to match the other match arms",
+        ExpLetAnnotation(_) => "expected because of type annotation",
+        ExpArgumentType(n, _) => "expected as argument " ++ nat_to_string(n),
+        ExpBinaryOperand(op, _) => "expected because of '" ++ op ++ "' operator",
+        ExpUnaryOperand(op, _) => "expected because of '" ++ op ++ "' operator",
+        ExpFieldType(name, _) => "expected because of field '" ++ name ++ "' type",
+        ExpConstructorArg(name, _) => "expected as argument to '" ++ name ++ "'",
+        ExpTypeAnnotation(_) => "expected because of explicit type annotation",
+        ExpProofObligation(prop, _) => "expected as proof of " ++ prop,
+        ExpOther(msg, _) => msg
+    }
+}
+
+

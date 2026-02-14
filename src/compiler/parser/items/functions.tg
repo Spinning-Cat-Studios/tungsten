@@ -1,0 +1,125 @@
+// src/compiler/parser/items/functions.tg
+// Function definition parsing.
+
+use lexer::token::{TokenKind, TokFn, TokArrow, TokLBrace, TokRBrace};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    ParseResultToken, ParseOkToken, ParseErrToken,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, Visibility};
+use parser::ast::nodes::{Item, ItemFn, TypeExpr, type_expr_span, Expr, expr_span, TypeParam, Param};
+use driver::ffi::{List};
+use result::{ParseResultItem, ParseOkItem, ParseErrItem,
+    ParseResultTypeParams, ParseOkTypeParams, ParseErrTypeParams,
+    ParseResultParams, ParseOkParams, ParseErrParams};
+use type_params::{parse_optional_type_params};
+use parser::items::params::{parse_params};
+use parser::types::{parse_type, ParseResultType, ParseOkType, ParseErrType};
+use parser::exprs::{parse_block, ParseResultExpr, ParseOkExpr, ParseErrExpr};
+
+// ===========================================================================
+// FUNCTION PARSING
+// ===========================================================================
+
+/// Parse a function definition.
+///
+/// Grammar:
+///   Fn = "fn" IDENT TypeParams? Params ("->" Type)? "{" Expr "}"
+pub fn parse_fn(cur: Cursor, vis: Visibility, start_span: Span) -> ParseResultItem {
+    // Consume "fn" keyword
+    let cur2 = cursor_advance(cur);
+    
+    // Parse function name
+    match cursor_eat_ident(cur2) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur2) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            ParseErrItem(parse_error_expected("function name", found, cursor_peek_span(cur2)))
+        },
+        SomeIdentResult(name, cur3) => {
+            let name_span = cursor_peek_span(cur2);
+            parse_fn_signature(cur3, vis, start_span, name, name_span)
+        }
+    }
+}
+
+/// Parse function signature and body after the name.
+/// Handles: TypeParams? Params ("->" Type)? "{" Expr "}"
+fn parse_fn_signature(cur: Cursor, vis: Visibility, start_span: Span, 
+                      name: String, name_span: Span) -> ParseResultItem {
+    // Parse optional type parameters
+    match parse_optional_type_params(cur) {
+        ParseErrTypeParams(e) => ParseErrItem(e),
+        ParseOkTypeParams(type_params, cur2) =>
+            parse_fn_params(cur2, vis, start_span, name, name_span, type_params)
+    }
+}
+
+/// Parse function parameters, return type, and body.
+fn parse_fn_params(cur: Cursor, vis: Visibility, start_span: Span,
+                   name: String, name_span: Span, type_params: List<TypeParam>) -> ParseResultItem {
+    match parse_params(cur) {
+        ParseErrParams(e) => ParseErrItem(e),
+        ParseOkParams(params, cur2) =>
+            parse_fn_return_and_body(cur2, vis, start_span, name, name_span, type_params, params)
+    }
+}
+
+/// Parse optional return type and body.
+fn parse_fn_return_and_body(cur: Cursor, vis: Visibility, start_span: Span,
+                            name: String, name_span: Span, type_params: List<TypeParam>,
+                            params: List<Param>) -> ParseResultItem {
+    match parse_optional_return_type(cur) {
+        ParseErrReturn(e) => ParseErrItem(e),
+        ParseOkReturn(ret_type, cur2) =>
+            parse_fn_body(cur2, vis, start_span, name, name_span, type_params, params, ret_type)
+    }
+}
+
+/// Parse function body and build the final item.
+fn parse_fn_body(cur: Cursor, vis: Visibility, start_span: Span,
+                 name: String, name_span: Span, type_params: List<TypeParam>,
+                 params: List<Param>, ret_type: MaybeTypeExpr) -> ParseResultItem {
+    match parse_block(cur) {
+        ParseErrExpr(e) => ParseErrItem(e),
+        ParseOkExpr(body, cur2) => {
+            let fn_def: FunctionDef = {
+                vis: vis,
+                name: ident_new(name, name_span),
+                type_params: type_params,
+                params: params,
+                return_type: ret_type,
+                body: body,
+                span: span_merge(start_span, expr_span(body))
+            };
+            ParseOkItem(ItemFn(fn_def), cur2)
+        }
+    }
+}
+
+// ===========================================================================
+// RETURN TYPE PARSING
+// ===========================================================================
+
+/// Result of parsing an optional return type.
+type ParseResultReturn =
+    | ParseOkReturn(MaybeTypeExpr, Cursor)
+    | ParseErrReturn(ParseError)
+
+/// Parse an optional return type: `-> Type`.
+fn parse_optional_return_type(cur: Cursor) -> ParseResultReturn {
+    if cursor_check(cur, TokArrow()) {
+        let cur2 = cursor_advance(cur);
+        match parse_type(cur2) {
+            ParseErrType(e) => ParseErrReturn(e),
+            ParseOkType(ty, cur3) => ParseOkReturn(SomeTypeExpr(ty), cur3)
+        }
+    } else {
+        ParseOkReturn(NoTypeExpr(), cur)
+    }
+}

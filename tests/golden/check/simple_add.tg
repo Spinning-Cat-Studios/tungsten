@@ -1,0 +1,8 @@
+// Simple function that adds two numbers
+fn add(a: Nat, b: Nat) -> Nat {
+    a + b
+}
+
+fn main() -> Nat {
+    add(40, 2)
+}

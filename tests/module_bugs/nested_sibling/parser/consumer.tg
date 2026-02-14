@@ -1,0 +1,10 @@
+// Consumer module - imports from sibling `list` module
+// This is the core Bug #1 reproduction: sibling import within nested modules
+use list::{List, Nil, Cons};
+
+pub fn length(xs: List<Nat>) -> Nat {
+    match xs {
+        Nil() => 0,
+        Cons(_, rest) => 1 + length(rest)
+    }
+}

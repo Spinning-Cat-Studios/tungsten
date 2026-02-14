@@ -1,0 +1,47 @@
+// src/compiler/driver/modules/resolve.tg
+// Module path resolution (foo.tg vs foo/mod.tg).
+
+use driver::ffi::{file_exists, path_join};
+use driver::util::{Result, Ok, Err, string_concat};
+
+// ===========================================================================
+// MODULE PATH RESOLUTION
+// ===========================================================================
+
+/// Resolve `mod foo;` to a file path.
+///
+/// Follows Rust's resolution rules:
+/// 1. Look for foo.tg in the same directory
+/// 2. Look for foo/mod.tg in a subdirectory
+/// 3. Error if both exist (ambiguous)
+/// 4. Error if neither exists (not found)
+pub fn resolve_module_path(
+    parent_dir: String,
+    name: String,
+    referenced_from: String
+) -> Result<String, String> {
+    let file_path = path_join(parent_dir, string_concat(name, ".tg"));
+    let dir_path = path_join(path_join(parent_dir, name), "mod.tg");
+    
+    let file_exists_val = file_exists(file_path);
+    let dir_exists_val = file_exists(dir_path);
+    
+    if file_exists_val && dir_exists_val {
+        Err(string_concat(
+            string_concat("Ambiguous module: both ", file_path),
+            string_concat(" and ", string_concat(dir_path, " exist"))
+        ))
+    } else if file_exists_val {
+        Ok(file_path)
+    } else if dir_exists_val {
+        Ok(dir_path)
+    } else {
+        Err(string_concat(
+            string_concat("Module not found: ", name),
+            string_concat(
+                string_concat(" (searched ", file_path),
+                string_concat(" and ", string_concat(dir_path, ")"))
+            )
+        ))
+    }
+}

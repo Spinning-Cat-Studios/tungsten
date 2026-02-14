@@ -1,0 +1,38 @@
+// Test function bodies with multiple statements.
+// This exercises the parse_block handling in function parsing.
+
+fn helper(n: Nat) -> Nat { n + 1 }
+
+// Function with statement followed by expression (the original bug case)
+fn with_call_then_expr() -> Nat {
+    helper(1);
+    42
+}
+
+// Function with multiple let bindings
+fn with_lets() -> Nat {
+    let x = 1;
+    let y = 2;
+    x + y
+}
+
+// Function with nested blocks
+fn with_nested_block() -> Nat {
+    let a = {
+        let inner = 10;
+        inner + 5
+    };
+    a * 2
+}
+
+// Function with if-expression that uses statements
+fn with_if_stmts(cond: Bool) -> Nat {
+    let base = 10;
+    if cond {
+        let x = 1;
+        base + x
+    } else {
+        let y = 2;
+        base + y
+    }
+}

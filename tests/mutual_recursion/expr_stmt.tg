@@ -1,0 +1,28 @@
+// Test: Practical AST pattern (Expr/Stmt)
+// Bug #2: Mutual type recursion support
+//
+// This is the actual pattern needed for the self-hosted parser:
+// Expr can contain Stmt (via blocks), Stmt can contain Expr.
+
+// List defined first since it doesn't have mutual dependencies
+type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+type Expr =
+    | ExprLit(Nat)
+    | ExprVar(Nat)  // Variable index
+    | ExprBlock(List<Stmt>, Expr)  // Statements then final expression
+    | ExprIf(Expr, Expr, Expr)
+
+type Stmt =
+    | StmtLet(Nat, Expr)  // let binding: name index, value
+    | StmtExpr(Expr)       // expression statement
+    | StmtReturn(Expr)
+
+fn main() -> Nat {
+    // Test that we can construct these types
+    let e = ExprLit(42);
+    let s = StmtExpr(e);
+    0
+}

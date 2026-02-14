@@ -1,0 +1,8 @@
+// Module a - imports from c
+use c::CType;
+
+pub type AType = { c_val: CType, id: Nat }
+
+pub fn make_a(c: CType) -> AType {
+    { c_val: c, id: 1 }
+}

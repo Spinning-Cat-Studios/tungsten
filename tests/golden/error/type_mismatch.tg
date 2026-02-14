@@ -1,0 +1,4 @@
+// This file has a type error - adding string to nat
+fn main() -> Nat {
+    42 + "hello"
+}

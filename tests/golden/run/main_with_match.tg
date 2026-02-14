@@ -1,0 +1,17 @@
+// Test run pipeline with pattern matching
+// Verifies evaluation of match expressions and constructors
+
+pub type Maybe<T> = Nothing | Just(T)
+
+pub fn unwrap_or_zero(m: Maybe<Nat>) -> Nat {
+    match m {
+        Nothing() => 0,
+        Just(n) => n
+    }
+}
+
+pub fn main() -> Nat {
+    let a = unwrap_or_zero(Just(10));
+    let b = unwrap_or_zero(Nothing());
+    a + b
+}

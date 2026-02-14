@@ -1,0 +1,245 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast check without LLVM (runs on all platforms)
+  check:
+    name: Check (no codegen)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      
+      - name: Clippy (no codegen)
+        run: cargo clippy -p tungsten_core -p tungsten_bootstrap --no-default-features -- -D warnings
+      
+      - name: Test (no codegen)
+        run: cargo test -p tungsten_core -p tungsten_bootstrap --no-default-features
+
+  # Full build with LLVM codegen
+  build-with-llvm:
+    name: Build with LLVM (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            llvm-prefix: /usr/lib/llvm-18
+          - os: macos-15
+            llvm-prefix: /opt/homebrew/opt/llvm@18
+    
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Install LLVM 18 (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev clang-18 lld-18 zlib1g-dev libzstd-dev
+      
+      - name: Install LLVM 18 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm@18 zstd
+      
+      - name: Build with codegen
+        env:
+          LLVM_SYS_180_PREFIX: ${{ matrix.llvm-prefix }}
+          LIBRARY_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/lib' || '' }}
+        run: cargo build --release
+      
+      - name: Test with codegen
+        env:
+          LLVM_SYS_180_PREFIX: ${{ matrix.llvm-prefix }}
+          LIBRARY_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/lib' || '' }}
+        run: cargo test
+      
+      - name: Test codegen crate
+        env:
+          LLVM_SYS_180_PREFIX: ${{ matrix.llvm-prefix }}
+          LIBRARY_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/lib' || '' }}
+        run: cargo test -p tungsten_codegen
+
+  # Integration tests — golden tests, example type-checking, interpreter runs
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: build-with-llvm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Install LLVM 18
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev clang-18 lld-18 zlib1g-dev libzstd-dev
+      
+      - name: Build release
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: cargo build --release
+      
+      - name: Golden tests
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+          LD_LIBRARY_PATH: target/release
+        run: make check-golden
+      
+      - name: Type-check examples
+        run: |
+          failed=0
+          for f in examples/*.tg; do
+            echo "Checking $f..."
+            rm -rf examples/.tungsten
+            if ! ./target/release/tungsten check "$f"; then
+              failed=$((failed + 1))
+            fi
+          done
+          if [ "$failed" -gt 0 ]; then
+            echo ""
+            echo "FAILED: $failed example(s) had errors"
+            exit 1
+          fi
+      
+      - name: Run examples (interpreter)
+        run: |
+          ./target/release/tungsten run examples/hello.tg
+          ./target/release/tungsten run examples/answer.tg
+          ./target/release/tungsten run examples/logic.tg
+
+      - name: Compile smoke test — bootstrap compiles hello.tg
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+          LD_LIBRARY_PATH: target/release
+        run: |
+          ./target/release/tungsten compile examples/hello.tg -o hello_test -v
+          output=$(./hello_test)
+          echo "Output: $output"
+          if [ "$output" != "hello world" ]; then
+            echo "FAIL: expected 'hello world', got '$output'"
+            exit 1
+          fi
+          echo "PASS: compiled program produced correct output"
+
+      - name: Docker build + compile smoke test
+        run: |
+          # Stage a release-like directory using shared script
+          ./scripts/package-linux.sh target/release/tungsten target/release/libtungsten_core.so docker-test
+
+          # Build Docker image
+          cd docker-test
+          ./tungsten-docker.sh build
+
+          # Verify tungsten works inside the container
+          cd ..
+          docker-test/tungsten-docker.sh run check examples/hello.tg
+          docker-test/tungsten-docker.sh run compile examples/hello.tg -o hello_docker -v
+
+          # Run the compiled binary inside the container
+          output=$(docker-test/tungsten-docker.sh exec ./hello_docker)
+          echo "Output: $output"
+          if [ "$output" != "hello world" ]; then
+            echo "FAIL: expected 'hello world', got '$output'"
+            exit 1
+          fi
+
+          echo "PASS: Docker compile smoke test succeeded"
+
+  # Self-host build + L2–L4 verification (macOS only)
+  # x86_64 self-host deferred to v1.5 — see notes/planned/tungsten_v1.5/x86_64_self_host.md
+  self-host:
+    name: Self-Host (macOS)
+    runs-on: macos-15
+    needs: build-with-llvm
+    
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Install LLVM 18
+        run: brew install llvm@18 zstd
+      
+      - name: Build bootstrap compiler
+        env:
+          LLVM_SYS_180_PREFIX: /opt/homebrew/opt/llvm@18
+          LIBRARY_PATH: /opt/homebrew/lib
+        run: cargo build --release
+      
+      - name: L2 — Bootstrap typechecks self-hosted source
+        run: ./target/release/tungsten check src/compiler/main.tg --max-errors=0
+      
+      - name: Self-compile — bootstrap → tungsten1
+        env:
+          LLVM_SYS_180_PREFIX: /opt/homebrew/opt/llvm@18
+          LIBRARY_PATH: /opt/homebrew/lib
+        run: ./target/release/tungsten compile src/compiler/main.tg -o tungsten1 -v
+      
+      - name: L3 — tungsten1 typechecks self-hosted source
+        env:
+          DYLD_LIBRARY_PATH: target/release
+        run: ./tungsten1 check src/compiler/main.tg --max-errors=0
+      
+      - name: Self-compile step 2 — tungsten1 → tungsten2
+        env:
+          DYLD_LIBRARY_PATH: target/release
+        run: ./tungsten1 compile src/compiler/main.tg -o tungsten2 -v
+      
+      - name: L4 — tungsten2 typechecks self-hosted source
+        env:
+          DYLD_LIBRARY_PATH: target/release
+        run: ./tungsten2 check src/compiler/main.tg --max-errors=0
+
+      - name: Compile smoke test — tungsten1 compiles hello.tg
+        env:
+          DYLD_LIBRARY_PATH: target/release
+        run: |
+          ./tungsten1 compile examples/hello.tg -o hello_test -v
+          output=$(./hello_test)
+          echo "Output: $output"
+          if [ "$output" != "hello world" ]; then
+            echo "FAIL: expected 'hello world', got '$output'"
+            exit 1
+          fi
+          echo "PASS: compiled program produced correct output"
+
+      - name: Release packaging smoke test — macOS
+        run: |
+          ./scripts/package-macos.sh tungsten1 target/release/tungsten target/release/libtungsten_core.dylib release-test
+          # Test WITHOUT DYLD_LIBRARY_PATH — must work via @rpath
+          release-test/tungsten check examples/hello.tg
+          release-test/tungsten compile examples/hello.tg -o hello_release -v
+          output=$(./hello_release)
+          echo "Output: $output"
+          if [ "$output" != "hello world" ]; then
+            echo "FAIL: expected 'hello world', got '$output'"
+            exit 1
+          fi
+          echo "PASS: macOS release packaging smoke test succeeded"

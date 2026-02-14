@@ -47,10 +47,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           ARCHIVE="tungsten-${TAG}-macos-arm64"
-          mkdir -p "$ARCHIVE"
-          cp tungsten1 "$ARCHIVE/tungsten"
-          cp "target/release/libtungsten_core.dylib" "$ARCHIVE/"
-          cp README.md LICENSE "$ARCHIVE/"
+          ./scripts/package-macos.sh tungsten1 target/release/tungsten target/release/libtungsten_core.dylib "$ARCHIVE"
+          cp -R examples README.md LICENSE "$ARCHIVE/"
           tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
           echo "ARCHIVE=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
       
@@ -78,7 +76,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
           echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev clang-18 lld-18 zlib1g-dev libzstd-dev
+          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev clang-18 lld-18 zlib1g-dev libzstd-dev patchelf
       
       - name: Build bootstrap compiler
         env:
@@ -89,10 +87,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           ARCHIVE="tungsten-${TAG}-linux-x86_64"
-          mkdir -p "$ARCHIVE"
-          cp target/release/tungsten "$ARCHIVE/"
-          cp "target/release/libtungsten_core.so" "$ARCHIVE/"
-          cp README.md LICENSE "$ARCHIVE/"
+          ./scripts/package-linux.sh target/release/tungsten target/release/libtungsten_core.so "$ARCHIVE"
+          cp -R examples README.md LICENSE "$ARCHIVE/"
           tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
           echo "ARCHIVE=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
       
@@ -114,8 +110,17 @@ jobs:
         with:
           path: artifacts
       
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          find . -name '*.tar.gz' -exec cp {} . \;
+          shasum -a 256 *.tar.gz > checksums.txt
+          cat checksums.txt
+      
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: artifacts/**/*.tar.gz
+          files: |
+            artifacts/*.tar.gz
+            artifacts/checksums.txt

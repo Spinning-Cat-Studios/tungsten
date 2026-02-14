@@ -1,0 +1,48 @@
+# Build outputs
+target/
+
+# Tungsten build cache
+.tungsten/
+
+# Generated compiler artifacts
+*.ll
+*.o
+*.s
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.idea/
+*.swp
+*.swo
+*~
+
+# Local environment
+.env
+.env.local
+
+# Built compiler binary
+tungsten1*
+tungsten2*
+tungsten3*
+
+# Built examples
+hello
+
+# Built shared library for codegen
+libtungsten_core.so
+libtungsten_core.dylib
+
+# Logs
+*.log
+
+# Scripts
+scripts/*.py
+
+# Anything that isn't a .tg file in examples/
+examples/**/*
+!examples/README.md
+!examples/**/*.tg
+!examples/**/

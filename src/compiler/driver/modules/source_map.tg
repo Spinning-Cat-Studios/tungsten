@@ -1,0 +1,72 @@
+// src/compiler/driver/modules/source_map.tg
+// SourceMap for multi-file error reporting.
+//
+// Maps file paths to their source content for diagnostics.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option, Some, None, string_eq};
+
+// ===========================================================================
+// SOURCE MAP
+// ===========================================================================
+
+/// A source file entry: (path, content).
+pub type SourceEntry = (String, String)
+
+/// Source map for multi-file error reporting.
+pub type SourceMap = {
+    sources: List<SourceEntry>,
+    main_file: Option<String>
+}
+
+/// Create an empty source map.
+pub fn source_map_empty() -> SourceMap {
+    { sources: Nil, main_file: None }
+}
+
+/// Create a source map with a single file.
+pub fn source_map_single(path: String, content: String) -> SourceMap {
+    { sources: Cons((path, content), Nil), main_file: Some(path) }
+}
+
+/// Add a source file to the map.
+pub fn source_map_insert(sm: SourceMap, path: String, content: String) -> SourceMap {
+    let new_main = match sm.main_file {
+        None() => Some(path),
+        Some(m) => Some(m)
+    };
+    { sources: Cons((path, content), sm.sources), main_file: new_main }
+}
+
+/// Get source content for a file path.
+pub fn source_map_get(sm: SourceMap, path: String) -> Option<String> {
+    source_map_get_loop(sm.sources, path)
+}
+
+/// Note: Uses List<(String, String)> directly to avoid tuple alias resolution issues (bootstrap limitation)
+fn source_map_get_loop(sources: List<(String, String)>, path: String) -> Option<String> {
+    match sources {
+        Nil() => None,
+        Cons(entry, rest) =>
+            let (p, content) = entry;
+            if string_eq(p, path) {
+                Some(content)
+            } else {
+                source_map_get_loop(rest, path)
+            }
+    }
+}
+
+/// Get the main source file content.
+pub fn source_map_main_source(sm: SourceMap) -> Option<String> {
+    let main: Option<String> = sm.main_file;
+    match main {
+        None() => None,
+        Some(path) => source_map_get(sm, path)
+    }
+}
+
+/// Get the main file path.
+pub fn source_map_main_file(sm: SourceMap) -> Option<String> {
+    sm.main_file
+}

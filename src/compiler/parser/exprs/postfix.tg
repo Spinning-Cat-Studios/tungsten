@@ -1,0 +1,143 @@
+// src/compiler/parser/exprs/postfix.tg
+// Postfix operator parsing: function calls, field access, type application.
+
+use lexer::token::{TokenKind, TokLParen, TokRParen, TokDot, TokColonColon, TokLAngle, TokComma};
+use lexer::span::span_merge;
+use parser::error::{ParseError, parse_error_expected, parse_error_eof};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_check, cursor_check_ahead, cursor_is_eof,
+    cursor_advance, cursor_expect, cursor_eat_ident, token_kind_name,
+    ParseResultToken, ParseOkToken, ParseErrToken,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new};
+use parser::ast::nodes::{Expr, ExprApp, ExprTypeApp, ExprField, expr_span};
+use result::{ParseResultExpr, ParseOkExpr, ParseErrExpr,
+    ParseResultExprList, ParseOkExprList, ParseErrExprList,
+    cursor_peek_span};
+use atoms::parse_atom;
+use pratt::parse_expr;
+use parser::types::{parse_type_args, ParseResultTypeList, ParseOkTypeList, ParseErrTypeList};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+
+// ===========================================================================
+// POSTFIX OPERATORS
+// ===========================================================================
+
+/// Parse postfix expression (atom followed by postfix operators).
+/// This is called when there's no unary operator.
+pub fn parse_postfix(cur: Cursor) -> ParseResultExpr {
+    match parse_atom(cur) {
+        ParseErrExpr(e) => ParseErrExpr(e),
+        ParseOkExpr(expr, cur2) => parse_postfix_loop(expr, cur2)
+    }
+}
+
+/// Parse chain of postfix operators: f(x), e.field, e::<T>
+/// 
+/// Postfix operators bind tighter than all binary operators.
+pub fn parse_postfix_loop(expr: Expr, cur: Cursor) -> ParseResultExpr {
+    match cursor_peek_kind(cur) {
+        // Function call: expr(args)
+        Some(TokLParen()) => {
+            match parse_call_args(cur) {
+                ParseErrExprList(e) => ParseErrExpr(e),
+                ParseOkExprList(args, cur2) => {
+                    let span = span_merge(expr_span(expr), cursor_peek_span(cur2));
+                    // Adjust span to end at prev position (after closing paren)
+                    let call_expr = ExprApp(expr, args, span);
+                    parse_postfix_loop(call_expr, cur2)
+                }
+            }
+        },
+        
+        // Field access: expr.field
+        Some(TokDot()) => {
+            let cur2 = cursor_advance(cur);  // consume `.`
+            match cursor_eat_ident(cur2) {
+                NoIdentResult() => {
+                    let found = match cursor_peek_kind(cur2) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    ParseErrExpr(parse_error_expected("field name", found, cursor_peek_span(cur2)))
+                },
+                SomeIdentResult(name, cur3) => {
+                    let field_span = cursor_peek_span(cur2);
+                    let field_ident = ident_new(name, field_span);
+                    let span = span_merge(expr_span(expr), field_span);
+                    let field_expr = ExprField(expr, field_ident, span);
+                    parse_postfix_loop(field_expr, cur3)
+                }
+            }
+        },
+        
+        // Type application: expr::<T, U>
+        Some(TokColonColon()) => {
+            if cursor_check_ahead(cur, TokLAngle()) {
+                let cur2 = cursor_advance(cur);  // consume `::`
+                match parse_type_args(cur2) {
+                    ParseErrTypeList(e) => ParseErrExpr(e),
+                    ParseOkTypeList(type_args, cur3) => {
+                        let span = span_merge(expr_span(expr), cursor_peek_span(cur3));
+                        let type_app_expr = ExprTypeApp(expr, type_args, span);
+                        parse_postfix_loop(type_app_expr, cur3)
+                    }
+                }
+            } else {
+                // `::` not followed by `<`, not type application
+                ParseOkExpr(expr, cur)
+            }
+        },
+        
+        // No more postfix operators
+        _ => ParseOkExpr(expr, cur)
+    }
+}
+
+/// Parse function call arguments: (expr, expr, ...)
+fn parse_call_args(cur: Cursor) -> ParseResultExprList {
+    match cursor_expect(cur, TokLParen()) {
+        ParseErrToken(e) => ParseErrExprList(e),
+        ParseOkToken(_, cur2) => parse_expr_list_until_rparen(cur2, Nil)
+    }
+}
+
+/// Parse comma-separated expressions until `)`.
+fn parse_expr_list_until_rparen(cur: Cursor, acc: List<Expr>) -> ParseResultExprList {
+    // Check for closing paren
+    if cursor_check(cur, TokRParen()) {
+        let cur2 = cursor_advance(cur);  // consume `)`
+        ParseOkExprList(list_reverse(acc), cur2)
+    } else if cursor_is_eof(cur) {
+        ParseErrExprList(parse_error_eof("')'", cursor_peek_span(cur)))
+    } else {
+        // Parse expression
+        match parse_expr(cur) {
+            ParseErrExpr(e) => ParseErrExprList(e),
+            ParseOkExpr(expr, cur2) => {
+                let new_acc = Cons(expr, acc);
+                // Check for comma or closing paren
+                if cursor_check(cur2, TokComma()) {
+                    let cur3 = cursor_advance(cur2);  // consume `,`
+                    // Allow trailing comma
+                    if cursor_check(cur3, TokRParen()) {
+                        let cur4 = cursor_advance(cur3);
+                        ParseOkExprList(list_reverse(new_acc), cur4)
+                    } else {
+                        parse_expr_list_until_rparen(cur3, new_acc)
+                    }
+                } else if cursor_check(cur2, TokRParen()) {
+                    let cur3 = cursor_advance(cur2);
+                    ParseOkExprList(list_reverse(new_acc), cur3)
+                } else {
+                    let found = match cursor_peek_kind(cur2) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    ParseErrExprList(parse_error_expected("',' or ')'", found, cursor_peek_span(cur2)))
+                }
+            }
+        }
+    }
+}

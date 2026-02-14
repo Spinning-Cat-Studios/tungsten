@@ -1,0 +1,1121 @@
+// src/compiler/elab/exprs/match.tg
+// Match expression elaboration.
+//
+// This module handles elaboration of match expressions, including:
+// - Bool matches (desugared to if-then-else)
+// - ADT matches (using case expressions)
+// - Catch-all patterns (variable or wildcard)
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, Pattern, PatWildcard, PatVar, PatLiteral, PatTuple, PatConstructor, PatOr, PatError,
+    PatLit, PatLitBool,
+    MatchArm,
+    MaybeExpr, NoExpr, SomeExpr,
+    Ident, ident_name,
+    Path, MkPath, path_span
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_if, tg_term_case, tg_term_unfold, tg_term_var,
+    tg_type_is_mu, tg_type_get_mu_body, tg_type_get_mu_var, tg_type_is_sum,
+    tg_type_get_sum_left, tg_type_get_sum_right, tg_type_substitute,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_bool, tg_types_equal,
+    tg_string_to_cstr
+};
+use elab::env::{
+    Env, env_push_scope, env_pop_scope, env_bind_local,
+    env_resolve_value, env_count_constructors,
+    MaybeSpan, NoSpan, SomeSpan
+};
+use elab::exprs::records::deep_types_equal;
+use elab::env::resolved::{
+    MaybeResolvedValue, NoResolvedValue, SomeResolvedValue,
+    ResolvedValue, ResolvedConstructor
+};
+use elab::exprs::result::{ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error, add_expected_because};
+use elab::error::ExpMatchBranch;
+use elab::cir::{CodegenIR, CIRIf, CIRCase, CIRUnfold, CIRVar, ct_unit};
+
+// Import synth/check from parent module for mutual recursion
+use elab::exprs::{synth, check};
+
+// ===========================================================================
+// MATCH ELABORATION
+// ===========================================================================
+
+/// Synthesize a match expression.
+pub fn synth_match(env: Env, scrutinee: Expr, arms: List<MatchArm>, span: Span) -> ElabExprResult {
+    // First, synthesize the scrutinee to get its type
+    match synth(env, scrutinee) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, scrut_term, scrut_ty, scrut_cir) =>
+            dispatch_match(env2, scrut_term, scrut_ty, scrut_cir, arms, span)
+    }
+}
+
+/// Check a match expression against an expected type.
+pub fn check_match(
+    env: Env,
+    scrutinee: Expr,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    // Synthesize scrutinee, then check all arms against expected
+    match synth(env, scrutinee) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, scrut_term, scrut_ty, scrut_cir) =>
+            dispatch_match_checked(env2, scrut_term, scrut_ty, scrut_cir, arms, expected, span)
+    }
+}
+
+/// Dispatch to appropriate match handler based on scrutinee type.
+fn dispatch_match(
+    env: Env,
+    scrut_term: TermHandle,
+    scrut_ty: TypeHandle,
+    scrut_cir: CodegenIR,
+    arms: List<MatchArm>,
+    span: Span
+) -> ElabExprResult {
+    // Check if scrutinee is Bool
+    if is_bool_type(scrut_ty) {
+        elab_bool_match(env, scrut_term, scrut_cir, arms, span)
+    // Check if scrutinee is a sum type or μ-type (ADT)
+    } else if tg_type_is_mu(scrut_ty) || tg_type_is_sum(scrut_ty) || tg_type_is_product(scrut_ty) {
+        elab_adt_match(env, scrut_term, scrut_ty, scrut_cir, arms, span)
+    } else {
+        ElabExprErr(elab_expr_error("cannot match on this type", span))
+    }
+}
+
+/// Dispatch match with expected type.
+fn dispatch_match_checked(
+    env: Env,
+    scrut_term: TermHandle,
+    scrut_ty: TypeHandle,
+    scrut_cir: CodegenIR,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    if is_bool_type(scrut_ty) {
+        elab_bool_match_checked(env, scrut_term, scrut_cir, arms, expected, span)
+    } else if tg_type_is_mu(scrut_ty) || tg_type_is_sum(scrut_ty) || tg_type_is_product(scrut_ty) {
+        elab_adt_match_checked(env, scrut_term, scrut_ty, scrut_cir, arms, expected, span)
+    } else {
+        ElabExprErr(elab_expr_error("cannot match on this type", span))
+    }
+}
+
+// ===========================================================================
+// BOOL MATCH (Desugar to if-then-else)
+// ===========================================================================
+
+/// Elaborate a match on Bool, transforming to if-then-else.
+fn elab_bool_match(
+    env: Env,
+    scrut_term: TermHandle,
+    scrut_cir: CodegenIR,
+    arms: List<MatchArm>,
+    span: Span
+) -> ElabExprResult {
+    // Extract true and false arms
+    match extract_bool_arms(arms, span) {
+        ExtractBoolErr(msg) => ElabExprErr(elab_expr_error(msg, span)),
+        ExtractBoolOk(true_body, false_body, true_span, false_span) =>
+            // Synthesize true branch to get result type
+            match synth(env, true_body) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, true_term, result_ty, true_cir) =>
+                    // Check false branch against same type, with context
+                    match check(env2, false_body, result_ty) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(true_span))),
+                        ElabExprOk(env3, false_term, _, false_cir) =>
+                            let term = tg_term_if(scrut_term, true_term, false_term);
+                            let cir = CIRIf(scrut_cir, true_cir, false_cir);
+                            ElabExprOk(env3, term, result_ty, cir)
+                    }
+            }
+    }
+}
+
+/// Elaborate Bool match with expected type.
+fn elab_bool_match_checked(
+    env: Env,
+    scrut_term: TermHandle,
+    scrut_cir: CodegenIR,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match extract_bool_arms(arms, span) {
+        ExtractBoolErr(msg) => ElabExprErr(elab_expr_error(msg, span)),
+        ExtractBoolOk(true_body, false_body, true_span, false_span) =>
+            match check(env, true_body, expected) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, true_term, _, true_cir) =>
+                    match check(env2, false_body, expected) {
+                        // For checked mode, first arm establishes expected type
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(true_span))),
+                        ElabExprOk(env3, false_term, _, false_cir) =>
+                            let term = tg_term_if(scrut_term, true_term, false_term);
+                            let cir = CIRIf(scrut_cir, true_cir, false_cir);
+                            ElabExprOk(env3, term, expected, cir)
+                    }
+            }
+    }
+}
+
+/// Result of extracting Bool arms.
+type ExtractBoolResult =
+    | ExtractBoolOk(Expr, Expr, Span, Span)  // (true_body, false_body, true_span, false_span)
+    | ExtractBoolErr(String)
+
+// MaybeSpan is imported from elab::env
+
+/// Extract true and false arms from a Bool match.
+fn extract_bool_arms(arms: List<MatchArm>, span: Span) -> ExtractBoolResult {
+    extract_bool_arms_helper(arms, NoExpr, NoExpr, NoSpan, NoSpan, span)
+}
+
+fn extract_bool_arms_helper(
+    arms: List<MatchArm>,
+    true_body: MaybeExpr,
+    false_body: MaybeExpr,
+    true_span: MaybeSpan,
+    false_span: MaybeSpan,
+    span: Span
+) -> ExtractBoolResult {
+    match arms {
+        Nil() =>
+            // Check we found both arms
+            match true_body {
+                NoExpr() => ExtractBoolErr("missing `true` pattern in Bool match"),
+                SomeExpr(tb) =>
+                    match false_body {
+                        NoExpr() => ExtractBoolErr("missing `false` pattern in Bool match"),
+                        SomeExpr(fb) =>
+                            match true_span {
+                                SomeSpan(ts) =>
+                                    match false_span {
+                                        SomeSpan(fs) => ExtractBoolOk(tb, fb, ts, fs),
+                                        NoSpan() => ExtractBoolOk(tb, fb, ts, span)
+                                    },
+                                NoSpan() =>
+                                    match false_span {
+                                        SomeSpan(fs) => ExtractBoolOk(tb, fb, span, fs),
+                                        NoSpan() => ExtractBoolOk(tb, fb, span, span)
+                                    }
+                            }
+                    }
+            },
+        Cons(arm, rest) =>
+            // Check this arm's pattern
+            let arm_span = arm.span;
+            match arm.pattern {
+                PatLiteral(lit, _) =>
+                    match lit {
+                        PatLitBool(b) =>
+                            if b {
+                                match true_body {
+                                    SomeExpr(_) => ExtractBoolErr("duplicate `true` pattern"),
+                                    NoExpr() => extract_bool_arms_helper(rest, SomeExpr(arm.body), false_body, SomeSpan(arm_span), false_span, span)
+                                }
+                            } else {
+                                match false_body {
+                                    SomeExpr(_) => ExtractBoolErr("duplicate `false` pattern"),
+                                    NoExpr() => extract_bool_arms_helper(rest, true_body, SomeExpr(arm.body), true_span, SomeSpan(arm_span), span)
+                                }
+                            },
+                        _ => ExtractBoolErr("non-Bool literal in Bool match")
+                    },
+                _ => ExtractBoolErr("non-literal pattern in Bool match; use `true` or `false`")
+            }
+    }
+}
+
+// ===========================================================================
+// ADT MATCH
+// ===========================================================================
+
+/// Elaborate a match on an ADT (sum type or μ-type).
+fn elab_adt_match(
+    env: Env,
+    scrut_term: TermHandle,
+    scrut_ty: TypeHandle,
+    scrut_cir: CodegenIR,
+    arms: List<MatchArm>,
+    span: Span
+) -> ElabExprResult {
+    // If μ-type, unfold first
+    let (match_term, sum_ty, match_cir) = if tg_type_is_mu(scrut_ty) {
+        (tg_term_unfold(scrut_ty, scrut_term), tg_type_get_mu_body(scrut_ty), CIRUnfold(ct_unit(), scrut_cir))
+    } else {
+        (scrut_term, scrut_ty, scrut_cir)
+    };
+    
+    // Reorder arms by constructor index so arm positions match sum type structure
+    let sorted_arms = reorder_arms_by_constructor(env, arms);
+    
+    match sorted_arms {
+        Nil() =>
+            ElabExprErr(elab_expr_error("empty match arms", span)),
+        Cons(arm1, rest) =>
+            match rest {
+                Nil() =>
+                    // Single arm - check if it's a catch-all or single-constructor match
+                    if is_catch_all_pattern(arm1.pattern) {
+                        elab_catch_all_arm(env, scrut_term, scrut_ty, match_cir, arm1, span)
+                    } else if tg_type_is_product(sum_ty) {
+                        // Single-constructor ADT (Product type, no Sum wrapper).
+                        // One arm is exhaustive. Treat like catch-all with constructor binding.
+                        elab_catch_all_arm(env, scrut_term, sum_ty, match_cir, arm1, span)
+                    } else if is_newtype_unwrap(env, arm1, scrut_ty) {
+                        // Newtype match: single-ctor single-field type whose field type
+                        // matches the scrutinee structurally. Bind scrutinee directly.
+                        elab_catch_all_arm(env, scrut_term, scrut_ty, match_cir, arm1, span)
+                    } else {
+                        ElabExprErr(elab_expr_error("non-exhaustive match: single non-catch-all arm", span))
+                    },
+                Cons(arm2, rest2) =>
+                    match rest2 {
+                        Nil() =>
+                            // Two arms - standard binary case
+                            // Pass scrut_ty for μ-ref substitution
+                            elab_binary_match(env, match_term, sum_ty, scrut_ty, match_cir, arm1, arm2, span),
+                        Cons(_, _) =>
+                            // More than 2 arms - need to build nested cases
+                            elab_multi_arm_match(env, match_term, sum_ty, scrut_ty, match_cir, sorted_arms, span)
+                    }
+            }
+    }
+}
+
+/// Elaborate ADT match with expected type.
+fn elab_adt_match_checked(
+    env: Env,
+    scrut_term: TermHandle,
+    scrut_ty: TypeHandle,
+    scrut_cir: CodegenIR,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    // If μ-type, unfold first
+    let (match_term, sum_ty, match_cir) = if tg_type_is_mu(scrut_ty) {
+        (tg_term_unfold(scrut_ty, scrut_term), tg_type_get_mu_body(scrut_ty), CIRUnfold(ct_unit(), scrut_cir))
+    } else {
+        (scrut_term, scrut_ty, scrut_cir)
+    };
+    
+    // Reorder arms by constructor index so arm positions match sum type structure
+    let sorted_arms = reorder_arms_by_constructor(env, arms);
+    
+    match sorted_arms {
+        Nil() =>
+            ElabExprErr(elab_expr_error("empty match arms", span)),
+        Cons(arm1, rest) =>
+            match rest {
+                Nil() =>
+                    if is_catch_all_pattern(arm1.pattern) {
+                        elab_catch_all_arm_checked(env, scrut_term, scrut_ty, match_cir, arm1, expected, span)
+                    } else if tg_type_is_product(sum_ty) {
+                        // Single-constructor ADT — one arm is exhaustive
+                        elab_catch_all_arm_checked(env, scrut_term, sum_ty, match_cir, arm1, expected, span)
+                    } else if is_newtype_unwrap(env, arm1, scrut_ty) {
+                        // Newtype match: bind scrutinee directly
+                        elab_catch_all_arm_checked(env, scrut_term, scrut_ty, match_cir, arm1, expected, span)
+                    } else {
+                        ElabExprErr(elab_expr_error("non-exhaustive match", span))
+                    },
+                Cons(arm2, rest2) =>
+                    match rest2 {
+                        Nil() =>
+                            // Pass scrut_ty for μ-ref substitution
+                            elab_binary_match_checked(env, match_term, sum_ty, scrut_ty, match_cir, arm1, arm2, expected, span),
+                        Cons(_, _) =>
+                            elab_multi_arm_match_checked(env, match_term, sum_ty, scrut_ty, match_cir, sorted_arms, expected, span)
+                    }
+            }
+    }
+}
+
+/// Elaborate a binary sum match (exactly 2 arms).
+fn elab_binary_match(
+    env: Env,
+    scrut_term: TermHandle,
+    sum_ty: TypeHandle,
+    orig_scrut_ty: TypeHandle,  // Original scrutinee type (μ-type) for substitution
+    scrut_cir: CodegenIR,
+    arm1: MatchArm,
+    arm2: MatchArm,
+    span: Span
+) -> ElabExprResult {
+    // Get left and right types from sum (for term structure)
+    let left_ty = tg_type_get_sum_left(sum_ty);
+    let right_ty = tg_type_get_sum_right(sum_ty);
+    
+    // If scrutinee was a μ-type, substitute μ-refs in component types
+    // This fixes generic ADT pattern inference (ADR 30.1.26)
+    let (left_ty, right_ty) = if tg_type_is_mu(orig_scrut_ty) {
+        let mu_var = tg_type_get_mu_var(orig_scrut_ty);
+        (tg_type_substitute(left_ty, mu_var, orig_scrut_ty),
+         tg_type_substitute(right_ty, mu_var, orig_scrut_ty))
+    } else {
+        (left_ty, right_ty)
+    };
+    
+    // Use constructor info to get correct binding types (fixes arm gap problem)
+    let arm1_bind_ty = get_arm_binding_type(env, arm1, left_ty, sum_ty, orig_scrut_ty);
+    let arm2_bind_ty = get_arm_binding_type(env, arm2, right_ty, sum_ty, orig_scrut_ty);
+    
+    // Get variable names from patterns
+    let (_, var1) = bind_pattern_in_scope(env, arm1.pattern, arm1_bind_ty);
+    let (_, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+    
+    // Track first arm span for error context
+    let arm1_span = arm1.span;
+    
+    // Elaborate first arm to get result type
+    let env1 = env_push_scope(env);
+    let (env1, _) = bind_pattern_in_scope(env1, arm1.pattern, arm1_bind_ty);
+    match synth(env1, arm1.body) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body1, result_ty, body1_cir) =>
+            // Check second arm with ExpMatchBranch context
+            let env3 = env_push_scope(env_pop_scope(env2));
+            let (env3, _) = bind_pattern_in_scope(env3, arm2.pattern, arm2_bind_ty);
+            match check(env3, arm2.body, result_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(arm1_span))),
+                ElabExprOk(env4, body2, _, body2_cir) =>
+                    let term = tg_term_case(
+                        scrut_term,
+                        tg_string_to_cstr(var1), body1,
+                        tg_string_to_cstr(var2), body2
+                    );
+                    let cir = CIRCase(scrut_cir, var1, body1_cir, var2, body2_cir);
+                    ElabExprOk(env_pop_scope(env4), term, result_ty, cir)
+            }
+    }
+}
+
+/// Elaborate binary match with expected type.
+fn elab_binary_match_checked(
+    env: Env,
+    scrut_term: TermHandle,
+    sum_ty: TypeHandle,
+    orig_scrut_ty: TypeHandle,  // Original scrutinee type (μ-type) for substitution
+    scrut_cir: CodegenIR,
+    arm1: MatchArm,
+    arm2: MatchArm,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    let left_ty = tg_type_get_sum_left(sum_ty);
+    let right_ty = tg_type_get_sum_right(sum_ty);
+    
+    // If scrutinee was a μ-type, substitute μ-refs in component types
+    let (left_ty, right_ty) = if tg_type_is_mu(orig_scrut_ty) {
+        let mu_var = tg_type_get_mu_var(orig_scrut_ty);
+        (tg_type_substitute(left_ty, mu_var, orig_scrut_ty),
+         tg_type_substitute(right_ty, mu_var, orig_scrut_ty))
+    } else {
+        (left_ty, right_ty)
+    };
+    
+    // Use constructor info for correct binding types (fixes arm gap problem)
+    let arm1_bind_ty = get_arm_binding_type(env, arm1, left_ty, sum_ty, orig_scrut_ty);
+    let arm2_bind_ty = get_arm_binding_type(env, arm2, right_ty, sum_ty, orig_scrut_ty);
+    
+    let (_, var1) = bind_pattern_in_scope(env, arm1.pattern, arm1_bind_ty);
+    let (_, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+    
+    // Track first arm span for error context
+    let arm1_span = arm1.span;
+    
+    // Check both arms against expected
+    let env1 = env_push_scope(env);
+    let (env1, _) = bind_pattern_in_scope(env1, arm1.pattern, arm1_bind_ty);
+    match check(env1, arm1.body, expected) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body1, _, body1_cir) =>
+            let env3 = env_push_scope(env_pop_scope(env2));
+            let (env3, _) = bind_pattern_in_scope(env3, arm2.pattern, arm2_bind_ty);
+            match check(env3, arm2.body, expected) {
+                // Second arm error gets context from first arm
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(arm1_span))),
+                ElabExprOk(env4, body2, _, body2_cir) =>
+                    let term = tg_term_case(
+                        scrut_term,
+                        tg_string_to_cstr(var1), body1,
+                        tg_string_to_cstr(var2), body2
+                    );
+                    let cir = CIRCase(scrut_cir, var1, body1_cir, var2, body2_cir);
+                    ElabExprOk(env_pop_scope(env4), term, expected, cir)
+            }
+    }
+}
+
+/// Elaborate a catch-all arm (single arm with variable/wildcard pattern).
+fn elab_catch_all_arm(
+    env: Env,
+    scrut_term: TermHandle,
+    scrut_ty: TypeHandle,
+    scrut_cir: CodegenIR,
+    arm: MatchArm,
+    span: Span
+) -> ElabExprResult {
+    let env1 = env_push_scope(env);
+    let (env1, _) = bind_pattern_in_scope(env1, arm.pattern, scrut_ty);
+    match synth(env1, arm.body) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body, result_ty, body_cir) =>
+            // The term is just the body with variable bound
+            // (We'd need let-binding or direct substitution here)
+            // For now, wrap in a case if it's a sum type
+            ElabExprOk(env_pop_scope(env2), body, result_ty, body_cir)
+    }
+}
+
+/// Elaborate catch-all arm with expected type.
+fn elab_catch_all_arm_checked(
+    env: Env,
+    scrut_term: TermHandle,
+    scrut_ty: TypeHandle,
+    scrut_cir: CodegenIR,
+    arm: MatchArm,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    let env1 = env_push_scope(env);
+    let (env1, _) = bind_pattern_in_scope(env1, arm.pattern, scrut_ty);
+    match check(env1, arm.body, expected) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body, _, body_cir) =>
+            ElabExprOk(env_pop_scope(env2), body, expected, body_cir)
+    }
+}
+
+/// Elaborate multi-arm match (> 2 arms).
+/// Builds nested case expressions using recursive case peeling.
+/// For a sum type A + (B + (C + D)) and arms [arm1, arm2, arm3, arm4]:
+///   case scrut of inl(x1) => body1 | inr(rest) =>
+///     case rest of inl(x2) => body2 | inr(rest2) =>
+///       case rest2 of inl(x3) => body3 | inr(x4) => body4
+fn elab_multi_arm_match(
+    env: Env,
+    scrut_term: TermHandle,
+    sum_ty: TypeHandle,
+    orig_scrut_ty: TypeHandle,
+    scrut_cir: CodegenIR,
+    arms: List<MatchArm>,
+    span: Span
+) -> ElabExprResult {
+    // Synthesize first arm to get result type
+    match arms {
+        Nil() => ElabExprErr(elab_expr_error("empty match arms", span)),
+        Cons(arm1, rest) => {
+            let left_ty = tg_type_get_sum_left(sum_ty);
+            // If scrutinee was a μ-type, substitute μ-refs in component types
+            let left_ty = if tg_type_is_mu(orig_scrut_ty) {
+                let mu_var = tg_type_get_mu_var(orig_scrut_ty);
+                tg_type_substitute(left_ty, mu_var, orig_scrut_ty)
+            } else { left_ty };
+            
+            // Use constructor info for correct binding type
+            let arm1_bind_ty = get_arm_binding_type(env, arm1, left_ty, sum_ty, orig_scrut_ty);
+            
+            let (_, var1) = bind_pattern_in_scope(env, arm1.pattern, arm1_bind_ty);
+            let arm1_span = arm1.span;
+            
+            let env1 = env_push_scope(env);
+            let (env1, _) = bind_pattern_in_scope(env1, arm1.pattern, arm1_bind_ty);
+            
+            match synth(env1, arm1.body) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, body1, result_ty, body1_cir) => {
+                    let env2 = env_pop_scope(env2);
+                    // Now recursively build rest with expected type
+                    let right_ty = tg_type_get_sum_right(sum_ty);
+                    elab_multi_arm_rest(
+                        env2, right_ty, orig_scrut_ty,
+                        rest, result_ty, span, arm1_span,
+                        // Build the final case expression with these components:
+                        scrut_term, scrut_cir, var1, body1, body1_cir
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Helper to build the rest of a multi-arm match (after first arm synthesized).
+/// Takes the first arm components and recursively builds nested cases.
+fn elab_multi_arm_rest(
+    env: Env,
+    sum_ty: TypeHandle,           // Current sum type to match on (right side)
+    orig_scrut_ty: TypeHandle,    // Original μ-type for substitution
+    arms: List<MatchArm>,         // Remaining arms
+    expected: TypeHandle,         // Result type from first arm
+    span: Span,
+    first_arm_span: Span,         // For error context
+    // Components for building the case:
+    scrut_term: TermHandle,
+    scrut_cir: CodegenIR,
+    var1: String,
+    body1: TermHandle,
+    body1_cir: CodegenIR
+) -> ElabExprResult {
+    match arms {
+        Nil() => ElabExprErr(elab_expr_error("too few match arms for sum type", span)),
+        Cons(arm2, rest) =>
+            match rest {
+                Nil() => {
+                    // Last arm - this is the final inr case
+                    // The sum_ty IS the type we bind (no more decomposition needed)
+                    let right_ty = if tg_type_is_mu(orig_scrut_ty) {
+                        let mu_var = tg_type_get_mu_var(orig_scrut_ty);
+                        tg_type_substitute(sum_ty, mu_var, orig_scrut_ty)
+                    } else { sum_ty };
+                    
+                    // Use constructor info for correct binding type
+                    let arm2_bind_ty = get_arm_binding_type(env, arm2, right_ty, sum_ty, orig_scrut_ty);
+                    
+                    let (_, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+                    let env2 = env_push_scope(env);
+                    let (env2, _) = bind_pattern_in_scope(env2, arm2.pattern, arm2_bind_ty);
+                    
+                    match check(env2, arm2.body, expected) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(first_arm_span))),
+                        ElabExprOk(env3, body2, _, body2_cir) =>
+                            // Build the case expression
+                            let term = tg_term_case(
+                                scrut_term,
+                                tg_string_to_cstr(var1), body1,
+                                tg_string_to_cstr(var2), body2
+                            );
+                            let cir = CIRCase(scrut_cir, var1, body1_cir, var2, body2_cir);
+                            ElabExprOk(env_pop_scope(env3), term, expected, cir)
+                    }
+                },
+                Cons(_, _) => {
+                    // More arms remain - need nested case
+                    // Current arm handles inl of current sum_ty
+                    // Rest handles inr (recursively)
+                    let left_ty = tg_type_get_sum_left(sum_ty);
+                    let left_ty = if tg_type_is_mu(orig_scrut_ty) {
+                        let mu_var = tg_type_get_mu_var(orig_scrut_ty);
+                        tg_type_substitute(left_ty, mu_var, orig_scrut_ty)
+                    } else { left_ty };
+                    
+                    // Use constructor info for correct binding type
+                    let arm2_bind_ty = get_arm_binding_type(env, arm2, left_ty, sum_ty, orig_scrut_ty);
+                    
+                    let (_, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+                    let env2 = env_push_scope(env);
+                    let (env2, _) = bind_pattern_in_scope(env2, arm2.pattern, arm2_bind_ty);
+                    
+                    match check(env2, arm2.body, expected) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(first_arm_span))),
+                        ElabExprOk(env3, body2, _, body2_cir) => {
+                            let env3 = env_pop_scope(env3);
+                            // Recursively build nested case for remaining arms
+                            let right_ty = tg_type_get_sum_right(sum_ty);
+                            // Generate a fresh variable for the inr binding
+                            let rest_var = "_rest";
+                            let rest_var_term = tg_term_var(tg_string_to_cstr(rest_var));
+                            let rest_var_cir = CIRVar(rest_var);
+                            
+                            // Recursive call builds the inner case
+                            match elab_multi_arm_rest(
+                                env3, right_ty, orig_scrut_ty,
+                                rest, expected, span, first_arm_span,
+                                rest_var_term, rest_var_cir, var2, body2, body2_cir
+                            ) {
+                                ElabExprErr(e) => ElabExprErr(e),
+                                ElabExprOk(env4, inner_term, _, inner_cir) =>
+                                    // Now build outer case: case scrut of inl(var1) => body1 | inr(rest_var) => inner_term
+                                    let term = tg_term_case(
+                                        scrut_term,
+                                        tg_string_to_cstr(var1), body1,
+                                        tg_string_to_cstr(rest_var), inner_term
+                                    );
+                                    let cir = CIRCase(scrut_cir, var1, body1_cir, rest_var, inner_cir);
+                                    ElabExprOk(env4, term, expected, cir)
+                            }
+                        }
+                    }
+                }
+            }
+    }
+}
+
+/// Elaborate multi-arm match with expected type.
+fn elab_multi_arm_match_checked(
+    env: Env,
+    scrut_term: TermHandle,
+    sum_ty: TypeHandle,
+    orig_scrut_ty: TypeHandle,
+    scrut_cir: CodegenIR,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match arms {
+        Nil() => ElabExprErr(elab_expr_error("empty match arms", span)),
+        Cons(arm1, rest) => {
+            let left_ty = tg_type_get_sum_left(sum_ty);
+            let left_ty = if tg_type_is_mu(orig_scrut_ty) {
+                let mu_var = tg_type_get_mu_var(orig_scrut_ty);
+                tg_type_substitute(left_ty, mu_var, orig_scrut_ty)
+            } else { left_ty };
+            
+            // Use constructor info for correct binding type
+            let arm1_bind_ty = get_arm_binding_type(env, arm1, left_ty, sum_ty, orig_scrut_ty);
+            
+            let (_, var1) = bind_pattern_in_scope(env, arm1.pattern, arm1_bind_ty);
+            let arm1_span = arm1.span;
+            
+            let env1 = env_push_scope(env);
+            let (env1, _) = bind_pattern_in_scope(env1, arm1.pattern, arm1_bind_ty);
+            
+            match check(env1, arm1.body, expected) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, body1, _, body1_cir) => {
+                    let env2 = env_pop_scope(env2);
+                    let right_ty = tg_type_get_sum_right(sum_ty);
+                    elab_multi_arm_rest(
+                        env2, right_ty, orig_scrut_ty,
+                        rest, expected, span, arm1_span,
+                        scrut_term, scrut_cir, var1, body1, body1_cir
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// ARM REORDERING BY CONSTRUCTOR INDEX
+// ===========================================================================
+
+/// Extract the constructor name from a pattern.
+fn pattern_constructor_name(p: Pattern) -> String {
+    match p {
+        PatConstructor(path, _, _) =>
+            match path {
+                MkPath(segments, _) =>
+                    match segments {
+                        Nil() => "",
+                        Cons(id, _) => ident_name(id)
+                    }
+            },
+        _ => ""
+    }
+}
+
+/// Get the constructor index for a match arm's pattern.
+/// Returns 999999 for non-constructor patterns (catch-all, wildcard, etc.)
+/// so they sort to the end.
+fn get_arm_constructor_index(env: Env, arm: MatchArm) -> Nat {
+    if is_catch_all_pattern(arm.pattern) {
+        999999
+    } else {
+        let ctor_name = pattern_constructor_name(arm.pattern);
+        if ctor_name == "" {
+            999999
+        } else {
+            match env_resolve_value(env, ctor_name) {
+                NoResolvedValue() => 999999,
+                SomeResolvedValue(resolved) =>
+                    match resolved {
+                        ResolvedConstructor(info) => info.index,
+                        _ => 999999
+                    }
+            }
+        }
+    }
+}
+
+/// Reorder match arms by their constructor index.
+/// This ensures arms are processed in the same order as the
+/// constructors appear in the type definition, which matches
+/// the sum type structure (left-nested sums).
+fn reorder_arms_by_constructor(env: Env, arms: List<MatchArm>) -> List<MatchArm> {
+    insertion_sort_arms(env, arms, Nil())
+}
+
+fn insertion_sort_arms(env: Env, remaining: List<MatchArm>, sorted: List<MatchArm>) -> List<MatchArm> {
+    match remaining {
+        Nil() => sorted,
+        Cons(arm, rest) =>
+            let idx = get_arm_constructor_index(env, arm);
+            let new_sorted = insert_arm_by_index(env, arm, idx, sorted);
+            insertion_sort_arms(env, rest, new_sorted)
+    }
+}
+
+fn insert_arm_by_index(env: Env, arm: MatchArm, idx: Nat, sorted: List<MatchArm>) -> List<MatchArm> {
+    match sorted {
+        Nil() => Cons(arm, Nil()),
+        Cons(head, rest) =>
+            let head_idx = get_arm_constructor_index(env, head);
+            if idx <= head_idx {
+                Cons(arm, sorted)
+            } else {
+                Cons(head, insert_arm_by_index(env, arm, idx, rest))
+            }
+    }
+}
+
+// ===========================================================================
+// ARM PADDING
+// ===========================================================================
+
+/// Count the number of variants in a sum type.
+/// Sum(A, Sum(B, C)) has 3 variants.
+fn count_sum_variants(ty: TypeHandle) -> Nat {
+    if tg_type_is_sum(ty) {
+        1 + count_sum_variants(tg_type_get_sum_right(ty))
+    } else {
+        1
+    }
+}
+
+/// Check if the last arm in a sorted list is a catch-all.
+/// Returns true if the list ends with a catch-all pattern.
+fn has_catch_all_arm(arms: List<MatchArm>) -> Bool {
+    match arms {
+        Nil() => false,
+        Cons(arm, rest) =>
+            match rest {
+                Nil() => is_catch_all_pattern(arm.pattern),
+                Cons(_, _) => has_catch_all_arm(rest)
+            }
+    }
+}
+
+/// Get the last arm from a sorted list (the catch-all).
+fn get_last_arm(arms: List<MatchArm>) -> MatchArm {
+    match arms {
+        Nil() => get_last_arm(arms),  // unreachable: caller ensures non-empty
+        Cons(arm, rest) =>
+            match rest {
+                Nil() => arm,
+                Cons(_, _) => get_last_arm(rest)
+            }
+    }
+}
+
+/// Pad sorted arms so every constructor index 0..total-1 has an arm.
+/// Fills gaps with the catch-all arm. The catch-all (index 999999) in the
+/// sorted list is consumed and used to fill gaps and remaining indices.
+fn pad_sorted_arms(
+    env: Env,
+    sorted_arms: List<MatchArm>,
+    current_index: Nat,
+    total: Nat,
+    catch_all: MatchArm
+) -> List<MatchArm> {
+    if current_index >= total {
+        Nil()
+    } else {
+        match sorted_arms {
+            Nil() =>
+                // No more explicit arms — fill remaining with catch-all
+                Cons(catch_all, pad_sorted_arms(env, Nil(), current_index + 1, total, catch_all)),
+            Cons(arm, rest) => {
+                let arm_index = get_arm_constructor_index(env, arm);
+                if arm_index >= 999999 {
+                    // Reached catch-all — fill this and all remaining with it
+                    Cons(catch_all, pad_sorted_arms(env, sorted_arms, current_index + 1, total, catch_all))
+                } else if arm_index == current_index {
+                    // Arm matches this index — use it
+                    Cons(arm, pad_sorted_arms(env, rest, current_index + 1, total, catch_all))
+                } else {
+                    // Gap: arm_index > current_index — insert catch-all for this index
+                    Cons(catch_all, pad_sorted_arms(env, sorted_arms, current_index + 1, total, catch_all))
+                }
+            }
+        }
+    }
+}
+
+/// Pad sorted arms if needed. Only pads when there are gaps in constructor
+/// indices (i.e., fewer explicit arms than sum variants) and a catch-all exists.
+fn maybe_pad_arms(env: Env, sorted_arms: List<MatchArm>, sum_ty: TypeHandle) -> List<MatchArm> {
+    let total = count_sum_variants(sum_ty);
+    if has_catch_all_arm(sorted_arms) {
+        let catch_all = get_last_arm(sorted_arms);
+        pad_sorted_arms(env, sorted_arms, 0, total, catch_all)
+    } else {
+        sorted_arms
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+// SUM LAYER NAVIGATION
+// ===========================================================================
+
+/// Skip N layers of a right-nested Sum type by taking sum_right repeatedly.
+/// Sum(A, Sum(B, Sum(C, D))) with n=2 → Sum(C, D)
+fn skip_sum_right(ty: TypeHandle, n: Nat) -> TypeHandle {
+    if n == 0 {
+        ty
+    } else {
+        skip_sum_right(tg_type_get_sum_right(ty), n - 1)
+    }
+}
+
+/// Get the payload type for a constructor at a given index in a sum type.
+/// For the last variant (index = total-1), returns the type directly.
+/// For earlier variants, returns the left side of the sum at that depth.
+fn get_variant_payload(sum_ty: TypeHandle, index: Nat, total: Nat) -> TypeHandle {
+    let at_depth = skip_sum_right(sum_ty, index);
+    if index == total - 1 {
+        // Last variant — type is the rightmost element, not wrapped in Sum
+        at_depth
+    } else {
+        // Non-last variant — take left side of Sum
+        tg_type_get_sum_left(at_depth)
+    }
+}
+
+/// Get the correct binding type for a match arm's pattern.
+/// For constructor patterns, navigates the sum type to the correct depth
+/// using the constructor's registered index. This fixes the arm gap problem:
+/// when a match doesn't cover all constructors in order, simple left/right
+/// sum navigation gives the wrong type, but index-based navigation is accurate.
+/// For catch-all patterns, returns the original scrutinee type (not the peeled layer).
+/// For constructor patterns, navigates the FULL sum type (from orig_scrut_ty) using
+/// the constructor's absolute index, avoiding partial-sum navigation errors.
+/// Uses env_count_constructors to get the correct ADT constructor count,
+/// rather than count_sum_variants which overcounts when payloads are sums.
+fn get_arm_binding_type(
+    env: Env,
+    arm: MatchArm,
+    fallback_ty: TypeHandle,
+    sum_ty: TypeHandle,
+    orig_scrut_ty: TypeHandle
+) -> TypeHandle {
+    if is_catch_all_pattern(arm.pattern) {
+        // Catch-all (variable/wildcard) binds to the original scrutinee type,
+        // not the peeled sum layer — the variable represents ANY value of the type.
+        orig_scrut_ty
+    } else {
+        let ctor_name = pattern_constructor_name(arm.pattern);
+        if ctor_name == "" {
+            fallback_ty
+        } else {
+            match env_resolve_value(env, ctor_name) {
+                NoResolvedValue() => fallback_ty,
+                SomeResolvedValue(resolved) =>
+                    match resolved {
+                        ResolvedConstructor(info) => {
+                            // Use the FULL sum type from orig_scrut_ty, not the partial sum_ty.
+                            // sum_ty is progressively peeled in elab_multi_arm_rest,
+                            // but info.index is an absolute index in the full type.
+                            let full_sum = if tg_type_is_mu(orig_scrut_ty) {
+                                tg_type_get_mu_body(orig_scrut_ty)
+                            } else {
+                                orig_scrut_ty
+                            };
+                            // Use env_count_constructors for the correct ADT constructor count.
+                            // count_sum_variants overcounts when payloads are themselves sums
+                            // (e.g., Option<TokenKind> has 2 constructors but 80+ sum layers).
+                            let total = env_count_constructors(env, info.parent_type);
+                            let payload = get_variant_payload(full_sum, info.index, total);
+                            // Apply mu-substitution if scrutinee is a mu-type
+                            if tg_type_is_mu(orig_scrut_ty) {
+                                let mu_var = tg_type_get_mu_var(orig_scrut_ty);
+                                tg_type_substitute(payload, mu_var, orig_scrut_ty)
+                            } else {
+                                payload
+                            }
+                        },
+                        _ => fallback_ty
+                    }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Check if a pattern is a catch-all (variable or wildcard).
+// ===========================================================================
+// PATTERN BINDING
+// ===========================================================================
+
+/// Bind pattern variables in scope with their correct types.
+/// For constructor patterns like Cons(item, rest) with payload Product(T, List<T>),
+/// this binds item: T and rest: List<T> using product type projections.
+/// Returns (env, case_var_name) where case_var_name is the single variable
+/// for the case term binding.
+fn bind_pattern_in_scope(env: Env, p: Pattern, ty: TypeHandle) -> (Env, String) {
+    match p {
+        PatVar(id) => {
+            let name = ident_name(id);
+            (env_bind_local(env, name, ty), name)
+        },
+        PatWildcard(_) => (env_bind_local(env, "_", ty), "_"),
+        PatConstructor(_, sub_pats, _) =>
+            match sub_pats {
+                Nil() =>
+                    // No sub-patterns (e.g., Nil()) — bind a dummy, payload is unit
+                    (env_bind_local(env, "_ctor", ty), "_ctor"),
+                Cons(first_pat, rest_pats) =>
+                    match rest_pats {
+                        Nil() =>
+                            // Single sub-pattern (e.g., Some(x)) — bind to entire payload
+                            bind_pattern_in_scope(env, first_pat, ty),
+                        Cons(_, _) => {
+                            // Multiple sub-patterns (e.g., Cons(item, rest))
+                            // ty is a product type; destructure it
+                            let case_var = "_payload";
+                            let env2 = env_bind_local(env, case_var, ty);
+                            let env3 = bind_sub_patterns(env2, sub_pats, ty);
+                            (env3, case_var)
+                        }
+                    }
+            },
+        _ => {
+            let name = pattern_to_var_name(p);
+            (env_bind_local(env, name, ty), name)
+        }
+    }
+}
+
+/// Bind sub-pattern variables by projecting into the product type.
+/// For Cons(item, rest) with type Product(T, List<T>):
+///   item: T = product_left(ty)
+///   rest: List<T> = product_right(ty)
+/// For 3+ fields, the product is right-nested:
+///   Product(A, Product(B, C))
+fn bind_sub_patterns(env: Env, pats: List<Pattern>, ty: TypeHandle) -> Env {
+    match pats {
+        Nil() => env,
+        Cons(pat, rest) =>
+            match rest {
+                Nil() =>
+                    // Last sub-pattern gets the remainder type
+                    match_bind_single_pattern(env, pat, ty),
+                Cons(_, _) => {
+                    // Multiple remaining: left-project for this pat, right for rest
+                    let left_ty = tg_type_get_product_left(ty);
+                    let right_ty = tg_type_get_product_right(ty);
+                    let env2 = match_bind_single_pattern(env, pat, left_ty);
+                    bind_sub_patterns(env2, rest, right_ty)
+                }
+            }
+    }
+}
+
+/// Bind a single pattern variable (non-constructor) in a match arm.
+fn match_bind_single_pattern(env: Env, p: Pattern, ty: TypeHandle) -> Env {
+    match p {
+        PatVar(id) => env_bind_local(env, ident_name(id), ty),
+        PatWildcard(_) => env,
+        _ => env  // Other patterns: no binding for now
+    }
+}
+
+fn is_catch_all_pattern(p: Pattern) -> Bool {
+    match p {
+        PatWildcard(_) => true,
+        PatVar(_) => true,
+        _ => false
+    }
+}
+
+/// Extract variable name from a pattern (for binding).
+/// For constructor patterns like Some(x), recursively extracts the inner variable name.
+fn pattern_to_var_name(p: Pattern) -> String {
+    match p {
+        PatWildcard(_) => "_",
+        PatVar(id) => ident_name(id),
+        PatConstructor(_, sub_pats, _) =>
+            match sub_pats {
+                Nil() => "_",
+                Cons(sub_pat, _) => pattern_to_var_name(sub_pat)
+            },
+        _ => "_pat"
+    }
+}
+
+/// Check if a type is Bool.
+fn is_bool_type(ty: TypeHandle) -> Bool {
+    tg_types_equal(ty, tg_type_bool())
+}
+
+/// Check if a match arm is a newtype unwrap.
+/// Returns true when ALL safety constraints hold:
+///   1. Constructor belongs to a type with exactly 1 constructor
+///   2. That constructor takes exactly 1 field
+///   3. The scrutinee type is definitionally equal (after normalization) to the field type
+///   4. The pattern is exactly Ctor(x) — no nested sub-patterns
+/// This allows matching on newtypes whose encoding has collapsed to the inner type.
+fn is_newtype_unwrap(env: Env, arm: MatchArm, scrut_ty: TypeHandle) -> Bool {
+    let ctor_name = pattern_constructor_name(arm.pattern);
+    if ctor_name == "" {
+        false
+    } else {
+        match env_resolve_value(env, ctor_name) {
+            NoResolvedValue() => false,
+            SomeResolvedValue(resolved) =>
+                match resolved {
+                    ResolvedConstructor(info) => {
+                        // Constraint 1: exactly 1 constructor for this type
+                        let total = env_count_constructors(env, info.parent_type);
+                        if total != 1 {
+                            false
+                        // Constraint 2: exactly 1 field
+                        } else if info.arity != 1 {
+                            false
+                        // Constraint 3: scrutinee type matches field type
+                        } else {
+                            if deep_types_equal(env, scrut_ty, info.field_types) {
+                                // Constraint 4: flat pattern (no nested sub-patterns)
+                                is_flat_constructor_pattern(arm.pattern)
+                            } else {
+                                false
+                            }
+                        }
+                    },
+                    _ => false
+                }
+        }
+    }
+}
+
+/// Check if a constructor pattern has only simple (non-constructor) sub-patterns.
+/// Returns true for Ctor(x), Ctor(_), Ctor(x, y) but false for Ctor(Inner(x)).
+fn is_flat_constructor_pattern(p: Pattern) -> Bool {
+    match p {
+        PatConstructor(_, sub_pats, _) => all_simple_patterns(sub_pats),
+        _ => false
+    }
+}
+
+/// Check that all patterns in a list are simple (variable or wildcard).
+fn all_simple_patterns(pats: List<Pattern>) -> Bool {
+    match pats {
+        Nil() => true,
+        Cons(p, rest) =>
+            if is_catch_all_pattern(p) {
+                all_simple_patterns(rest)
+            } else {
+                false
+            }
+    }
+}
+
+

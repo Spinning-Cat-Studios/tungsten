@@ -1,0 +1,42 @@
+// Test: Wildcard patterns inside constructor patterns (E0100 fix)
+// These patterns should now compile and run correctly.
+
+// A simple span type with 3 fields
+type Span = MkSpan(Nat, Nat, Nat)
+
+// Extract the start field, ignoring end and file
+fn span_start(s: Span) -> Nat {
+    match s { MkSpan(start, _, _) => start }
+}
+
+// Extract the end field, ignoring start and file
+fn span_end(s: Span) -> Nat {
+    match s { MkSpan(_, e, _) => e }
+}
+
+// Extract the file field, ignoring start and end
+fn span_file(s: Span) -> Nat {
+    match s { MkSpan(_, _, f) => f }
+}
+
+// A pair type to test two-field wildcards
+type Pair = MkPair(Nat, Bool)
+
+fn pair_fst(p: Pair) -> Nat {
+    match p { MkPair(n, _) => n }
+}
+
+fn pair_snd(p: Pair) -> Bool {
+    match p { MkPair(_, b) => b }
+}
+
+// Mixed wildcards and bindings
+fn span_sum(s: Span) -> Nat {
+    match s { MkSpan(a, b, _) => a + b }
+}
+
+// Direct test in main (function call evaluation is pre-existing limitation)
+fn main() -> Nat {
+    let s = MkSpan(42, 20, 99);
+    match s { MkSpan(start, _, _) => start }
+}

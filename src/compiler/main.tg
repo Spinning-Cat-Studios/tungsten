@@ -1,0 +1,57 @@
+// src/compiler/main.tg
+// Main entry point for the self-hosted Tungsten compiler.
+//
+// This is the top-level entry point that:
+// 1. Parses CLI arguments into a Command
+// 2. Dispatches the command to the appropriate pipeline
+// 3. Exits with the appropriate status code
+//
+// The actual work is delegated to:
+// - driver::cli for argument parsing
+// - driver::pipeline for command execution
+//
+// Run with: cargo run -p tungsten_bootstrap --no-default-features -- run src/compiler/main.tg
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::{
+    // CLI parsing
+    parse_args,
+    // Pipeline dispatch
+    dispatch_command,
+    // Process control
+    process_exit
+};
+
+// ===========================================================================
+// MAIN ENTRY POINT
+// ===========================================================================
+
+/// The main entry point for the Tungsten compiler.
+///
+/// Flow:
+/// 1. parse_args() reads command-line arguments and returns a Command
+/// 2. dispatch_command(cmd) executes the appropriate pipeline
+/// 3. exit(code) terminates with the exit code
+///
+/// Exit codes:
+/// - 0: Success
+/// - 1: Compilation errors (type errors, syntax errors, etc.)
+/// - 2: Invalid CLI arguments (handled by parse_args returning CmdError)
+/// - 3: I/O errors (file not found, permission denied, etc.)
+pub fn main() -> Nat {
+    // Parse command-line arguments
+    let cmd = parse_args();
+    
+    // Dispatch and get exit code
+    let exit_code = dispatch_command(cmd);
+    
+    // Exit with the code
+    // Note: exit() doesn't return, so this is technically unreachable,
+    // but we return the code anyway for type correctness.
+    process_exit(exit_code);
+    exit_code
+}

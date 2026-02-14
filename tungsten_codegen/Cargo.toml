@@ -1,0 +1,20 @@
+[package]
+name = "tungsten_codegen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "LLVM code generation for the Tungsten proof language"
+
+[dependencies]
+tungsten_core = { path = "../tungsten_core" }
+inkwell = { version = "0.5", features = ["llvm18-0"] }
+
+[lints.rust]
+# Allow unsafe in codegen - LLVM bindings require it
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

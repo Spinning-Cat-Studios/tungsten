@@ -1,0 +1,16 @@
+// Regression test for ADR 31: Cross-Module Generic Type Resolution
+// Tests: Generic type with type alias as argument
+//
+// This was the root cause of E9999 "expected sum type" errors in
+// driver/modules/source_map.tg where List<SourceEntry> was matched,
+// and SourceEntry is a type alias for (String, String).
+
+pub mod types;
+pub mod list;
+pub mod consumer;
+
+use consumer::test_aliased_list_match;
+
+fn main() -> Nat {
+    test_aliased_list_match()
+}

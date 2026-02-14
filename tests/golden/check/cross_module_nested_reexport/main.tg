@@ -1,0 +1,16 @@
+// Regression test for ADR 31: Cross-Module Generic Type Resolution
+// Tests: Verifies that types defined in a deeply nested module can be
+// used in a sibling module at a different level in the hierarchy.
+//
+// This exercises the canonical path resolution across module boundaries.
+
+pub mod level_a;
+pub mod level_b;
+pub mod level_c;
+pub mod consumer;
+
+use consumer::test_nested_reexport_match;
+
+fn main() -> Nat {
+    test_nested_reexport_match()
+}

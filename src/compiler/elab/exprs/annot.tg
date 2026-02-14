@@ -1,0 +1,42 @@
+// src/compiler/elab/exprs/annot.tg
+// Type annotation elaboration.
+
+use lexer::span::Span;
+use parser::ast::{Expr, TypeExpr, type_expr_span};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_annot
+};
+use elab::env::Env;
+use elab::types::{elab_type, ElabTypeOk, ElabTypeErr};
+use elab::exprs::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    type_error_to_expr_error, add_expected_because
+};
+use elab::error::ExpTypeAnnotation;
+use elab::cir::CodegenIR;
+
+// Import check from parent module for mutual recursion
+use elab::exprs::check;
+
+// ===========================================================================
+// ANNOTATION ELABORATION
+// ===========================================================================
+
+/// Synthesize a type-annotated expression.
+pub fn synth_annot(env: Env, inner: Expr, ty: TypeExpr, span: Span) -> ElabExprResult {
+    let ty_span = type_expr_span(ty);
+    match elab_type(env, ty) {
+        ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+        ElabTypeOk(expected_ty, _) =>
+            match check(env, inner, expected_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpTypeAnnotation(ty_span))),
+                ElabExprOk(env2, term, _, cir) => {
+                    // Optionally wrap in annotation term
+                    let annot_term = tg_term_annot(term, expected_ty);
+                    // CIR: annotation is transparent, just pass through the inner CIR
+                    ElabExprOk(env2, annot_term, expected_ty, cir)
+                }
+            }
+    }
+}

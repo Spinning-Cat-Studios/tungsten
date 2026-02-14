@@ -1,0 +1,182 @@
+// src/compiler/lexer/token.tg
+// Token types for the Tungsten lexer.
+
+use lexer::span::Span;
+
+pub type TokenKind =
+    | TokIntLit(Nat)
+    | TokStringLit(String)
+    | TokCharLit(Nat)
+    | TokIdent(String)
+    | TokUnderscore
+    | TokFn
+    | TokLet
+    | TokIf
+    | TokElse
+    | TokMatch
+    | TokReturn
+    | TokType
+    | TokStruct
+    | TokEnum
+    | TokTrue
+    | TokFalse
+    | TokTheorem
+    | TokLemma
+    | TokAxiom
+    | TokBy
+    | TokHave
+    | TokShow
+    | TokAssume
+    | TokForall
+    | TokExists
+    | TokProp
+    | TokSorry
+    | TokRefl
+    | TokBool
+    | TokNat
+    | TokUnit
+    | TokVoid
+    | TokExtern
+    | TokRef
+    | TokMod
+    | TokPub
+    | TokUse
+    | TokAs
+    | TokCrate
+    | TokReserved(String)
+    | TokLParen
+    | TokRParen
+    | TokLBrace
+    | TokRBrace
+    | TokLBracket
+    | TokRBracket
+    | TokLAngle
+    | TokRAngle
+    | TokComma
+    | TokSemi
+    | TokColon
+    | TokColonColon
+    | TokDot
+    | TokDotDot
+    | TokDotDotDot
+    | TokArrow
+    | TokFatArrow
+    | TokAt
+    | TokHash
+    | TokQuestion
+    | TokEq
+    | TokEqEq
+    | TokBangEq
+    | TokLe
+    | TokGe
+    | TokPlus
+    | TokPlusPlus
+    | TokMinus
+    | TokStar
+    | TokSlash
+    | TokPercent
+    | TokAmp
+    | TokAmpAmp
+    | TokPipe
+    | TokPipePipe
+    | TokPipeRight
+    | TokBang
+    | TokCaret
+    | TokTilde
+    | TokWhitespace
+    | TokLineComment(String)
+    | TokBlockComment(String)
+    | TokDocComment(String)
+    | TokEof
+    | TokError(String)
+
+// Token = { kind, span }
+pub type Token = { kind: TokenKind, span: Span }
+
+pub fn token_new(kind: TokenKind, span: Span) -> Token {
+    { kind: kind, span: span }
+}
+
+pub fn token_kind(t: Token) -> TokenKind {
+    t.kind
+}
+
+pub fn token_span(t: Token) -> Span {
+    t.span
+}
+
+pub fn is_eof(tok: Token) -> Bool {
+    match tok.kind {
+        TokEof() => true,
+        _ => false
+    }
+}
+
+pub fn is_trivia(tok: Token) -> Bool {
+    match tok.kind {
+        TokWhitespace() => true,
+        TokLineComment(_) => true,
+        TokBlockComment(_) => true,
+        TokDocComment(_) => true,
+        _ => false
+    }
+}
+
+pub fn is_error(tok: Token) -> Bool {
+    match tok.kind {
+        TokError(_) => true,
+        _ => false
+    }
+}
+
+pub fn classify_keyword(text: String) -> TokenKind {
+    if text == "fn" { TokFn }
+    else if text == "let" { TokLet }
+    else if text == "if" { TokIf }
+    else if text == "else" { TokElse }
+    else if text == "match" { TokMatch }
+    else if text == "return" { TokReturn }
+    else if text == "type" { TokType }
+    else if text == "struct" { TokStruct }
+    else if text == "enum" { TokEnum }
+    else if text == "true" { TokTrue }
+    else if text == "false" { TokFalse }
+    else if text == "theorem" { TokTheorem }
+    else if text == "lemma" { TokLemma }
+    else if text == "axiom" { TokAxiom }
+    else if text == "by" { TokBy }
+    else if text == "have" { TokHave }
+    else if text == "show" { TokShow }
+    else if text == "assume" { TokAssume }
+    else if text == "forall" { TokForall }
+    else if text == "exists" { TokExists }
+    else if text == "Prop" { TokProp }
+    else if text == "sorry" { TokSorry }
+    else if text == "refl" { TokRefl }
+    else if text == "Bool" { TokBool }
+    else if text == "Nat" { TokNat }
+    else if text == "Unit" { TokUnit }
+    else if text == "Void" { TokVoid }
+    else if text == "extern" { TokExtern }
+    else if text == "ref" { TokRef }
+    else if text == "mod" { TokMod }
+    else if text == "use" { TokUse }
+    else if text == "pub" { TokPub }
+    else if is_reserved_keyword(text) { TokReserved(text) }
+    else if text == "_" { TokUnderscore }
+    else { TokIdent(text) }
+}
+
+pub fn is_reserved_keyword(text: String) -> Bool {
+    text == "async" || text == "await" ||
+    text == "impl" || text == "trait" ||
+    text == "where" || text == "self" ||
+    text == "Self" || text == "mut" ||
+    text == "move" || text == "loop" ||
+    text == "while" || text == "for" ||
+    text == "in" || text == "break" ||
+    text == "continue" || text == "const" ||
+    text == "static" || text == "crate" ||
+    text == "super" || text == "dyn" ||
+    text == "unsafe" || text == "as"
+}

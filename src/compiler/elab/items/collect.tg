@@ -1,0 +1,998 @@
+// src/compiler/elab/items/collect.tg
+// Collection phase for item elaboration.
+//
+// This module implements the 6-phase collection algorithm:
+//
+// Phase 1a: Register type names (stubs with arity)
+// Phase 1b: Process imports (use declarations)
+// Phase 1c: Elaborate type bodies (fill in stubs)
+// Phase 1d: Resolve deferred type references
+// Phase 1e: Cache type encodings (for error messages)
+// Phase 2:  Collect value signatures (functions, theorems, externs)
+//
+// Each phase has specific dependencies on previous phases, so the order
+// cannot be changed. See the ADR for detailed explanation.
+
+use lexer::span::Span;
+use parser::ast::{
+    Item, ItemFn, ItemType, ItemTypeAlias, ItemTheorem, ItemLemma,
+    ItemAxiom, ItemExtern, ItemMod, ItemUse, ItemError,
+    FunctionDef, TypeDef, TypeAliasDef, TheoremDef, AxiomDef,
+    ExternFnDef, ModDecl, UseDecl,
+    TypeDefBody, TypeDefAlias, TypeDefAdt, TypeDefRecord,
+    Variant, RecordField,
+    Param,
+    ExternParam,
+    TypeParam,
+    TypeExpr, TyPath, TyApp,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    Visibility, VisPrivate, VisCrate, VisPublic,
+    Ident, ident_name,
+    Path, MkPath, path_item_name, ident_list_len,
+    item_span
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_len, list_reverse, string_concat};
+use elab::ffi::{
+    TypeHandle, INVALID_HANDLE,
+    tg_type_unit, tg_type_arrow, tg_type_forall, tg_type_product,
+    tg_type_var, tg_string_to_cstr,
+    tg_type_debug
+};
+use elab::env::{
+    Env, env_new, env_push_scope, env_pop_scope,
+    env_push_type_var, env_pop_type_var,
+    env_register_type, env_register_value, env_lookup_type_def, env_register_constructor,
+    env_resolve_value,
+    MaybeResolvedValue, SomeResolvedValue, NoResolvedValue,
+    TypeDefInfo, type_def_info_new, type_def_info_with_fields,
+    ValueDefInfo, value_def_info_new,
+    MaybeTypeDef, NoTypeDef, SomeTypeDef,
+    RecordFieldInfo, record_field_info_new,
+    ConstructorInfo, constructor_info_new
+};
+use elab::types::{
+    ElabTypeResult, ElabTypeOk, ElabTypeErr, elab_type, is_placeholder_encoding
+};
+use elab::cir::{
+    CodegenType, CTUnit, CTArrow
+};
+use elab::adt::{
+    AdtEncoding, AdtVariant,
+    encode_adt
+};
+use elab::items::result::{
+    ElabContext, elab_context_new, elab_context_with_env, elab_context_add_error,
+    CollectResult, CollectOk, CollectErr
+};use elab::items::imports::process_use_decl;use elab::error::{
+    ElabError, ElabErrorKind, ErrDuplicateDef, ErrUnresolvedType,
+    elab_error_simple, elab_error_duplicate, elab_error_unresolved_type
+};
+
+// ===========================================================================
+// COLLECTION ENTRY POINT
+// ===========================================================================
+
+/// Run the full collection phase on a list of items.
+/// Returns the updated context with all types and value signatures collected.
+pub fn collect_items(ctx: ElabContext, items: List<Item>) -> CollectResult {
+    // Phase 1a: Register type names as stubs
+    let ctx1 = collect_phase_1a(ctx, items);
+    
+    // Phase 1b: Process imports
+    let ctx2 = collect_phase_1b(ctx1, items);
+    
+    // Phase 1c: Elaborate type bodies
+    // First, pre-register μ-variable placeholders for ALL types so that
+    // forward references and self-references can resolve during body elaboration.
+    let ctx2b = preregister_type_vars(ctx2, items);
+    let ctx3 = collect_phase_1c(ctx2b, items);
+    
+    // Phase 1c fixup 1: Re-elaborate type alias bodies FIRST.
+    // Aliases like VisibilityEntry = (A, B, Option<C>) may have partial encodings
+    // because Option hadn't been fully elaborated on the first pass.
+    // Aliases must be fixed before records because record fields may reference aliases.
+    let ctx3b = collect_phase_1c_aliases_only(ctx3, items);
+    
+    // Phase 1c fixup 2: Re-elaborate record type bodies.
+    // Record fields may reference type aliases that were just fixed in the alias pass.
+    // This pass ensures record encodings use the correct alias encodings.
+    let ctx3c = collect_phase_1c_records_only(ctx3b, items);
+    
+    // Phase 1d: Resolve deferred type references
+    let ctx4 = collect_phase_1d(ctx3c);
+    
+    // Phase 1e: Cache type encodings
+    let ctx5 = collect_phase_1e(ctx4);
+    
+    // Phase 2: Collect value signatures
+    let ctx6 = collect_phase_2(ctx5, items);
+    
+    CollectOk(ctx6)
+}
+
+// ===========================================================================
+// PHASE 1a: REGISTER TYPE NAMES
+// ===========================================================================
+
+/// Register all type names as stubs (with arity but no body).
+/// This allows imports and forward references to resolve type names.
+fn collect_phase_1a(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = register_type_name(ctx, item);
+            collect_phase_1a(ctx2, rest)
+    }
+}
+
+/// Register a type name from an item (if it defines a type).
+fn register_type_name(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemType(def) =>
+            register_type_stub(ctx, def.name, def.type_params, def.vis, def.span),
+        ItemTypeAlias(def) =>
+            register_type_stub(ctx, def.name, def.type_params, def.vis, def.span),
+        _ => ctx  // Not a type definition
+    }
+}
+
+/// Register a type as a stub (name and arity only).
+fn register_type_stub(
+    ctx: ElabContext,
+    name: Ident,
+    type_params: List<TypeParam>,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    let type_name = ident_name(name);
+    let arity = list_len(type_params);
+    let params = extract_type_param_names(type_params);
+    
+    // Check for duplicate
+    match env_lookup_type_def(ctx.env, type_name) {
+        SomeTypeDef(_) =>
+            let err = elab_error_duplicate(type_name, span);
+            elab_context_add_error(ctx, err),
+        NoTypeDef() =>
+            // Create stub with placeholder type handle
+            let stub_info = type_def_info_new(
+                type_name,
+                arity,
+                params,
+                INVALID_HANDLE,  // Placeholder - will be filled in phase 1c
+                vis,
+                span,
+                INVALID_HANDLE   // Placeholder for encoded type
+            );
+            let env2 = env_register_type(ctx.env, stub_info);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+/// Extract type parameter names from a list of TypeParam.
+fn extract_type_param_names(params: List<TypeParam>) -> List<String> {
+    match params {
+        Nil() => Nil,
+        Cons(param, rest) =>
+            Cons(ident_name(param.name), extract_type_param_names(rest))
+    }
+}
+
+// ===========================================================================
+// PHASE 1b: PROCESS IMPORTS
+// ===========================================================================
+
+/// Process all use declarations.
+/// Imports can now reference type names registered in phase 1a.
+fn collect_phase_1b(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = process_use_item(ctx, item);
+            collect_phase_1b(ctx2, rest)
+    }
+}
+
+/// Process a use declaration (if the item is a use).
+fn process_use_item(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemUse(decl) =>
+            // Delegate to imports module
+            process_import(ctx, decl),
+        _ => ctx  // Not a use declaration
+    }
+}
+
+/// Process an import declaration.
+/// Delegates to the full implementation in imports.tg.
+fn process_import(ctx: ElabContext, decl: UseDecl) -> ElabContext {
+    process_use_decl(ctx, decl)
+}
+
+// ===========================================================================
+// PHASE 1c: ELABORATE TYPE BODIES
+// ===========================================================================
+
+// ===========================================================================
+// PHASE 1c PRE-PASS: PRE-REGISTER μ-VARIABLE PLACEHOLDERS
+// ===========================================================================
+
+/// Pre-register μ-variable placeholders for all types before body elaboration.
+/// This ensures that forward references and self-references resolve during
+/// elab_type by finding a valid (non-INVALID) encoded_type.
+fn preregister_type_vars(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = preregister_type_var(ctx, item);
+            preregister_type_vars(ctx2, rest)
+    }
+}
+
+/// Pre-register a single type's μ-variable placeholder.
+fn preregister_type_var(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemType(def) => {
+            let type_name = ident_name(def.name);
+            let mu_handle = tg_type_var(tg_string_to_cstr(type_name));
+            // Update the type stub with the μ-variable as a temporary encoding
+            match env_lookup_type_def(ctx.env, type_name) {
+                NoTypeDef() => ctx,
+                SomeTypeDef(info) => {
+                    let updated = type_def_info_new(
+                        type_name,
+                        info.arity,
+                        info.params,
+                        mu_handle,           // kind placeholder
+                        info.visibility,
+                        info.span,
+                        mu_handle            // encoded_type placeholder
+                    );
+                    let env2 = env_register_type(ctx.env, updated);
+                    elab_context_with_env(ctx, env2)
+                }
+            }
+        },
+        ItemTypeAlias(def) => {
+            let type_name = ident_name(def.name);
+            let mu_handle = tg_type_var(tg_string_to_cstr(type_name));
+            match env_lookup_type_def(ctx.env, type_name) {
+                NoTypeDef() => ctx,
+                SomeTypeDef(info) => {
+                    let updated = type_def_info_new(
+                        type_name,
+                        info.arity,
+                        info.params,
+                        mu_handle,
+                        info.visibility,
+                        info.span,
+                        mu_handle
+                    );
+                    let env2 = env_register_type(ctx.env, updated);
+                    elab_context_with_env(ctx, env2)
+                }
+            }
+        },
+        _ => ctx
+    }
+}
+
+// ===========================================================================
+// PHASE 1c: ELABORATE TYPE BODIES
+// ===========================================================================
+
+/// Elaborate the bodies of all type definitions.
+/// Imports are now resolved, so type bodies can reference imported types.
+fn collect_phase_1c(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = elaborate_type_body(ctx, item);
+            collect_phase_1c(ctx2, rest)
+    }
+}
+
+/// Phase 1c fixup: Only re-elaborate record type bodies.
+/// This fixes record fields that got placeholder type handles because
+/// the referenced type wasn't yet encoded during the first pass.
+fn collect_phase_1c_records_only(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = match item {
+                ItemType(def) =>
+                    match def.body {
+                        TypeDefRecord(_) => elaborate_adt_body(ctx, def),
+                        _ => ctx
+                    },
+                _ => ctx
+            };
+            collect_phase_1c_records_only(ctx2, rest)
+    }
+}
+
+/// Phase 1c fixup 2: Re-elaborate all type alias bodies.
+/// On the first pass, a type alias like VisibilityEntry = (A, B, Option<C>) may
+/// elaborate with a partial encoding because Option hadn't been fully elaborated yet.
+/// Re-elaborating all aliases after all ADTs are done fixes these ordering issues.
+fn collect_phase_1c_aliases_only(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = match item {
+                ItemTypeAlias(def) =>
+                    elaborate_alias_body(ctx, def),
+                _ => ctx
+            };
+            collect_phase_1c_aliases_only(ctx2, rest)
+    }
+}
+
+/// Elaborate the body of a type definition.
+fn elaborate_type_body(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemType(def) => elaborate_adt_body(ctx, def),
+        ItemTypeAlias(def) => elaborate_alias_body(ctx, def),
+        _ => ctx  // Not a type definition
+    }
+}
+
+/// Elaborate an ADT body (sum type or record).
+fn elaborate_adt_body(ctx: ElabContext, def: TypeDef) -> ElabContext {
+    let type_name = ident_name(def.name);
+    
+    // Push type parameters into scope
+    let ctx2 = push_type_params(ctx, def.type_params);
+    
+    // Elaborate variants/fields into List<AdtVariant>
+    // Note: TypeDefAlias should not appear here (handled by elaborate_alias_body)
+    // but we handle it defensively by returning context unchanged
+    match def.body {
+        TypeDefAdt(variant_list) => {
+            let (ctx3, variants, is_recursive) = elaborate_sum_body(ctx2, variant_list, type_name);
+            // Encode the ADT
+            let encoding = encode_adt(type_name, variants, is_recursive);
+            // Update the type definition with the encoded type
+            let ctx4 = update_type_encoding(ctx3, type_name, encoding.type_handle, def.vis, def.span);
+            // Register constructors for each variant
+            let ctx5 = register_adt_constructors(ctx4, variants, type_name, encoding.type_handle, def.vis, def.span);
+            // Pop type parameters
+            pop_type_params(ctx5, def.type_params)
+        },
+        TypeDefRecord(field_list) => {
+            // Record is a single-variant ADT
+            let (ctx3, variants, field_info, is_recursive) = elaborate_record_body(ctx2, field_list, type_name);
+            // Encode the ADT
+            let encoding = encode_adt(type_name, variants, is_recursive);
+            // Update the type definition with the encoded type AND field info for named access
+            let ctx4 = update_type_encoding_with_record_fields(ctx3, type_name, encoding.type_handle, def.vis, def.span, field_info);
+            // Note: Records don't need constructor registration - they use type name as constructor
+            // Pop type parameters
+            pop_type_params(ctx4, def.type_params)
+        },
+        TypeDefAlias(_) =>
+            // Type aliases are handled by elaborate_alias_body, not here
+            // This case should not be reached from elaborate_type_body
+            pop_type_params(ctx2, def.type_params)
+    }
+}
+
+/// Register constructors for an ADT's variants.
+fn register_adt_constructors(
+    ctx: ElabContext,
+    variants: List<AdtVariant>,
+    parent_type: String,
+    result_type: TypeHandle,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    register_constructors_rec(ctx, variants, parent_type, result_type, vis, span, 0)
+}
+
+/// Register constructors recursively with index.
+fn register_constructors_rec(
+    ctx: ElabContext,
+    variants: List<AdtVariant>,
+    parent_type: String,
+    result_type: TypeHandle,
+    vis: Visibility,
+    span: Span,
+    index: Nat
+) -> ElabContext {
+    match variants {
+        Nil() => ctx,
+        Cons(variant, rest) => {
+            // Encode the variant's fields into a product type
+            let field_types = encode_fields_to_product(variant.fields);
+            let arity = list_len(variant.fields);
+            
+            // Create constructor info
+            let info = constructor_info_new(
+                variant.name,
+                parent_type,
+                index,
+                arity,
+                field_types,
+                result_type,
+                vis,
+                span
+            );
+            
+            // Register the constructor
+            let env2 = env_register_constructor(ctx.env, info);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            
+            // Continue with remaining variants
+            register_constructors_rec(ctx2, rest, parent_type, result_type, vis, span, index + 1)
+        }
+    }
+}
+
+/// Encode a list of field types into a product type.
+/// - Empty list -> Unit
+/// - Single type -> that type
+/// - Multiple types -> nested products
+fn encode_fields_to_product(fields: List<TypeHandle>) -> TypeHandle {
+    match fields {
+        Nil() => tg_type_unit(),
+        Cons(h, rest) =>
+            match rest {
+                Nil() => h,
+                Cons(_, _) => {
+                    let rest_product = encode_fields_to_product(rest);
+                    tg_type_product(h, rest_product)
+                }
+            }
+    }
+}
+
+/// Elaborate sum type variants.
+fn elaborate_sum_body(
+    ctx: ElabContext,
+    variants: List<Variant>,
+    type_name: String
+) -> (ElabContext, List<AdtVariant>, Bool) {
+    elaborate_variants(ctx, variants, type_name, Nil(), false)
+}
+
+/// Elaborate variants recursively.
+fn elaborate_variants(
+    ctx: ElabContext,
+    variants: List<Variant>,
+    type_name: String,
+    acc: List<AdtVariant>,
+    is_recursive: Bool
+) -> (ElabContext, List<AdtVariant>, Bool) {
+    match variants {
+        Nil() => (ctx, list_reverse(acc), is_recursive),
+        Cons(variant, rest) =>
+            let (ctx2, adt_variant, self_ref) = elaborate_variant(ctx, variant, type_name);
+            let new_acc = Cons(adt_variant, acc);
+            let new_recursive = is_recursive || self_ref;
+            elaborate_variants(ctx2, rest, type_name, new_acc, new_recursive)
+    }
+}
+
+/// Elaborate a single variant.
+fn elaborate_variant(
+    ctx: ElabContext,
+    variant: Variant,
+    type_name: String
+) -> (ElabContext, AdtVariant, Bool) {
+    let ctor_name = ident_name(variant.name);
+    let (ctx2, fields, has_self_ref) = elaborate_field_types(ctx, variant.fields, type_name);
+    let adt_variant: AdtVariant = { name: ctor_name, fields: fields };
+    (ctx2, adt_variant, has_self_ref)
+}
+
+/// Elaborate field types in a variant.
+/// Fields are now just a list of type expressions (positional fields).
+fn elaborate_field_types(
+    ctx: ElabContext,
+    fields: List<TypeExpr>,
+    type_name: String
+) -> (ElabContext, List<TypeHandle>, Bool) {
+    elaborate_fields_rec(ctx, fields, type_name, Nil(), false)
+}
+
+/// Recursive field type elaboration.
+fn elaborate_fields_rec(
+    ctx: ElabContext,
+    fields: List<TypeExpr>,
+    type_name: String,
+    acc: List<TypeHandle>,
+    has_self_ref: Bool
+) -> (ElabContext, List<TypeHandle>, Bool) {
+    match fields {
+        Nil() => (ctx, list_reverse(acc), has_self_ref),
+        Cons(ty, rest) => {
+            // Check if this field is a self-reference (e.g., List<T> inside List<T>'s definition)
+            if type_is_self_ref(ty, type_name) {
+                // Use μ-variable for self-reference — will be bound by μ-binder in encode_adt
+                let mu_var = tg_type_var(tg_string_to_cstr(type_name));
+                let new_acc = Cons(mu_var, acc);
+                elaborate_fields_rec(ctx, rest, type_name, new_acc, true)
+            } else {
+                match elab_type(ctx.env, ty) {
+                    ElabTypeErr(err) =>
+                        let elab_err = elab_error_simple(err.message, err.span);
+                        let ctx2 = elab_context_add_error(ctx, elab_err);
+                        // Use INVALID_HANDLE as placeholder and continue
+                        let new_acc = Cons(INVALID_HANDLE, acc);
+                        elaborate_fields_rec(ctx2, rest, type_name, new_acc, has_self_ref),
+                    ElabTypeOk(ty_handle, _) =>
+                        // Check if this type references the ADT being defined
+                        let self_ref = has_self_ref || type_references_self(ty, type_name);
+                        let new_acc = Cons(ty_handle, acc);
+                        elaborate_fields_rec(ctx, rest, type_name, new_acc, self_ref)
+                }
+            }
+        }
+    }
+}
+
+/// Check if a type expression is a direct self-reference (references type_name).
+/// Handles:
+///   - TyPath("List") — bare name matches
+///   - TyApp(TyPath("List"), args) — generic application matches  
+fn type_is_self_ref(ty: TypeExpr, type_name: String) -> Bool {
+    match ty {
+        TyPath(path) =>
+            match path {
+                MkPath(segments, _) => {
+                    let len = ident_list_len(segments);
+                    let name = ident_name(path_item_name(path));
+                    // Check if single-segment path matching type_name
+                    if len == 1 {
+                        name == type_name
+                    } else {
+                        false
+                    }
+                }
+            },
+        TyApp(base, _, _) =>
+            // Check if base is a path matching type_name
+            type_is_self_ref(base, type_name),
+        _ => false
+    }
+}
+
+/// Check if a type expression references the given type name anywhere.
+/// Used to detect recursive types (e.g., List<T> having Cons(T, List<T>)).
+fn type_references_self(ty: TypeExpr, type_name: String) -> Bool {
+    type_is_self_ref(ty, type_name)
+}
+
+/// Elaborate a record body (single-variant ADT).
+/// Returns: (ctx, variants, field_info, is_recursive)
+fn elaborate_record_body(
+    ctx: ElabContext,
+    fields: List<RecordField>,
+    type_name: String
+) -> (ElabContext, List<AdtVariant>, List<RecordFieldInfo>, Bool) {
+    let (ctx2, field_types, field_info, is_recursive) = elaborate_record_field_types(ctx, fields, type_name);
+    // Reverse field_types to match field order (accumulated in reverse order)
+    let ordered_field_types = list_reverse(field_types);
+    // Record is a single variant with the type's name
+    let variant: AdtVariant = { name: type_name, fields: ordered_field_types };
+    (ctx2, Cons(variant, Nil()), field_info, is_recursive)
+}
+
+/// Elaborate record field types and collect field info for named access.
+fn elaborate_record_field_types(
+    ctx: ElabContext,
+    fields: List<RecordField>,
+    type_name: String
+) -> (ElabContext, List<TypeHandle>, List<RecordFieldInfo>, Bool) {
+    elaborate_record_fields_rec(ctx, fields, type_name, Nil(), Nil(), 0, false)
+}
+
+/// Recursive record field type elaboration.
+/// Now also collects RecordFieldInfo for each field.
+fn elaborate_record_fields_rec(
+    ctx: ElabContext,
+    fields: List<RecordField>,
+    type_name: String,
+    type_acc: List<TypeHandle>,
+    info_acc: List<RecordFieldInfo>,
+    index: Nat,
+    has_self_ref: Bool
+) -> (ElabContext, List<TypeHandle>, List<RecordFieldInfo>, Bool) {
+    match fields {
+        Nil() => (ctx, type_acc, info_acc, has_self_ref),
+        Cons(field, rest) =>
+            let field_name = ident_name(field.name);
+            // Check if field type is a self-reference
+            if type_is_self_ref(field.ty, type_name) {
+                let mu_var = tg_type_var(tg_string_to_cstr(type_name));
+                let new_type_acc = Cons(mu_var, type_acc);
+                let finfo = record_field_info_new(field_name, mu_var, index);
+                let new_info_acc = Cons(finfo, info_acc);
+                elaborate_record_fields_rec(ctx, rest, type_name, new_type_acc, new_info_acc, index + 1, true)
+            } else {
+                match elab_type(ctx.env, field.ty) {
+                    ElabTypeErr(err) =>
+                        let elab_err = elab_error_simple(err.message, err.span);
+                        let ctx2 = elab_context_add_error(ctx, elab_err);
+                        let new_type_acc = Cons(INVALID_HANDLE, type_acc);
+                        let finfo = record_field_info_new(field_name, INVALID_HANDLE, index);
+                        let new_info_acc = Cons(finfo, info_acc);
+                        elaborate_record_fields_rec(ctx2, rest, type_name, new_type_acc, new_info_acc, index + 1, has_self_ref),
+                    ElabTypeOk(ty_handle, _) =>
+                        let self_ref = has_self_ref || type_references_self(field.ty, type_name);
+                        let new_type_acc = Cons(ty_handle, type_acc);
+                        let finfo = record_field_info_new(field_name, ty_handle, index);
+                        let new_info_acc = Cons(finfo, info_acc);
+                        elaborate_record_fields_rec(ctx, rest, type_name, new_type_acc, new_info_acc, index + 1, self_ref)
+                }
+            }
+    }
+}
+
+/// Elaborate a type alias.
+fn elaborate_alias_body(ctx: ElabContext, def: TypeAliasDef) -> ElabContext {
+    let type_name = ident_name(def.name);
+    
+    // Push type parameters
+    let ctx2 = push_type_params(ctx, def.type_params);
+    
+    // Elaborate the aliased type
+    match elab_type(ctx2.env, def.ty) {
+        ElabTypeErr(err) => {
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            pop_type_params(ctx3, def.type_params)
+        },
+        ElabTypeOk(ty_handle, _) => {
+            // Env not modified by type elaboration, keep ctx2
+            let ctx3 = update_type_encoding(ctx2, type_name, ty_handle, def.vis, def.span);
+            pop_type_params(ctx3, def.type_params)
+        }
+    }
+}
+
+/// Update the type definition with its encoded type.
+fn update_type_encoding(
+    ctx: ElabContext,
+    name: String,
+    encoded: TypeHandle,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    // Look up existing stub and update it
+    match env_lookup_type_def(ctx.env, name) {
+        NoTypeDef() => ctx,
+        SomeTypeDef(info) =>
+            let updated = type_def_info_new(
+                name,
+                info.arity,
+                info.params,  // Preserve params from stub
+                encoded,      // The kind/type
+                vis,
+                span,
+                encoded       // The encoded representation
+            );
+            let env2 = env_register_type(ctx.env, updated);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+/// Update the type definition with its encoded type AND record field info.
+/// Used for record types to enable named field access.
+fn update_type_encoding_with_record_fields(
+    ctx: ElabContext,
+    name: String,
+    encoded: TypeHandle,
+    vis: Visibility,
+    span: Span,
+    fields: List<RecordFieldInfo>
+) -> ElabContext {
+    // Look up existing stub and update it
+    match env_lookup_type_def(ctx.env, name) {
+        NoTypeDef() => ctx,  // Should not happen
+        SomeTypeDef(info) =>
+            let updated = type_def_info_with_fields(
+                name,
+                info.arity,
+                info.params,  // Preserve params from stub
+                info.kind,    // Preserve kind from stub
+                vis,
+                span,
+                encoded,      // The encoded representation
+                fields        // Record field info for named access
+            );
+            let env2 = env_register_type(ctx.env, updated);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+/// Push type parameters into scope.
+fn push_type_params(ctx: ElabContext, params: List<TypeParam>) -> ElabContext {
+    match params {
+        Nil() => ctx,
+        Cons(param, rest) =>
+            let env2 = env_push_type_var(ctx.env, ident_name(param.name));
+            let ctx2 = elab_context_with_env(ctx, env2);
+            push_type_params(ctx2, rest)
+    }
+}
+
+/// Pop type parameters from scope.
+fn pop_type_params(ctx: ElabContext, params: List<TypeParam>) -> ElabContext {
+    match params {
+        Nil() => ctx,
+        Cons(_, rest) =>
+            let env2 = env_pop_type_var(ctx.env);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            pop_type_params(ctx2, rest)
+    }
+}
+
+// ===========================================================================
+// PHASE 1d: RESOLVE DEFERRED TYPE REFERENCES
+// ===========================================================================
+
+/// Resolve any deferred type references created during phase 1c.
+/// Forward references to types that came later in the file are now resolvable.
+fn collect_phase_1d(ctx: ElabContext) -> ElabContext {
+    // TODO: Walk through all type encodings and resolve TyVar placeholders
+    // For now, return ctx unchanged (most cases don't need this)
+    ctx
+}
+
+// ===========================================================================
+// PHASE 1e: CACHE TYPE ENCODINGS
+// ===========================================================================
+
+/// Cache type encodings for reverse lookup (type → name).
+/// This enables user-friendly error messages like "Color" instead of "μX.(1+1+1)".
+fn collect_phase_1e(ctx: ElabContext) -> ElabContext {
+    // TODO: Build reverse mapping from encoded types to names
+    // For now, return ctx unchanged
+    ctx
+}
+
+// ===========================================================================
+// PHASE 2: COLLECT VALUE SIGNATURES
+// ===========================================================================
+
+/// Collect function, theorem, and extern signatures.
+/// All types are now fully elaborated, so signatures can reference any type.
+fn collect_phase_2(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => {
+            ctx
+        },
+        Cons(item, rest) => {
+            let ctx2 = collect_value_signature(ctx, item);
+            collect_phase_2(ctx2, rest)
+        }
+    }
+}
+
+/// Collect a value signature from an item.
+fn collect_value_signature(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemFn(def) => {
+            collect_fn_signature(ctx, def)
+        },
+        ItemTheorem(def) => {
+            collect_theorem_signature(ctx, def, "theorem")
+        },
+        ItemLemma(def) => {
+            collect_theorem_signature(ctx, def, "lemma")
+        },
+        ItemAxiom(def) => {
+            collect_axiom_signature(ctx, def)
+        },
+        ItemExtern(def) => collect_extern_signature(ctx, def),
+        _ => {
+            ctx  // Not a value definition
+        }
+    }
+}
+
+/// Collect a function signature.
+fn collect_fn_signature(ctx: ElabContext, def: FunctionDef) -> ElabContext {
+    let fn_name = ident_name(def.name);
+    
+    // Push type parameters
+    let ctx2 = push_type_params(ctx, def.type_params);
+    
+    // Build the function type from parameters and return type
+    match build_fn_type(ctx2, def.params, def.return_type, def.span) {
+        ElabTypeErr(err) => {
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            pop_type_params(ctx3, def.type_params)
+        },
+        ElabTypeOk(fn_type, _) => {
+            // Wrap in foralls for type parameters
+            let final_type = wrap_foralls(fn_type, def.type_params);
+            // Register the value
+            let info = value_def_info_new(fn_name, final_type, def.vis, def.span);
+            let env3 = env_register_value(ctx2.env, info);
+            let ctx3 = elab_context_with_env(ctx2, env3);
+            pop_type_params(ctx3, def.type_params)
+        }
+    }
+}
+
+/// Build a function type from parameters and return type.
+/// Made public to allow reuse in elaborate.tg to avoid O(n) env lookup.
+pub fn build_fn_type(
+    ctx: ElabContext,
+    params: List<Param>,
+    return_type: MaybeTypeExpr,
+    span: Span
+) -> ElabTypeResult {
+    // Elaborate return type
+    let ret_ty = match return_type {
+        NoTypeExpr() => {
+            ElabTypeOk(tg_type_unit(), CTUnit())  // Default to Unit
+        },
+        SomeTypeExpr(ty) => {
+            elab_type(ctx.env, ty)
+        }
+    };
+    
+    match ret_ty {
+        ElabTypeErr(e) => {
+            ElabTypeErr(e)
+        },
+        ElabTypeOk(ret_handle, _) => {
+            // Build arrow types from right to left
+            let result = build_arrow_chain(ctx.env, params, ret_handle);
+            result
+        }
+    }
+}
+
+/// Build a chain of arrow types for function parameters.
+fn build_arrow_chain(env: Env, params: List<Param>, ret: TypeHandle) -> ElabTypeResult {
+    match params {
+        Nil() => ElabTypeOk(ret, CTUnit()),  // CodegenType placeholder, not used
+        Cons(param, rest) =>
+            // First build the rest of the chain
+            match build_arrow_chain(env, rest, ret) {
+                ElabTypeErr(e) => ElabTypeErr(e),
+                ElabTypeOk(rest_type, _) =>
+                    // Elaborate this parameter's type
+                    match elab_type(env, param.ty) {
+                        ElabTypeErr(e) => ElabTypeErr(e),
+                        ElabTypeOk(param_type, param_ct) =>
+                            let arrow = tg_type_arrow(param_type, rest_type);
+                            // Build arrow CodegenType as well
+                            let arrow_ct = CTArrow(param_ct, CTUnit());  // Simplified
+                            ElabTypeOk(arrow, arrow_ct)
+                    }
+            }
+    }
+}
+
+/// Wrap a type in foralls for type parameters.
+/// Made public to allow reuse in elaborate.tg.
+pub fn wrap_foralls(ty: TypeHandle, params: List<TypeParam>) -> TypeHandle {
+    match params {
+        Nil() => ty,
+        Cons(param, rest) =>
+            let inner = wrap_foralls(ty, rest);
+            let name_ptr = tg_string_to_cstr(ident_name(param.name));
+            tg_type_forall(name_ptr, inner)
+    }
+}
+
+/// Collect a theorem or lemma signature.
+fn collect_theorem_signature(ctx: ElabContext, def: TheoremDef, kind: String) -> ElabContext {
+    let thm_name = ident_name(def.name);
+    
+    // Push type parameters
+    let ctx2 = push_type_params(ctx, def.type_params);
+    
+    // Elaborate the proposition type
+    match elab_type(ctx2.env, def.prop) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            pop_type_params(ctx3, def.type_params),
+        ElabTypeOk(prop_type, _) =>
+            // Build: (params...) -> Prop
+            match build_fn_type_from_params(ctx2.env, def.params, prop_type) {
+                ElabTypeErr(err) =>
+                    let elab_err = elab_error_simple(err.message, err.span);
+                    let ctx3 = elab_context_add_error(ctx2, elab_err);
+                    pop_type_params(ctx3, def.type_params),
+                ElabTypeOk(thm_type, _) =>
+                    let final_type = wrap_foralls(thm_type, def.type_params);
+                    let info = value_def_info_new(thm_name, final_type, def.vis, def.span);
+                    let env3 = env_register_value(ctx2.env, info);
+                    let ctx3 = elab_context_with_env(ctx2, env3);
+                    pop_type_params(ctx3, def.type_params)
+            }
+    }
+}
+
+/// Build function type from params (without return type annotation).
+fn build_fn_type_from_params(env: Env, params: List<Param>, ret: TypeHandle) -> ElabTypeResult {
+    build_arrow_chain(env, params, ret)
+}
+
+/// Collect an axiom signature.
+fn collect_axiom_signature(ctx: ElabContext, def: AxiomDef) -> ElabContext {
+    let axiom_name = ident_name(def.name);
+    
+    // Push type parameters
+    let ctx2 = push_type_params(ctx, def.type_params);
+    
+    // Elaborate the proposition type
+    match elab_type(ctx2.env, def.prop) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            pop_type_params(ctx3, def.type_params),
+        ElabTypeOk(prop_type, _) =>
+            match build_fn_type_from_params(ctx2.env, def.params, prop_type) {
+                ElabTypeErr(err) =>
+                    let elab_err = elab_error_simple(err.message, err.span);
+                    let ctx3 = elab_context_add_error(ctx2, elab_err);
+                    pop_type_params(ctx3, def.type_params),
+                ElabTypeOk(axiom_type, _) =>
+                    let final_type = wrap_foralls(axiom_type, def.type_params);
+                    let info = value_def_info_new(axiom_name, final_type, def.vis, def.span);
+                    let env3 = env_register_value(ctx2.env, info);
+                    let ctx3 = elab_context_with_env(ctx2, env3);
+                    pop_type_params(ctx3, def.type_params)
+            }
+    }
+}
+
+/// Collect an extern function signature.
+fn collect_extern_signature(ctx: ElabContext, def: ExternFnDef) -> ElabContext {
+    let fn_name = ident_name(def.name);
+    
+    // Build extern function type from params and return type
+    // Unwrap optional return type - default to unit
+    let ret_type = match def.return_type {
+        SomeTypeExpr(t) => t,
+        NoTypeExpr() => TyUnit(def.span)
+    };
+    match build_extern_fn_type(ctx.env, def.params, ret_type) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            elab_context_add_error(ctx, elab_err),
+        ElabTypeOk(fn_type, _) =>
+            let info = value_def_info_new(fn_name, fn_type, def.vis, def.span);
+            let env2 = env_register_value(ctx.env, info);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+/// Build extern function type.
+fn build_extern_fn_type(env: Env, params: List<ExternParam>, ret: TypeExpr) -> ElabTypeResult {
+    // Elaborate return type
+    match elab_type(env, ret) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(ret_handle, ret_ct) =>
+            build_extern_arrow_chain(env, params, ret_handle, ret_ct)
+    }
+}
+
+/// Build arrow chain for extern params.
+fn build_extern_arrow_chain(env: Env, params: List<ExternParam>, ret: TypeHandle, ret_ct: CodegenType) -> ElabTypeResult {
+    match params {
+        Nil() => ElabTypeOk(ret, ret_ct),
+        Cons(param, rest) =>
+            match build_extern_arrow_chain(env, rest, ret, ret_ct) {
+                ElabTypeErr(e) => ElabTypeErr(e),
+                ElabTypeOk(rest_type, rest_ct) =>
+                    match elab_type(env, param.ty) {
+                        ElabTypeErr(e) => ElabTypeErr(e),
+                        ElabTypeOk(param_type, param_ct) =>
+                            let arrow = tg_type_arrow(param_type, rest_type);
+                            let arrow_ct = CTArrow(param_ct, rest_ct);
+                            ElabTypeOk(arrow, arrow_ct)
+                    }
+            }
+    }
+}

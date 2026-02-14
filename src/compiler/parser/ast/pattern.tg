@@ -1,0 +1,39 @@
+// src/compiler/parser/ast/pattern.tg
+// Pattern types for the AST.
+
+use lexer::span::Span;
+use parser::ast::common::{
+    Ident, ident_span,
+    Path, path_span,
+    PatLit
+};
+
+// Import generic List type from driver/ffi
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// PATTERN
+// ===========================================================================
+
+/// A pattern for matching.
+pub type Pattern =
+    | PatWildcard(Span)                           // _
+    | PatVar(Ident)                               // x
+    | PatLiteral(PatLit, Span)                    // 42, true, "hello"
+    | PatTuple(List<Pattern>, Span)               // (a, b, c)
+    | PatConstructor(Path, List<Pattern>, Span)   // Some(x), None, Result::Ok(v)
+    | PatOr(Pattern, Pattern, Span)               // A | B
+    | PatError(Span)                              // Error recovery placeholder
+
+/// Get the span of a pattern.
+pub fn pattern_span(p: Pattern) -> Span {
+    match p {
+        PatWildcard(s) => s,
+        PatVar(id) => ident_span(id),
+        PatLiteral(_, s) => s,
+        PatTuple(_, s) => s,
+        PatConstructor(_, _, s) => s,
+        PatOr(_, _, s) => s,
+        PatError(s) => s
+    }
+}

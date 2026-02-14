@@ -1,0 +1,154 @@
+// src/compiler/driver/modules/workspace.tg
+// Workspace discovery functions.
+//
+// Finds workspace root and discovers sibling modules.
+
+use driver::ffi::{
+    List, Nil, Cons,
+    file_exists, is_directory, list_directory,
+    parent_directory, path_join,
+    string_len, string_char_at_internal, tg_string_append_char,
+    FfiResult, FfiOk, FfiErr
+};
+use driver::util::{
+    Option, Some, None, unwrap_or,
+    string_eq, string_is_empty, ends_with,
+    list_reverse
+};
+
+// ===========================================================================
+// WORKSPACE DISCOVERY
+// ===========================================================================
+
+/// Find the workspace root directory for a given file.
+///
+/// Walks up from the file's directory looking for main.tg.
+/// If no main.tg is found, returns the file's immediate parent directory.
+pub fn find_workspace_root(file_path: String) -> String {
+    let dir = unwrap_or(parent_directory(file_path), ".");
+    find_workspace_root_loop(dir, dir)
+}
+
+fn find_workspace_root_loop(dir: String, original_dir: String) -> String {
+    // Check for main.tg in current directory
+    let main_path = path_join(dir, "main.tg");
+    if file_exists(main_path) {
+        dir
+    } else {
+        // Move up one directory
+        match parent_directory(dir) {
+            None() => original_dir,
+            Some(parent) =>
+                if string_eq(parent, dir) {
+                    // parent_directory returned same dir (at root)
+                    original_dir
+                } else {
+                    find_workspace_root_loop(parent, original_dir)
+                }
+        }
+    }
+}
+
+/// Discover all module entry points at the workspace root level.
+///
+/// Returns paths to all .tg files and */mod.tg files at the workspace root.
+/// These represent top-level modules that can be imported.
+pub fn discover_sibling_modules(workspace_root: String) -> List<String> {
+    let result = list_directory(workspace_root);
+    match result {
+        FfiErr(_) => {
+            Nil
+        },
+        FfiOk(entries) => {
+            filter_module_entries(workspace_root, entries, Nil)
+        }
+    }
+}
+
+fn filter_module_entries(
+    root: String,
+    entries: List<String>,
+    acc: List<String>
+) -> List<String> {
+    match entries {
+        Nil() => list_reverse(acc),
+        Cons(entry, rest) =>
+            if string_is_empty(entry) {
+                // Skip empty entries
+                filter_module_entries(root, rest, acc)
+            } else {
+                let full_path = path_join(root, entry);
+                let new_acc = classify_entry(root, entry, full_path, acc);
+                filter_module_entries(root, rest, new_acc)
+            }
+    }
+}
+
+fn classify_entry(
+    root: String,
+    entry: String,
+    full_path: String,
+    acc: List<String>
+) -> List<String> {
+    if ends_with(entry, ".tg") {
+        // .tg file - include unless it's mod.tg at root level
+        if string_eq(entry, "mod.tg") {
+            acc
+        } else {
+            Cons(full_path, acc)
+        }
+    } else if is_directory(full_path) {
+        // Directory - check for mod.tg inside
+        let mod_path = path_join(full_path, "mod.tg");
+        if file_exists(mod_path) {
+            Cons(mod_path, acc)
+        } else {
+            acc
+        }
+    } else {
+        acc
+    }
+}
+
+// ===========================================================================
+// STRING HELPERS
+// ===========================================================================
+
+/// Split a string by newlines into a list of strings.
+pub fn split_lines(s: String) -> List<String> {
+    split_lines_acc(s, 0, string_len(s), "", Nil)
+}
+
+fn split_lines_acc(
+    s: String,
+    i: Nat,
+    len: Nat,
+    current: String,
+    acc: List<String>
+) -> List<String> {
+    if i >= len {
+        // End of string - add current line if non-empty
+        if string_is_empty(current) {
+            list_reverse(acc)
+        } else {
+            list_reverse(Cons(current, acc))
+        }
+    } else {
+        let c = string_char_at_internal(s, i);
+        if c == 10 {
+            // Newline - add current line and start new one
+            split_lines_acc(s, i + 1, len, "", Cons(current, acc))
+        } else if c == 13 {
+            // Carriage return - skip (handle \r\n)
+            split_lines_acc(s, i + 1, len, current, acc)
+        } else {
+            // Regular character - append to current line
+            let new_current = string_append_char_safe(current, c);
+            split_lines_acc(s, i + 1, len, new_current, acc)
+        }
+    }
+}
+
+fn string_append_char_safe(s: String, c: Nat) -> String {
+    tg_string_append_char(s, c)
+}

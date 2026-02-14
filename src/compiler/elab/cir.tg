@@ -1,0 +1,468 @@
+// src/compiler/elab/cir.tg
+// CodegenIR - Pure Tungsten ADT for code generation.
+//
+// This module provides a representation of Core terms that is fully inspectable
+// from Tungsten code, enabling Phase 3.5 self-hosted code generation without
+// requiring FFI for term traversal.
+//
+// ## Design Principles
+//
+// 1. **Mirrors Core:** Every CodegenIR variant corresponds to a Core term
+// 2. **Named Variables:** Uses source names (not de Bruijn) for readability
+// 3. **Lockstep Construction:** Built alongside Core terms in elaboration
+// 4. **Proof Terms Kept:** CIRRefl, CIRSorry retained for now (erasure in Phase 3.5)
+//
+// ## Variable Naming
+//
+// Variables use source names with numeric suffix for shadowing:
+//   - First binding: `x`
+//   - Shadowing: `x_1`, `x_2`, etc.
+//
+// This enables readable output while maintaining uniqueness.
+
+use lexer::span::Span;
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{nat_to_string, list_reverse};
+
+// ===========================================================================
+// ELAB STATEMENT INFO - For block elaboration
+// ===========================================================================
+
+// Elaborated statement info - saves the CIR from first elaboration pass
+pub type ElabStmtInfo =
+    | ElabStmtLetInfo(String, CodegenType, CodegenIR)  // name, type, rhs_cir
+    | ElabStmtExprInfo(CodegenIR)                       // expr_cir (discard result)
+    | ElabStmtSkip                                      // for items etc
+
+// ===========================================================================
+// CODEGEN IR - TERM REPRESENTATION
+// ===========================================================================
+
+/// CodegenIR - A pure Tungsten representation of Core terms.
+/// Used for Phase 3.5 code generation without FFI traversal.
+pub type CodegenIR =
+    // -------------------------------------------------------------------------
+    // Literals
+    // -------------------------------------------------------------------------
+    | CIRZero                                   // Natural number zero
+    | CIRSucc(CodegenIR)                        // Successor: succ(n)
+    | CIRNatLit(Nat)                            // Natural number literal
+    | CIRTrue                                   // Boolean true
+    | CIRFalse                                  // Boolean false
+    | CIRUnit                                   // Unit value: ()
+    | CIRString(String)                         // String literal
+    
+    // -------------------------------------------------------------------------
+    // Variables and References
+    // -------------------------------------------------------------------------
+    | CIRVar(String)                            // Local variable by name
+    | CIRGlobal(String)                         // Global reference by qualified path
+    
+    // -------------------------------------------------------------------------
+    // Binding Forms
+    // -------------------------------------------------------------------------
+    | CIRLambda(String, CodegenType, CodegenIR) // Lambda: |name: ty| body
+    | CIRApp(CodegenIR, CodegenIR)              // Application: f(arg)
+    | CIRLet(String, CodegenType, CodegenIR, CodegenIR)  // Let: let name: ty = def in body
+    | CIRFix(String, CodegenType, CodegenIR)    // Fixed-point: fix name: ty. body
+    
+    // -------------------------------------------------------------------------
+    // Pairs (Products)
+    // -------------------------------------------------------------------------
+    | CIRPair(CodegenIR, CodegenIR)             // Pair: (a, b)
+    | CIRFst(CodegenIR)                         // First projection: fst(p)
+    | CIRSnd(CodegenIR)                         // Second projection: snd(p)
+    
+    // -------------------------------------------------------------------------
+    // Sums (Coproducts)
+    // -------------------------------------------------------------------------
+    | CIRInl(CodegenIR, CodegenType)            // Left injection: inl(v) : A + B
+    | CIRInr(CodegenIR, CodegenType)            // Right injection: inr(v) : A + B
+    | CIRCase(CodegenIR, String, CodegenIR, String, CodegenIR)
+        // Case analysis: match scrut { inl(x) => left, inr(y) => right }
+    
+    // -------------------------------------------------------------------------
+    // Arithmetic Operations
+    // -------------------------------------------------------------------------
+    | CIRNatAdd(CodegenIR, CodegenIR)           // Addition: a + b
+    | CIRNatSub(CodegenIR, CodegenIR)           // Subtraction: a - b
+    | CIRNatMul(CodegenIR, CodegenIR)           // Multiplication: a * b
+    | CIRNatDiv(CodegenIR, CodegenIR)           // Division: a / b
+    | CIRNatMod(CodegenIR, CodegenIR)           // Modulo: a % b
+    
+    // -------------------------------------------------------------------------
+    // Comparison Operations
+    // -------------------------------------------------------------------------
+    | CIRNatEq(CodegenIR, CodegenIR)            // Equality: a == b
+    | CIRNatLt(CodegenIR, CodegenIR)            // Less than: a < b
+    | CIRNatLe(CodegenIR, CodegenIR)            // Less or equal: a <= b
+    | CIRNatGt(CodegenIR, CodegenIR)            // Greater than: a > b
+    | CIRNatGe(CodegenIR, CodegenIR)            // Greater or equal: a >= b
+    
+    // -------------------------------------------------------------------------
+    // Boolean Operations
+    // -------------------------------------------------------------------------
+    | CIRBoolAnd(CodegenIR, CodegenIR)          // Logical AND: a && b
+    | CIRBoolOr(CodegenIR, CodegenIR)           // Logical OR: a || b
+    | CIRBoolNot(CodegenIR)                     // Logical NOT: !a
+    
+    // -------------------------------------------------------------------------
+    // String Operations
+    // -------------------------------------------------------------------------
+    | CIRStrConcat(CodegenIR, CodegenIR)        // Concatenation: a ++ b
+    | CIRStrEq(CodegenIR, CodegenIR)            // String equality: a == b
+    | CIRStrLen(CodegenIR)                      // String length: len(s)
+    
+    // -------------------------------------------------------------------------
+    // Control Flow
+    // -------------------------------------------------------------------------
+    | CIRIf(CodegenIR, CodegenIR, CodegenIR)    // Conditional: if c then t else e
+    
+    // -------------------------------------------------------------------------
+    // Recursive Types
+    // -------------------------------------------------------------------------
+    | CIRFold(CodegenType, CodegenIR)           // Fold into μ-type: fold[μX.T](v)
+    | CIRUnfold(CodegenType, CodegenIR)         // Unfold from μ-type: unfold[μX.T](v)
+    
+    // -------------------------------------------------------------------------
+    // References (Mutable State)
+    // -------------------------------------------------------------------------
+    | CIRRefNew(CodegenIR)                      // Create reference: ref(v)
+    | CIRRefGet(CodegenIR)                      // Dereference: *r
+    | CIRRefSet(CodegenIR, CodegenIR)           // Assignment: r := v
+    
+    // -------------------------------------------------------------------------
+    // Proof Terms (kept for debugging, erased in Phase 3.5)
+    // -------------------------------------------------------------------------
+    | CIRRefl(CodegenType, CodegenIR)           // Reflexivity: refl[T](e)
+    | CIRSorry(CodegenType)                     // Placeholder proof: sorry
+    
+    // -------------------------------------------------------------------------
+    // Polymorphism
+    // -------------------------------------------------------------------------
+    | CIRTypeAbs(String, CodegenIR)             // Type abstraction: Λα. body
+    | CIRTypeApp(CodegenIR, CodegenType)        // Type application: e[T]
+    
+    // -------------------------------------------------------------------------
+    // FFI
+    // -------------------------------------------------------------------------
+    | CIRExternCall(String, List<CodegenIR>)            // External call: extern "name"(args)
+    
+    // -------------------------------------------------------------------------
+    // Type Annotation (for explicit types)
+    // -------------------------------------------------------------------------
+    | CIRAnnot(CodegenIR, CodegenType)          // Type annotation: (e : T)
+    
+    // -------------------------------------------------------------------------
+    // Internal: Statement Collection (for block elaboration)
+    // -------------------------------------------------------------------------
+    | CIRStmtLet(String, CodegenType, CodegenIR)  // Collected let statement
+    | CIRStmtExpr(CodegenIR)                      // Collected expression statement
+    | CIRStmtList(List<ElabStmtInfo>)             // List of collected statements
+
+// ===========================================================================
+// CODEGEN TYPE - TYPE REPRESENTATION
+// ===========================================================================
+
+/// CodegenType - A pure Tungsten representation of Core types.
+pub type CodegenType =
+    // -------------------------------------------------------------------------
+    // Base Types
+    // -------------------------------------------------------------------------
+    | CTNat                                     // Natural numbers
+    | CTBool                                    // Booleans
+    | CTString                                  // Strings
+    | CTUnit                                    // Unit type
+    | CTVoid                                    // Empty type
+    | CTProp                                    // Propositions
+    
+    // -------------------------------------------------------------------------
+    // Compound Types
+    // -------------------------------------------------------------------------
+    | CTArrow(CodegenType, CodegenType)         // Function type: A -> B
+    | CTPair(CodegenType, CodegenType)          // Product type: A * B
+    | CTSum(CodegenType, CodegenType)           // Sum type: A + B
+    
+    // -------------------------------------------------------------------------
+    // Reference Types
+    // -------------------------------------------------------------------------
+    | CTRef(CodegenType)                        // Reference type: Ref<T>
+    | CTPtr(CodegenType)                        // Pointer type: *T
+    
+    // -------------------------------------------------------------------------
+    // Polymorphic Types
+    // -------------------------------------------------------------------------
+    | CTVar(String)                             // Type variable
+    | CTForall(String, CodegenType)             // Universal type: ∀α. T
+    
+    // -------------------------------------------------------------------------
+    // Recursive Types
+    // -------------------------------------------------------------------------
+    | CTMu(String, CodegenType)                 // Recursive type: μX. T
+    
+    // -------------------------------------------------------------------------
+    // Equality Types
+    // -------------------------------------------------------------------------
+    | CTEq(CodegenType, CodegenIR, CodegenIR)   // Equality type: a =_{T} b
+
+// ===========================================================================
+// HELPER CONSTRUCTORS
+// ===========================================================================
+
+/// Create a natural number literal CIR.
+pub fn cir_nat_lit(n: Nat) -> CodegenIR {
+    CIRNatLit(n)
+}
+
+/// Create a variable reference.
+pub fn cir_var(name: String) -> CodegenIR {
+    CIRVar(name)
+}
+
+/// Create a global reference.
+pub fn cir_global(path: String) -> CodegenIR {
+    CIRGlobal(path)
+}
+
+/// Create a lambda.
+pub fn cir_lambda(name: String, ty: CodegenType, body: CodegenIR) -> CodegenIR {
+    CIRLambda(name, ty, body)
+}
+
+/// Create an application.
+pub fn cir_app(func: CodegenIR, arg: CodegenIR) -> CodegenIR {
+    CIRApp(func, arg)
+}
+
+/// Create a let binding.
+pub fn cir_let(name: String, ty: CodegenType, def: CodegenIR, body: CodegenIR) -> CodegenIR {
+    CIRLet(name, ty, def, body)
+}
+
+/// Create a pair.
+pub fn cir_pair(fst: CodegenIR, snd: CodegenIR) -> CodegenIR {
+    CIRPair(fst, snd)
+}
+
+/// Create first projection.
+pub fn cir_fst(p: CodegenIR) -> CodegenIR {
+    CIRFst(p)
+}
+
+/// Create second projection.
+pub fn cir_snd(p: CodegenIR) -> CodegenIR {
+    CIRSnd(p)
+}
+
+/// Create left injection.
+pub fn cir_inl(v: CodegenIR, sum_ty: CodegenType) -> CodegenIR {
+    CIRInl(v, sum_ty)
+}
+
+/// Create right injection.
+pub fn cir_inr(v: CodegenIR, sum_ty: CodegenType) -> CodegenIR {
+    CIRInr(v, sum_ty)
+}
+
+/// Create case analysis.
+pub fn cir_case(
+    scrut: CodegenIR,
+    left_name: String,
+    left_body: CodegenIR,
+    right_name: String,
+    right_body: CodegenIR
+) -> CodegenIR {
+    CIRCase(scrut, left_name, left_body, right_name, right_body)
+}
+
+/// Create an if-then-else.
+pub fn cir_if(cond: CodegenIR, then_e: CodegenIR, else_e: CodegenIR) -> CodegenIR {
+    CIRIf(cond, then_e, else_e)
+}
+
+/// Create a fold.
+pub fn cir_fold(mu_ty: CodegenType, v: CodegenIR) -> CodegenIR {
+    CIRFold(mu_ty, v)
+}
+
+/// Create an unfold.
+pub fn cir_unfold(mu_ty: CodegenType, v: CodegenIR) -> CodegenIR {
+    CIRUnfold(mu_ty, v)
+}
+
+/// Create an extern call.
+pub fn cir_extern_call(name: String, args: List<CodegenIR>) -> CodegenIR {
+    CIRExternCall(name, args)
+}
+
+// ===========================================================================
+// TYPE HELPER CONSTRUCTORS
+// ===========================================================================
+
+/// Create Nat type.
+pub fn ct_nat() -> CodegenType {
+    CTNat
+}
+
+/// Create Bool type.
+pub fn ct_bool() -> CodegenType {
+    CTBool
+}
+
+/// Create String type.
+pub fn ct_string() -> CodegenType {
+    CTString
+}
+
+/// Create Unit type.
+pub fn ct_unit() -> CodegenType {
+    CTUnit
+}
+
+/// Create Void type.
+pub fn ct_void() -> CodegenType {
+    CTVoid
+}
+
+/// Create Prop type.
+pub fn ct_prop() -> CodegenType {
+    CTProp
+}
+
+/// Create Arrow type.
+pub fn ct_arrow(domain: CodegenType, codomain: CodegenType) -> CodegenType {
+    CTArrow(domain, codomain)
+}
+
+/// Create Product type.
+pub fn ct_pair(left: CodegenType, right: CodegenType) -> CodegenType {
+    CTPair(left, right)
+}
+
+/// Create Sum type.
+pub fn ct_sum(left: CodegenType, right: CodegenType) -> CodegenType {
+    CTSum(left, right)
+}
+
+/// Create Ref type.
+pub fn ct_ref(inner: CodegenType) -> CodegenType {
+    CTRef(inner)
+}
+
+/// Create Ptr type.
+pub fn ct_ptr(inner: CodegenType) -> CodegenType {
+    CTPtr(inner)
+}
+
+/// Create type variable.
+pub fn ct_var(name: String) -> CodegenType {
+    CTVar(name)
+}
+
+/// Create forall type.
+pub fn ct_forall(name: String, body: CodegenType) -> CodegenType {
+    CTForall(name, body)
+}
+
+/// Create mu (recursive) type.
+pub fn ct_mu(name: String, body: CodegenType) -> CodegenType {
+    CTMu(name, body)
+}
+
+/// Create equality type.
+pub fn ct_eq(ty: CodegenType, lhs: CodegenIR, rhs: CodegenIR) -> CodegenType {
+    CTEq(ty, lhs, rhs)
+}
+
+// ===========================================================================
+// N-ARY TUPLE CONSTRUCTION
+// ===========================================================================
+
+/// Build a nested pair from a list of CIR terms.
+/// [a, b, c] becomes CIRPair(a, CIRPair(b, c))
+/// [] becomes CIRUnit
+/// [a] becomes a
+pub fn cir_tuple_from_list(items: List<CodegenIR>) -> CodegenIR {
+    match items {
+        Nil() => CIRUnit,
+        Cons(head, rest) =>
+            match rest {
+                Nil() => head,
+                Cons(_, _) => CIRPair(head, cir_tuple_from_list(rest))
+            }
+    }
+}
+
+/// Build a nested product type from a list of types.
+pub fn ct_tuple_from_list(types: List<CodegenType>) -> CodegenType {
+    match types {
+        Nil() => CTUnit,
+        Cons(head, rest) =>
+            match rest {
+                Nil() => head,
+                Cons(_, _) => CTPair(head, ct_tuple_from_list(rest))
+            }
+    }
+}
+
+// ===========================================================================
+// SHADOWING SUPPORT
+// ===========================================================================
+
+/// Name context for tracking variable shadowing.
+/// Maps source names to their current shadow count.
+pub type NameContext = {
+    names: NameCountList
+}
+
+/// List of (name, count) pairs.
+pub type NameCountList =
+    | NameCountNil
+    | NameCountCons(String, Nat, NameCountList)
+
+/// Create empty name context.
+pub fn name_context_empty() -> NameContext {
+    { names: NameCountNil }
+}
+
+/// Get a unique name for a variable, handling shadowing.
+/// Returns (unique_name, updated_context).
+pub fn name_context_fresh(ctx: NameContext, name: String) -> (String, NameContext) {
+    match name_count_lookup(ctx.names, name) {
+        NoCount() =>
+            // First use of this name
+            let new_names = NameCountCons(name, 1, ctx.names);
+            (name, { names: new_names } : NameContext),
+        SomeCount(count) =>
+            // Shadowed - generate name_N
+            let unique = name ++ "_" ++ nat_to_string(count);
+            let new_names = name_count_update(ctx.names, name, count + 1);
+            (unique, { names: new_names } : NameContext)
+    }
+}
+
+/// Look up count for a name.
+fn name_count_lookup(list: NameCountList, name: String) -> MaybeCount {
+    match list {
+        NameCountNil() => NoCount,
+        NameCountCons(n, c, rest) =>
+            if n == name { SomeCount(c) }
+            else { name_count_lookup(rest, name) }
+    }
+}
+
+/// Update count for a name.
+fn name_count_update(list: NameCountList, name: String, count: Nat) -> NameCountList {
+    match list {
+        NameCountNil() => NameCountCons(name, count, NameCountNil),
+        NameCountCons(n, c, rest) =>
+            if n == name { NameCountCons(n, count, rest) }
+            else { NameCountCons(n, c, name_count_update(rest, name, count)) }
+    }
+}
+
+/// Maybe type for count lookup.
+type MaybeCount =
+    | NoCount
+    | SomeCount(Nat)
+

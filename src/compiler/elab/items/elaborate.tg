@@ -1,0 +1,427 @@
+// src/compiler/elab/items/elaborate.tg
+// Body elaboration for items.
+//
+// This module elaborates item bodies after collection is complete.
+// The collection phase registered all type and value signatures, so
+// bodies can now reference any definition in scope.
+
+use lexer::span::Span;
+use parser::ast::{
+    Item, ItemFn, ItemType, ItemTypeAlias, ItemTheorem, ItemLemma,
+    ItemAxiom, ItemExtern, ItemMod, ItemUse, ItemError,
+    FunctionDef, TypeDef, TypeAliasDef, TheoremDef, AxiomDef,
+    ExternFnDef, ModDecl, UseDecl,
+    Param,
+    ExternParam,
+    TypeParam,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    Visibility, VisPrivate, VisCrate, VisPublic,
+    Ident, ident_name,
+    item_span,
+    MaybeString, NoString, SomeString,
+    Pattern, PatVar, PatWildcard
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle, INVALID_HANDLE,
+    tg_term_abs, tg_term_let, tg_term_sorry, tg_term_type_abs,
+    tg_type_unit, tg_type_arrow,
+    tg_type_get_arrow_domain, tg_type_get_arrow_codomain, tg_type_is_arrow,
+    tg_string_to_cstr
+};
+use elab::env::{
+    Env, env_new, env_push_scope, env_pop_scope, env_bind_local,
+    env_push_type_var, env_pop_type_var,
+    env_lookup_value_def, env_lookup_type_def,
+    ValueDefInfo, MaybeValueDef, SomeValueDef, NoValueDef,
+    MaybeTypeDef, SomeTypeDef, NoTypeDef
+};
+use elab::types::{ElabTypeResult, ElabTypeOk, ElabTypeErr, elab_type};
+use elab::exprs::{synth, check, ElabExprResult, ElabExprOk, ElabExprErr};
+use elab::items::result::{
+    ElabContext, elab_context_new, elab_context_with_env,
+    elab_context_set_return_type, elab_context_clear_return_type,
+    elab_context_add_error,
+    ElabItemResult, ElabItemOk, ElabItemErr, ElabItemSkip,
+    ElabDef, elab_def_new, elab_def_new_with_cir
+};
+use elab::items::collect::{build_fn_type, wrap_foralls};
+use elab::error::{ElabError, elab_error_simple};
+use elab::cir::{CodegenIR, CodegenType, CIRLambda, CIRTypeAbs, CIRSorry, ct_unit};
+
+// ===========================================================================
+// ELABORATION ENTRY POINT
+// ===========================================================================
+
+/// Elaborate all item bodies after collection.
+/// Returns the list of elaborated definitions.
+pub fn elaborate_item_bodies(ctx: ElabContext, items: List<Item>) -> (ElabContext, List<ElabDef>) {
+    let result = elaborate_items_rec(ctx, items, Nil());
+    result
+}
+
+/// Recursive item body elaboration.
+fn elaborate_items_rec(
+    ctx: ElabContext,
+    items: List<Item>,
+    acc: List<ElabDef>
+) -> (ElabContext, List<ElabDef>) {
+    match items {
+        Nil() => 
+            (ctx, acc),
+        Cons(item, rest) =>
+            match elaborate_item_body(ctx, item) {
+                ElabItemOk(ctx2, def) =>
+                    let new_acc = Cons(def, acc);
+                    elaborate_items_rec(ctx2, rest, new_acc),
+                ElabItemErr(ctx2) =>
+                    // Error recorded, continue with rest
+                    elaborate_items_rec(ctx2, rest, acc),
+                ElabItemSkip(ctx2) =>
+                    // No definition produced (type def, use decl)
+                    elaborate_items_rec(ctx2, rest, acc)
+            }
+    }
+}
+
+/// Elaborate a single item's body.
+fn elaborate_item_body(ctx: ElabContext, item: Item) -> ElabItemResult {
+    match item {
+        ItemFn(def) => 
+            elaborate_fn_body(ctx, def),
+        ItemTheorem(def) => 
+            elaborate_theorem_body(ctx, def),
+        ItemLemma(def) => 
+            elaborate_theorem_body(ctx, def),  // Same as theorem
+        ItemAxiom(def) => 
+            elaborate_axiom_body(ctx, def),
+        ItemExtern(def) => 
+            elaborate_extern_body(ctx, def),
+        // These don't produce Core definitions (handled in collection)
+        ItemType(_) => 
+            ElabItemSkip(ctx),
+        ItemTypeAlias(_) => 
+            ElabItemSkip(ctx),
+        ItemMod(_) => 
+            ElabItemSkip(ctx),
+        ItemUse(_) => 
+            ElabItemSkip(ctx),
+        ItemError(span) => 
+            ElabItemSkip(ctx)
+    }
+}
+
+// ===========================================================================
+// FUNCTION BODY ELABORATION
+// ===========================================================================
+
+/// Elaborate a function body.
+/// NOTE: We rebuild the function type here instead of looking it up by name.
+/// This avoids O(n) lookup per function, which previously caused O(n²) total.
+fn elaborate_fn_body(ctx: ElabContext, def: FunctionDef) -> ElabItemResult {
+    let fn_name = ident_name(def.name);
+    
+    // Push type parameters FIRST (needed for type elaboration in build_fn_type)
+    let ctx2 = push_type_params_elab(ctx, def.type_params);
+    
+    // Rebuild the function type instead of looking it up (O(1) vs O(n))
+    match build_fn_type(ctx2, def.params, def.return_type, def.span) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            let ctx4 = pop_type_params_elab(ctx3, def.type_params);
+            ElabItemErr(ctx4),
+        ElabTypeOk(fn_type_inner, _) =>
+            // Wrap in foralls for type parameters  
+            let fn_type = wrap_foralls(fn_type_inner, def.type_params);
+            
+            // Create scope for parameters
+            let ctx3 = elab_context_with_env(ctx2, env_push_scope(ctx2.env));
+            
+            // Bind parameters and get return type
+            let (ctx4, ret_type) = bind_params_and_get_return(ctx3, def.params, fn_type_inner);
+            
+            // Set return type for ExprReturn
+            let ctx5 = elab_context_set_return_type(ctx4, ret_type);
+            
+            // Elaborate the body, checking against return type
+            match check(ctx5.env, def.body, ret_type) {
+                ElabExprErr(err) => {
+                    let elab_err = elab_error_simple(err.message, err.span);
+                    let ctx6 = elab_context_add_error(ctx5, elab_err);
+                    let ctx7 = elab_context_clear_return_type(ctx6);
+                    let ctx8 = elab_context_with_env(ctx7, env_pop_scope(ctx7.env));
+                    let ctx9 = pop_type_params_elab(ctx8, def.type_params);
+                    ElabItemErr(ctx9)
+                },
+                ElabExprOk(env2, body_term, _, body_cir) =>
+                    let ctx6 = elab_context_with_env(ctx5, env2);
+                    
+                    // Build the lambda term from parameters
+                    let lambda_term = build_lambda(def.params, body_term, fn_type_inner);
+                    
+                    // Build CIR lambda
+                    let lambda_cir = build_lambda_cir(def.params, body_cir, fn_type_inner);
+                    
+                    // Wrap in type abstractions if polymorphic
+                    let final_term = wrap_type_abs(lambda_term, def.type_params);
+                    let final_cir = wrap_type_abs_cir(lambda_cir, def.type_params);
+                    
+                    // Clean up context
+                    let ctx7 = elab_context_clear_return_type(ctx6);
+                    let ctx8 = elab_context_with_env(ctx7, env_pop_scope(ctx7.env));
+                    let ctx9 = pop_type_params_elab(ctx8, def.type_params);
+                    
+                    let elab_def = elab_def_new_with_cir(fn_name, final_term, fn_type, final_cir, def.vis);
+                    ElabItemOk(ctx9, elab_def)
+            }
+    }
+}
+
+/// Bind function parameters and extract return type.
+fn bind_params_and_get_return(
+    ctx: ElabContext,
+    params: List<Param>,
+    fn_type: TypeHandle
+) -> (ElabContext, TypeHandle) {
+    match params {
+        Nil() => (ctx, fn_type),  // Return type is what's left
+        Cons(param, rest) =>
+            // Bind this parameter
+            let param_name = extract_param_name(param);
+            // Get param type from the arrow type
+            let param_type = get_arrow_domain(fn_type);
+            let env2 = env_bind_local(ctx.env, param_name, param_type);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            // Continue with the codomain
+            let rest_type = tg_type_get_arrow_codomain(fn_type);
+            bind_params_and_get_return(ctx2, rest, rest_type)
+    }
+}
+
+/// Extract parameter name from a Param's pattern.
+fn extract_param_name(p: Param) -> String {
+    match p.pattern {
+        PatVar(ident) => ident_name(ident),
+        PatWildcard(_) => "_",
+        _ => "_arg"  // Complex patterns get placeholder name
+    }
+}
+
+/// Get the domain of an arrow type (returns INVALID_HANDLE if not an arrow).
+fn get_arrow_domain(ty: TypeHandle) -> TypeHandle {
+    tg_type_get_arrow_domain(ty)
+}
+
+/// Build a lambda term from parameters.
+fn build_lambda(params: List<Param>, body: TermHandle, fn_type: TypeHandle) -> TermHandle {
+    match params {
+        Nil() => body,
+        Cons(param, rest) =>
+            let param_name = extract_param_name(param);
+            let param_type = get_arrow_domain(fn_type);
+            let inner = build_lambda(rest, body, tg_type_get_arrow_codomain(fn_type));
+            tg_term_abs(tg_string_to_cstr(param_name), param_type, inner)
+    }
+}
+
+/// Build a CIR lambda from parameters.
+fn build_lambda_cir(params: List<Param>, body: CodegenIR, fn_type: TypeHandle) -> CodegenIR {
+    match params {
+        Nil() => body,
+        Cons(param, rest) =>
+            let param_name = extract_param_name(param);
+            // For now use ct_unit() as placeholder type
+            // Full implementation would convert TypeHandle to CodegenType
+            let inner = build_lambda_cir(rest, body, tg_type_get_arrow_codomain(fn_type));
+            CIRLambda(param_name, ct_unit(), inner)
+    }
+}
+
+/// Wrap a term in type abstractions for type parameters.
+fn wrap_type_abs(term: TermHandle, params: List<TypeParam>) -> TermHandle {
+    match params {
+        Nil() => term,
+        Cons(param, rest) =>
+            let inner = wrap_type_abs(term, rest);
+            let name = ident_name(param.name);
+            tg_term_type_abs(tg_string_to_cstr(name), inner)
+    }
+}
+
+/// Wrap CIR in type abstractions for type parameters.
+fn wrap_type_abs_cir(cir: CodegenIR, params: List<TypeParam>) -> CodegenIR {
+    match params {
+        Nil() => cir,
+        Cons(param, rest) =>
+            let inner = wrap_type_abs_cir(cir, rest);
+            let name = ident_name(param.name);
+            CIRTypeAbs(name, inner)
+    }
+}
+
+/// Push type parameters for elaboration.
+fn push_type_params_elab(ctx: ElabContext, params: List<TypeParam>) -> ElabContext {
+    match params {
+        Nil() => ctx,
+        Cons(param, rest) =>
+            let env2 = env_push_type_var(ctx.env, ident_name(param.name));
+            let ctx2 = elab_context_with_env(ctx, env2);
+            push_type_params_elab(ctx2, rest)
+    }
+}
+
+/// Pop type parameters after elaboration.
+fn pop_type_params_elab(ctx: ElabContext, params: List<TypeParam>) -> ElabContext {
+    match params {
+        Nil() => ctx,
+        Cons(_, rest) =>
+            let env2 = env_pop_type_var(ctx.env);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            pop_type_params_elab(ctx2, rest)
+    }
+}
+
+// ===========================================================================
+// THEOREM/LEMMA BODY ELABORATION
+// ===========================================================================
+
+/// Elaborate a theorem or lemma body (proof).
+fn elaborate_theorem_body(ctx: ElabContext, def: TheoremDef) -> ElabItemResult {
+    let thm_name = ident_name(def.name);
+    
+    // Look up the theorem's registered type
+    match env_lookup_value_def(ctx.env, thm_name) {
+        NoValueDef() =>
+            let err = elab_error_simple("internal: theorem not found in environment", def.span);
+            ElabItemErr(elab_context_add_error(ctx, err)),
+        SomeValueDef(info) =>
+            // Push type parameters
+            let ctx2 = push_type_params_elab(ctx, def.type_params);
+            
+            // Create scope for parameters
+            let ctx3 = elab_context_with_env(ctx2, env_push_scope(ctx2.env));
+            
+            // Bind parameters
+            let (ctx4, prop_type) = bind_params_and_get_return(ctx3, def.params, info.ty);
+            
+            // Elaborate the proof body, checking against proposition type
+            match check(ctx4.env, def.body, prop_type) {
+                ElabExprErr(err) =>
+                    let elab_err = elab_error_simple(err.message, err.span);
+                    let ctx5 = elab_context_add_error(ctx4, elab_err);
+                    let ctx6 = elab_context_with_env(ctx5, env_pop_scope(ctx5.env));
+                    let ctx7 = pop_type_params_elab(ctx6, def.type_params);
+                    ElabItemErr(ctx7),
+                ElabExprOk(env2, proof_term, _, proof_cir) =>
+                    let ctx5 = elab_context_with_env(ctx4, env2);
+                    
+                    // Build lambda for parameters
+                    let lambda_term = build_lambda(def.params, proof_term, info.ty);
+                    let final_term = wrap_type_abs(lambda_term, def.type_params);
+                    
+                    // Build CIR
+                    let lambda_cir = build_lambda_cir(def.params, proof_cir, info.ty);
+                    let final_cir = wrap_type_abs_cir(lambda_cir, def.type_params);
+                    
+                    let ctx6 = elab_context_with_env(ctx5, env_pop_scope(ctx5.env));
+                    let ctx7 = pop_type_params_elab(ctx6, def.type_params);
+                    
+                    let elab_def = elab_def_new_with_cir(thm_name, final_term, info.ty, final_cir, def.vis);
+                    ElabItemOk(ctx7, elab_def)
+            }
+    }
+}
+
+// ===========================================================================
+// AXIOM BODY ELABORATION
+// ===========================================================================
+
+/// Elaborate an axiom (no proof body - uses sorry).
+fn elaborate_axiom_body(ctx: ElabContext, def: AxiomDef) -> ElabItemResult {
+    let axiom_name = ident_name(def.name);
+    
+    // Look up the axiom's registered type
+    match env_lookup_value_def(ctx.env, axiom_name) {
+        NoValueDef() =>
+            let err = elab_error_simple("internal: axiom not found in environment", def.span);
+            ElabItemErr(elab_context_add_error(ctx, err)),
+        SomeValueDef(info) =>
+            // Push type parameters
+            let ctx2 = push_type_params_elab(ctx, def.type_params);
+            
+            // Create scope for parameters
+            let ctx3 = elab_context_with_env(ctx2, env_push_scope(ctx2.env));
+            
+            // Bind parameters and get proposition type
+            let (ctx4, prop_type) = bind_params_and_get_return(ctx3, def.params, info.ty);
+            
+            // Build sorry term as the proof
+            let sorry_term = tg_term_sorry(prop_type);
+            let sorry_cir = CIRSorry(ct_unit());
+            
+            // Build lambda for parameters
+            let lambda_term = build_lambda(def.params, sorry_term, info.ty);
+            let final_term = wrap_type_abs(lambda_term, def.type_params);
+            
+            // Build CIR lambda
+            let lambda_cir = build_lambda_cir(def.params, sorry_cir, info.ty);
+            let final_cir = wrap_type_abs_cir(lambda_cir, def.type_params);
+            
+            let ctx5 = elab_context_with_env(ctx4, env_pop_scope(ctx4.env));
+            let ctx6 = pop_type_params_elab(ctx5, def.type_params);
+            
+            let elab_def = elab_def_new_with_cir(axiom_name, final_term, info.ty, final_cir, def.vis);
+            ElabItemOk(ctx6, elab_def)
+    }
+}
+
+// ===========================================================================
+// EXTERN FUNCTION ELABORATION
+// ===========================================================================
+
+/// Elaborate an extern function (FFI wrapper).
+fn elaborate_extern_body(ctx: ElabContext, def: ExternFnDef) -> ElabItemResult {
+    let fn_name = ident_name(def.name);
+    
+    // Get the symbol name (defaults to function name)
+    let symbol = match def.symbol {
+        NoString() => fn_name,
+        SomeString(s) => s
+    };
+    
+    // Look up the extern's registered type
+    match env_lookup_value_def(ctx.env, fn_name) {
+        NoValueDef() =>
+            let err = elab_error_simple("internal: extern not found in environment", def.span);
+            ElabItemErr(elab_context_add_error(ctx, err)),
+        SomeValueDef(info) =>
+            // Build extern call term
+            // The term is a lambda that wraps the extern call
+            // Unwrap optional abi - default to "C"
+            let abi = match def.abi {
+                Some(a) => a,
+                None() => "C"
+            };
+            let extern_term = build_extern_wrapper(def.params, symbol, abi, info.ty);
+            // CIR for extern uses sorry as placeholder
+            // (extern calls will need special FFI handling)
+            let extern_cir = CIRSorry(ct_unit());
+            
+            let elab_def = elab_def_new_with_cir(fn_name, extern_term, info.ty, extern_cir, def.vis);
+            ElabItemOk(ctx, elab_def)
+    }
+}
+
+/// Build an extern function wrapper.
+fn build_extern_wrapper(
+    params: List<ExternParam>,
+    symbol: String,
+    abi: String,
+    fn_type: TypeHandle
+) -> TermHandle {
+    // For now, return a placeholder term
+    // Full implementation needs tg_term_extern_call FFI
+    // TODO: Implement extern call wrapper
+    tg_term_sorry(fn_type)
+}

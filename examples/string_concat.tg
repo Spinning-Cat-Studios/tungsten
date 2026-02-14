@@ -1,0 +1,21 @@
+// String concatenation example
+// Demonstrates the ++ operator for joining strings
+
+pub fn greet(name: String) -> String {
+    "Hello, " ++ name ++ "!"
+}
+
+pub fn build_sentence(subject: String, verb: String, object: String) -> String {
+    subject ++ " " ++ verb ++ " " ++ object ++ "."
+}
+
+fn main() -> String {
+    // Simple concatenation
+    let greeting = greet("World");
+    
+    // Multiple concatenations
+    let sentence = build_sentence("The cat", "chased", "the mouse");
+    
+    // Inline concatenation
+    "Result: " ++ greeting ++ " And: " ++ sentence
+}

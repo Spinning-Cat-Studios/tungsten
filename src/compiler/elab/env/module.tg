@@ -1,0 +1,230 @@
+// src/compiler/elab/env/module.tg
+// Module path, imports, and module contents for the environment.
+
+use lexer::span::Span;
+use parser::ast::Visibility;
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_append_string, list_eq_string};
+use elab::env::defs::{TypeDefInfo, ValueDefInfo, ConstructorInfo};
+
+// ===========================================================================
+// MODULE PATH (ELABORATOR VERSION)
+// ===========================================================================
+
+/// A module path (list of path segments) - elaborator internal version.
+/// Note: driver/modules/path.tg has a different ModulePath type for driver use.
+pub type ElabModulePath = | MkElabModulePath(List<String>)
+
+/// Create an empty module path (root).
+pub fn elab_module_path_root() -> ElabModulePath {
+    MkElabModulePath(Nil)
+}
+
+/// Create a module path from segments.
+pub fn elab_module_path_new(segments: List<String>) -> ElabModulePath {
+    MkElabModulePath(segments)
+}
+
+/// Append a segment to a module path.
+/// WARNING: This function is O(n) and should NOT be used in loops or recursion.
+/// For building paths iteratively, use cons-then-reverse pattern:
+///   1. Reverse existing segments
+///   2. Cons new segments to front
+///   3. Reverse result
+pub fn elab_module_path_append(path: ElabModulePath, segment: String) -> ElabModulePath {
+    match path {
+        MkElabModulePath(segments) => MkElabModulePath(list_append_string(segments, segment))
+    }
+}
+
+/// Check if two module paths are equal.
+pub fn elab_module_path_eq(a: ElabModulePath, b: ElabModulePath) -> Bool {
+    match a {
+        MkElabModulePath(segs_a) => match b {
+            MkElabModulePath(segs_b) => list_eq_string(segs_a, segs_b)
+        }
+    }
+}
+
+/// Convert a module path to a string (e.g., "foo::bar::baz").
+pub fn elab_module_path_to_string(path: ElabModulePath) -> String {
+    match path {
+        MkElabModulePath(segments) => join_strings_with_sep(segments, "::")
+    }
+}
+
+/// Join a string list with a separator (local helper).
+fn join_strings_with_sep(list: List<String>, sep: String) -> String {
+    match list {
+        Nil() => "",
+        Cons(s, rest) =>
+            match rest {
+                Nil() => s,
+                Cons(_, _) => s ++ sep ++ join_strings_with_sep(rest, sep)
+            }
+    }
+}
+
+// ===========================================================================
+// IMPORT
+// ===========================================================================
+
+/// An import entry with span tracking for error reporting.
+pub type Import = {
+    source_path: ElabModulePath,  // Where the item comes from
+    source_name: String,      // Original name
+    local_name: String,       // Name in current scope (may differ due to `as`)
+    visibility: Visibility,   // Re-export visibility
+    import_span: Span         // Span of the import declaration (for error reporting)
+}
+
+/// Create a new import.
+pub fn import_new(
+    source_path: ElabModulePath,
+    source_name: String,
+    local_name: String,
+    visibility: Visibility,
+    import_span: Span
+) -> Import {
+    { source_path: source_path, source_name: source_name, local_name: local_name, visibility: visibility, import_span: import_span }
+}
+
+/// Look up an import by local name.
+pub fn import_list_lookup(imports: List<Import>, name: String) -> MaybeImport {
+    match imports {
+        Nil() => NoImport,
+        Cons(imp, rest) =>
+            if imp.local_name == name {
+                SomeImport(imp)
+            } else {
+                import_list_lookup(rest, name)
+            }
+    }
+}
+
+/// Optional import result.
+pub type MaybeImport =
+    | NoImport
+    | SomeImport(Import)
+
+// ===========================================================================
+// MODULE CONTENTS
+// ===========================================================================
+
+/// Contents of a module (types, values, constructors, imports).
+pub type ModuleContents = {
+    path: ElabModulePath,
+    types: List<TypeDefInfo>,
+    values: List<ValueDefInfo>,
+    constructors: List<ConstructorInfo>,
+    imports: List<Import>
+}
+
+/// Create empty module contents.
+pub fn module_contents_empty(path: ElabModulePath) -> ModuleContents {
+    {
+        path: path,
+        types: Nil(),
+        values: Nil(),
+        constructors: Nil(),
+        imports: Nil()
+    }
+}
+
+/// Add a type to module contents.
+pub fn module_contents_add_type(contents: ModuleContents, def: TypeDefInfo) -> ModuleContents {
+    {
+        path: contents.path,
+        types: Cons(def, contents.types),
+        values: contents.values,
+        constructors: contents.constructors,
+        imports: contents.imports
+    }
+}
+
+/// Add a value to module contents.
+pub fn module_contents_add_value(contents: ModuleContents, def: ValueDefInfo) -> ModuleContents {
+    {
+        path: contents.path,
+        types: contents.types,
+        values: Cons(def, contents.values),
+        constructors: contents.constructors,
+        imports: contents.imports
+    }
+}
+
+/// Add a constructor to module contents.
+pub fn module_contents_add_constructor(contents: ModuleContents, info: ConstructorInfo) -> ModuleContents {
+    {
+        path: contents.path,
+        types: contents.types,
+        values: contents.values,
+        constructors: Cons(info, contents.constructors),
+        imports: contents.imports
+    }
+}
+
+/// Add an import to module contents.
+pub fn module_contents_add_import(contents: ModuleContents, imp: Import) -> ModuleContents {
+    {
+        path: contents.path,
+        types: contents.types,
+        values: contents.values,
+        constructors: contents.constructors,
+        imports: Cons(imp, contents.imports)
+    }
+}
+
+// ===========================================================================
+// MODULE MAP
+// ===========================================================================
+
+/// Map from module paths to module contents.
+pub type ModuleMap =
+    | ModuleMapNil
+    | ModuleMapCons(ElabModulePath, ModuleContents, ModuleMap)
+
+/// Create an empty module map.
+pub fn module_map_empty() -> ModuleMap {
+    ModuleMapNil
+}
+
+/// Add or update a module in the map.
+pub fn module_map_insert(map: ModuleMap, path: ElabModulePath, contents: ModuleContents) -> ModuleMap {
+    
+    // Remove existing entry if present, then add new one
+    ModuleMapCons(path, contents, module_map_remove(map, path))
+}
+
+/// Remove a module from the map.
+fn module_map_remove(map: ModuleMap, path: ElabModulePath) -> ModuleMap {
+    
+    match map {
+        ModuleMapNil() => ModuleMapNil,
+        ModuleMapCons(p, c, rest) =>
+            if elab_module_path_eq(p, path) {
+                module_map_remove(rest, path)
+            } else {
+                ModuleMapCons(p, c, module_map_remove(rest, path))
+            }
+    }
+}
+
+/// Optional module contents.
+pub type MaybeModuleContents =
+    | NoModuleContents
+    | SomeModuleContents(ModuleContents)
+
+/// Look up a module by path.
+pub fn module_map_lookup(map: ModuleMap, path: ElabModulePath) -> MaybeModuleContents {
+    
+    match map {
+        ModuleMapNil() => NoModuleContents,
+        ModuleMapCons(p, contents, rest) =>
+            if elab_module_path_eq(p, path) {
+                SomeModuleContents(contents)
+            } else {
+                module_map_lookup(rest, path)
+            }
+    }
+}

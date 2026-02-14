@@ -1,0 +1,18 @@
+// src/compiler/elab/env/types.tg
+// Basic utility types for the environment module.
+
+// ===========================================================================
+// STRING LIST
+// ===========================================================================
+
+// StringList is now List<String> using driver::ffi::{List, Nil, Cons}
+// 
+// Helper functions now use generic versions from driver::util:
+//   - list_len<T> replaces string_list_len
+//   - list_is_empty<T> replaces string_list_is_empty
+//   - list_contains_string replaces string_list_contains
+//   - list_eq_string replaces string_list_eq
+//   - list_append_string replaces string_list_append
+//   - list_head_string replaces string_list_head
+//   - list_init_string replaces string_list_init
+//   - list_is_prefix_or_eq_string replaces string_list_is_prefix_or_eq

@@ -1,0 +1,21 @@
+// Test case: Option<MyKind> where MyKind is a sum type
+// This is the original failing case for Bug #6
+// The pattern variable `k` in `Some(k)` should have type MyKind, not Nat
+
+type MyKind = | KindA | KindB(Nat)
+type Option<T> = | None | Some(T)
+
+fn test_option_sum() -> Nat {
+    let opt: Option<MyKind> = Some(KindA);
+    match opt {
+        None() => 0,
+        Some(k) => match k {
+            KindA() => 1,
+            KindB(n) => n
+        }
+    }
+}
+
+fn main() -> Nat {
+    test_option_sum()
+}

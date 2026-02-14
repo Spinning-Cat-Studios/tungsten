@@ -1,0 +1,5 @@
+// List module: defines generic List<T>
+
+pub type List<T> =
+    | Nil
+    | Cons(T, List<T>)

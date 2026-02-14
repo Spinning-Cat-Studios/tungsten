@@ -1,0 +1,13 @@
+// Consumer module: uses List<SourceEntry> where SourceEntry is a type alias
+// This tests that type aliases as generic arguments don't break pattern matching
+
+use types::SourceEntry;
+use list::{List, Nil, Cons};
+
+pub fn test_aliased_list_match() -> Nat {
+    let entries: List<SourceEntry> = Cons(("key", "value"), Nil);
+    match entries {
+        Cons(entry, rest) => 1,
+        Nil => 0
+    }
+}

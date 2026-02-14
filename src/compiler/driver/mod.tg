@@ -1,0 +1,88 @@
+// src/compiler/driver/mod.tg
+// Self-hosted driver module.
+//
+// This module provides:
+// - CLI argument parsing
+// - Module resolution and workspace discovery
+// - Pipeline orchestration (lex → parse → elab → codegen)
+// - Diagnostic formatting (ariadne-style)
+// - File I/O and process control via FFI
+
+// FFI declarations for driver operations
+pub mod ffi;
+
+// Utility functions (string manipulation, parsing helpers)
+pub mod util;
+
+// CLI argument parsing
+pub mod cli;
+
+// Module resolution and workspace discovery
+pub mod modules;
+
+// Pipeline orchestration
+pub mod pipeline;
+
+// Re-export commonly used FFI wrappers
+pub use ffi::{
+    // File I/O
+    read_file, write_file, file_exists, is_directory, list_directory,
+    parent_directory, path_join,
+    // CLI
+    argc, argv, get_args,
+    // Console
+    print, println, eprintln,
+    // Process
+    process_exit,
+    // TTY
+    stdout_is_tty, stderr_is_tty,
+    // Types
+    FfiResult, FfiOk, FfiErr, List, Nil, Cons,
+    // Handle sentinel (Note: TermHandle is in elab::ffi)
+    invalid_handle,
+    // Evaluator
+    EvalEnvHandle, invalid_env_handle,
+    eval_env_new, eval_env_add, eval_env_free,
+    eval_run, eval_run_with_limit, eval_display, eval_display_value
+};
+
+// Re-export utility types
+pub use util::{Option, Some, None, Result, Ok, Err};
+
+// Re-export CLI types and functions
+pub use cli::{
+    Command, CmdCheck, CmdRun, CmdCompile, CmdHelp, CmdVersion, CmdError,
+    CheckOpts, RunOpts, CompileOpts, CliError,
+    parse_args, print_help, print_version, print_error
+};
+
+// Re-export module resolution types and functions
+pub use modules::{
+    // Path types
+    ModulePath, module_path_root, module_path_new, module_path_single,
+    module_path_child, module_path_parent, module_path_display,
+    // Source map
+    SourceMap, source_map_empty, source_map_single, source_map_get,
+    // Module tree
+    ParsedModule, parsed_module_new,
+    // Module info
+    ModuleInfo, ModuleItemNames, module_info_empty,
+    // Workspace discovery
+    find_workspace_root, discover_sibling_modules,
+    // Module parsing
+    parse_module_tree, resolve_module_path,
+    // Building
+    build_source_map, build_module_info, build_workspace_module_info,
+    merge_module_info
+};
+
+// Re-export pipeline types and functions
+pub use pipeline::{
+    // Result types
+    PipelineResult, PipelineOk, PipelineErr,
+    pipeline_ok, pipeline_exit_code,
+    // Exit codes
+    exit_success, exit_error, exit_io_error,
+    // Main entry points
+    dispatch_command, run_check, run_run, run_compile
+};

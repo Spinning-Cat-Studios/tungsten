@@ -1,0 +1,8 @@
+// Module b - imports from a
+use a::AType;
+
+pub type BType = { a_val: AType, id: Nat }
+
+pub fn make_b(a: AType) -> BType {
+    { a_val: a, id: 2 }
+}

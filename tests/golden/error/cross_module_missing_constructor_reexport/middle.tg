@@ -1,0 +1,5 @@
+// Middle module: re-exports Option but NOT its constructors
+// This should cause errors when consumer tries to use Some/None
+
+pub use core::Option;
+// Missing: pub use core::{Some, None};

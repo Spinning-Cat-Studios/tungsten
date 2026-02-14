@@ -1,0 +1,185 @@
+// src/compiler/parser/exprs/atoms.tg
+// Atomic expression parsing: literals, paths, parentheses, tuples.
+
+use lexer::token::{TokenKind, TokIntLit, TokStringLit, TokTrue, TokFalse,
+    TokIdent, TokLParen, TokRParen, TokLBrace, TokComma,
+    TokPipe, TokFn, TokIf, TokMatch, TokLet, TokReturn,
+    TokHave, TokShow, TokAssume, TokSorry, TokRefl};
+use lexer::span::span_merge;
+use parser::error::{ParseError, parse_error_expected, parse_error_eof};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_check, cursor_advance, token_kind_name};
+use parser::option::{Option, None, Some};
+use parser::ast::nodes::{Expr, ExprIntLit, ExprBoolLit, ExprStringLit, ExprUnit,
+    ExprPath, ExprTuple, ExprParen, ExprSorry, ExprRefl};
+use result::{ParseResultExpr, ParseOkExpr, ParseErrExpr, cursor_peek_span};
+use blocks::parse_block_or_record;
+use control::{parse_if, parse_match, parse_let};
+use lambdas::{parse_lambda_fn, parse_lambda_pipe};
+use proof::{parse_return, parse_have, parse_show, parse_assume};
+use parser::types::{parse_path, ParseResultPath, ParseOkPath, ParseErrPath};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+
+// ===========================================================================
+// ATOM PARSING
+// ===========================================================================
+
+/// Parse an atomic expression (literals, paths, parens, control flow, etc.)
+pub fn parse_atom(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    
+    match cursor_peek_kind(cur) {
+        None() => ParseErrExpr(parse_error_eof("expression", start_span)),
+        Some(kind) => parse_atom_by_kind(cur, kind, start_span)
+    }
+}
+
+/// Parse atomic expression by token kind.
+fn parse_atom_by_kind(cur: Cursor, kind: TokenKind, start_span: Span) -> ParseResultExpr {
+    match kind {
+        // Integer literal: 42
+        TokIntLit(n) => {
+            let cur2 = cursor_advance(cur);
+            ParseOkExpr(ExprIntLit(n, start_span), cur2)
+        },
+        
+        // Boolean literals
+        TokTrue() => {
+            let cur2 = cursor_advance(cur);
+            ParseOkExpr(ExprBoolLit(true, start_span), cur2)
+        },
+        TokFalse() => {
+            let cur2 = cursor_advance(cur);
+            ParseOkExpr(ExprBoolLit(false, start_span), cur2)
+        },
+        
+        // String literal
+        TokStringLit(s) => {
+            let cur2 = cursor_advance(cur);
+            ParseOkExpr(ExprStringLit(s, start_span), cur2)
+        },
+        
+        // Parenthesized, tuple, or unit
+        TokLParen() => parse_paren_or_tuple_or_unit(cur),
+        
+        // Block or record literal
+        TokLBrace() => parse_block_or_record(cur),
+        
+        // Identifier or path
+        TokIdent(_) => {
+            match parse_path(cur) {
+                ParseErrPath(e) => ParseErrExpr(e),
+                ParseOkPath(path, cur2) => ParseOkExpr(ExprPath(path), cur2)
+            }
+        },
+        
+        // Control flow
+        TokIf() => parse_if(cur),
+        TokMatch() => parse_match(cur),
+        TokLet() => parse_let(cur),
+        
+        // Lambda: fn(x: T) => body
+        TokFn() => parse_lambda_fn(cur),
+        
+        // Lambda: |x| body
+        TokPipe() => parse_lambda_pipe(cur),
+        
+        // Return
+        TokReturn() => parse_return(cur),
+        
+        // Proof constructs
+        TokHave() => parse_have(cur),
+        TokShow() => parse_show(cur),
+        TokAssume() => parse_assume(cur),
+        TokSorry() => {
+            let cur2 = cursor_advance(cur);
+            ParseOkExpr(ExprSorry(start_span), cur2)
+        },
+        TokRefl() => {
+            let cur2 = cursor_advance(cur);
+            ParseOkExpr(ExprRefl(start_span), cur2)
+        },
+        
+        // Unknown token
+        _ => {
+            let found = token_kind_name(kind);
+            ParseErrExpr(parse_error_expected("expression", found, start_span))
+        }
+    }
+}
+
+// ===========================================================================
+// PARENTHESES, TUPLES, UNIT
+// ===========================================================================
+
+/// Parse `()` (unit), `(expr)` (parenthesized), or `(a, b, ...)` (tuple).
+pub fn parse_paren_or_tuple_or_unit(cur: Cursor) -> ParseResultExpr {
+    let start_span = cursor_peek_span(cur);
+    let cur2 = cursor_advance(cur);  // consume `(`
+    
+    // Check for unit: `()`
+    if cursor_check(cur2, TokRParen()) {
+        let cur3 = cursor_advance(cur2);
+        let span = span_merge(start_span, cursor_peek_span(cur2));
+        ParseOkExpr(ExprUnit(span), cur3)
+    } else {
+        // Parse first expression
+        match parse_expr(cur2) {
+            ParseErrExpr(e) => ParseErrExpr(e),
+            ParseOkExpr(first, cur3) => {
+                // Check for comma (tuple) or closing paren
+                if cursor_check(cur3, TokComma()) {
+                    // Tuple: (a, b, ...)
+                    parse_tuple_rest(cur3, start_span, Cons(first, Nil))
+                } else if cursor_check(cur3, TokRParen()) {
+                    // Parenthesized: (expr)
+                    let cur4 = cursor_advance(cur3);
+                    let span = span_merge(start_span, cursor_peek_span(cur3));
+                    ParseOkExpr(ExprParen(first, span), cur4)
+                } else {
+                    let found = match cursor_peek_kind(cur3) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    ParseErrExpr(parse_error_expected("',' or ')'", found, cursor_peek_span(cur3)))
+                }
+            }
+        }
+    }
+}
+
+/// Parse rest of tuple after first element and comma.
+fn parse_tuple_rest(cur: Cursor, start_span: Span, acc: List<Expr>) -> ParseResultExpr {
+    let cur2 = cursor_advance(cur);  // consume `,`
+    
+    // Check for trailing comma: `(a,)`
+    if cursor_check(cur2, TokRParen()) {
+        let cur3 = cursor_advance(cur2);
+        let span = span_merge(start_span, cursor_peek_span(cur2));
+        ParseOkExpr(ExprTuple(list_reverse(acc), span), cur3)
+    } else {
+        // Parse next element
+        match parse_expr(cur2) {
+            ParseErrExpr(e) => ParseErrExpr(e),
+            ParseOkExpr(elem, cur3) => {
+                let new_acc = Cons(elem, acc);
+                if cursor_check(cur3, TokComma()) {
+                    parse_tuple_rest(cur3, start_span, new_acc)
+                } else if cursor_check(cur3, TokRParen()) {
+                    let cur4 = cursor_advance(cur3);
+                    let span = span_merge(start_span, cursor_peek_span(cur3));
+                    ParseOkExpr(ExprTuple(list_reverse(new_acc), span), cur4)
+                } else {
+                    let found = match cursor_peek_kind(cur3) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    ParseErrExpr(parse_error_expected("',' or ')'", found, cursor_peek_span(cur3)))
+                }
+            }
+        }
+    }
+}
+
+use pratt::parse_expr;
+use lexer::span::Span;

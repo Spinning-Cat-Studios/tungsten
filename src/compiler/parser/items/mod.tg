@@ -1,0 +1,52 @@
+// src/compiler/parser/items/mod.tg
+// Item parsing module for the Tungsten self-hosted compiler.
+//
+// Refactored into submodules:
+// - result.tg: Parse result types and ItemList
+// - visibility.tg: Visibility parsing
+// - type_params.tg: Type parameter parsing with bounds
+// - params.tg: Function and extern parameter parsing
+// - dispatch.tg: Main item dispatch (parse_items, parse_item)
+// - functions.tg: Function definition parsing
+// - types.tg: Type definition parsing (ADT, record, alias)
+// - theorems.tg: Theorem, lemma, axiom parsing
+// - extern.tg: Extern function parsing
+// - use_decl.tg: Module and use declaration parsing
+// - recovery.tg: Error recovery (synchronize)
+
+pub mod result;
+pub mod visibility;
+pub mod type_params;
+pub mod params;
+pub mod dispatch;
+pub mod functions;
+pub mod types;
+pub mod theorems;
+pub mod extern_fn;
+pub mod use_decl;
+pub mod recovery;
+
+// Re-export all public types and functions
+pub use result::{
+    ParseResultItem, ParseOkItem, ParseErrItem,
+    ParseResultItemList, ParseOkItemList, ParseErrItemList,
+    ParseResultVisibility, ParseOkVisibility, ParseErrVisibility,
+    ParseResultTypeParams, ParseOkTypeParams, ParseErrTypeParams,
+    ParseResultParams, ParseOkParams, ParseErrParams,
+    ParseResultExternParams, ParseOkExternParams, ParseErrExternParams,
+    ParseResultUseTree, ParseOkUseTree, ParseErrUseTree,
+    ParseResultUseTreeList, ParseOkUseTreeList, ParseErrUseTreeList,
+    ParseResultTypeBody, ParseOkTypeBody, ParseErrTypeBody,
+    ParseResultVariants, ParseOkVariants, ParseErrVariants,
+    ParseResultRecordFields, ParseOkRecordFields, ParseErrRecordFields
+};
+
+pub use visibility::parse_visibility;
+
+pub use type_params::{parse_type_params, parse_optional_type_params};
+
+pub use params::parse_params;
+
+pub use dispatch::{parse_items, parse_item};
+
+pub use recovery::synchronize;

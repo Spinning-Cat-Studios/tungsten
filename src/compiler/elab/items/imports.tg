@@ -1,0 +1,439 @@
+// src/compiler/elab/items/imports.tg
+// Import processing for use declarations.
+//
+// This module handles the processing of `use` declarations:
+// - Specific imports: `use foo::bar;`
+// - Glob imports: `use foo::*;`
+// - Grouped imports: `use foo::{bar, baz};`
+// - Aliased imports: `use foo::bar as qux;`
+// - Re-exports (pub use): `pub use foo::bar;`
+
+use lexer::span::Span;
+use parser::ast::{
+    UseDecl, UseTree,
+    UseTreeSimple, UseTreeAlias, UseTreeNested, UseTreePath, UseTreeGroup, UseTreeGlob,
+    Path, MkPath,
+    Ident, ident_name,
+    Visibility, VisPrivate, VisCrate, VisPublic,
+    MaybeString, NoString
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_is_empty, list_reverse};
+use elab::ffi::TypeHandle;
+use elab::env::{
+    Env, env_lookup_type_def, env_lookup_value_def,
+    env_add_import, env_current_module_contents,
+    ElabModulePath, MkElabModulePath, elab_module_path_root, elab_module_path_new,
+    elab_module_path_eq, elab_module_path_to_string,
+    Import, import_new, import_list_lookup, MaybeImport, NoImport, SomeImport,
+    ModuleContents,
+    MaybeTypeDef, SomeTypeDef, NoTypeDef,
+    MaybeValueDef, SomeValueDef, NoValueDef,
+    // For looking up items in other modules
+    module_map_lookup, MaybeModuleContents, SomeModuleContents, NoModuleContents,
+    type_def_list_lookup, value_def_list_lookup
+};
+use elab::items::result::{
+    ElabContext, elab_context_with_env, elab_context_add_error
+};
+use elab::error::{
+    ElabError, ElabErrorKind, ErrImportNotFound, ErrGlobImportEmpty,
+    ErrDuplicateImport,
+    elab_error_simple,
+    elab_error_duplicate_import, elab_error_new, elab_error_with_help,
+    MaybeExpectedBecause, NoExpectedBecause
+};
+
+// ===========================================================================
+// IMPORT PROCESSING ENTRY POINT
+// ===========================================================================
+
+/// Process a use declaration.
+pub fn process_use_decl(ctx: ElabContext, decl: UseDecl) -> ElabContext {
+    process_use_tree(ctx, decl.tree, elab_module_path_root(), decl.vis, decl.span)
+}
+
+/// Process a use tree at a given path prefix.
+fn process_use_tree(
+    ctx: ElabContext,
+    tree: UseTree,
+    prefix: ElabModulePath,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    match tree {
+        UseTreeSimple(path) =>
+            // use foo::bar;
+            process_simple_import(ctx, path, prefix, vis, span),
+        
+        UseTreeAlias(path, alias) =>
+            // use foo::bar as qux;
+            process_aliased_import(ctx, path, alias, prefix, vis, span),
+        
+        UseTreeRename(path, alias, rename_span) =>
+            // use foo::bar as qux; (with span)
+            process_aliased_import(ctx, path, alias, prefix, vis, rename_span),
+        
+        UseTreeNested(path, trees, nested_span) =>
+            // use foo::bar::{baz, qux};
+            process_nested_import(ctx, path, trees, prefix, vis, nested_span),
+        
+        UseTreePath(path) =>
+            // Just a path - treat as simple import
+            process_simple_import(ctx, path, prefix, vis, span),
+        
+        UseTreeGroup(path, trees, group_span) =>
+            // use foo::{bar, baz};
+            process_grouped_import(ctx, path, trees, prefix, vis, group_span),
+        
+        UseTreeGlob(path, glob_span) =>
+            // use foo::*;
+            process_glob_import(ctx, path, prefix, vis, glob_span)
+    }
+}
+
+// ===========================================================================
+// SIMPLE IMPORT
+// ===========================================================================
+
+/// Process a simple import: `use foo::bar;`
+fn process_simple_import(
+    ctx: ElabContext,
+    path: Path,
+    prefix: ElabModulePath,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    let (module_path, item_name) = path_to_module_and_name(path);
+    let full_path = combine_paths(prefix, module_path);
+    
+    // Try to find the item (type or value)
+    let found = lookup_in_module(ctx.env, full_path, item_name);
+    
+    if found {
+        // Check for duplicate import
+        let contents = env_current_module_contents(ctx.env);
+        match import_list_lookup(contents.imports, item_name) {
+            SomeImport(existing) =>
+                // Duplicate found - generate error
+                let first_module = elab_module_path_to_string(existing.source_path);
+                let second_module = elab_module_path_to_string(full_path);
+                let err = elab_error_duplicate_import(
+                    item_name,
+                    existing.import_span,
+                    span,
+                    first_module,
+                    second_module
+                );
+                elab_context_add_error(ctx, err),
+            NoImport() =>
+                // No duplicate - add the import
+                let imp = import_new(full_path, item_name, item_name, vis, span);
+                let env2 = env_add_import(ctx.env, imp);
+                elab_context_with_env(ctx, env2)
+        }
+    } else {
+        // Item not found
+        let full_name = path_to_string(path);
+        let err: ElabError = {
+            kind: ErrImportNotFound(full_name),
+            span: span,
+            notes: Nil,
+            suggestions: Nil,
+            help: NoString,
+            expected_because: NoExpectedBecause
+        };
+        elab_context_add_error(ctx, err)
+    }
+}
+
+// ===========================================================================
+// ALIASED IMPORT
+// ===========================================================================
+
+/// Process an aliased import: `use foo::bar as qux;`
+fn process_aliased_import(
+    ctx: ElabContext,
+    path: Path,
+    alias: Ident,
+    prefix: ElabModulePath,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    let (module_path, item_name) = path_to_module_and_name(path);
+    let full_path = combine_paths(prefix, module_path);
+    let local_name = ident_name(alias);
+    
+    let found = lookup_in_module(ctx.env, full_path, item_name);
+    
+    if found {
+        // Check for duplicate import (by local name)
+        let contents = env_current_module_contents(ctx.env);
+        match import_list_lookup(contents.imports, local_name) {
+            SomeImport(existing) =>
+                // Duplicate found - generate error
+                let first_module = elab_module_path_to_string(existing.source_path);
+                let second_module = elab_module_path_to_string(full_path);
+                let err = elab_error_duplicate_import(
+                    local_name,
+                    existing.import_span,
+                    span,
+                    first_module,
+                    second_module
+                );
+                elab_context_add_error(ctx, err),
+            NoImport() =>
+                let imp = import_new(full_path, item_name, local_name, vis, span);
+                let env2 = env_add_import(ctx.env, imp);
+                elab_context_with_env(ctx, env2)
+        }
+    } else {
+        let full_name = path_to_string(path);
+        let err: ElabError = {
+            kind: ErrImportNotFound(full_name),
+            span: span,
+            notes: Nil,
+            suggestions: Nil,
+            help: NoString,
+            expected_because: NoExpectedBecause
+        };
+        elab_context_add_error(ctx, err)
+    }
+}
+
+// ===========================================================================
+// NESTED IMPORT
+// ===========================================================================
+
+/// Process nested imports: `use foo::bar::{baz, qux};`
+fn process_nested_import(
+    ctx: ElabContext,
+    path: Path,
+    trees: List<UseTree>,
+    prefix: ElabModulePath,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    let nested_prefix = extend_prefix_with_path(prefix, path);
+    process_use_tree_list(ctx, trees, nested_prefix, vis, span)
+}
+
+/// Process grouped imports: `use foo::{bar, baz};`
+fn process_grouped_import(
+    ctx: ElabContext,
+    path: Path,
+    trees: List<UseTree>,
+    prefix: ElabModulePath,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    let group_prefix = extend_prefix_with_path(prefix, path);
+    process_use_tree_list(ctx, trees, group_prefix, vis, span)
+}
+
+/// Process a list of use trees.
+fn process_use_tree_list(
+    ctx: ElabContext,
+    trees: List<UseTree>,
+    prefix: ElabModulePath,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    match trees {
+        Nil() => ctx,
+        Cons(tree, rest) =>
+            let ctx2 = process_use_tree(ctx, tree, prefix, vis, span);
+            process_use_tree_list(ctx2, rest, prefix, vis, span)
+    }
+}
+
+// ===========================================================================
+// GLOB IMPORT
+// ===========================================================================
+
+/// Process a glob import: `use foo::*;`
+fn process_glob_import(
+    ctx: ElabContext,
+    path: Path,
+    prefix: ElabModulePath,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    let target_path = extend_prefix_with_path(prefix, path);
+    
+    // Get all public items from the target module
+    let items = get_module_public_items(ctx.env, target_path);
+    
+    if list_is_empty(items) {
+        // Glob import found nothing
+        let path_str = path_to_string(path);
+        let err: ElabError = {
+            kind: ErrGlobImportEmpty(path_str),
+            span: span,
+            notes: Cons("module is empty or has no public items", Nil),
+            suggestions: Nil,
+            help: NoString,
+            expected_because: NoExpectedBecause
+        };
+        elab_context_add_error(ctx, err)
+    } else {
+        // Add imports for all public items
+        add_glob_imports(ctx, target_path, items, vis, span)
+    }
+}
+
+/// Add imports for all items from a glob.
+fn add_glob_imports(
+    ctx: ElabContext,
+    source_path: ElabModulePath,
+    items: List<String>,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(name, rest) =>
+            // Note: For glob imports, we don't check duplicates here as globs
+            // can shadow previous imports (last wins semantics)
+            let imp = import_new(source_path, name, name, vis, span);
+            let env2 = env_add_import(ctx.env, imp);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            add_glob_imports(ctx2, source_path, rest, vis, span)
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Convert a Path AST to module path and final item name.
+fn path_to_module_and_name(path: Path) -> (ElabModulePath, String) {
+    match path {
+        MkPath(segments, _) =>
+            let (module_segs, name) = split_last(segments);
+            (elab_module_path_new(module_segs), name)
+    }
+}
+
+/// Split a list into all-but-last and last.
+fn split_last(list: List<Ident>) -> (List<String>, String) {
+    match list {
+        Nil() => (Nil, ""),
+        Cons(id, rest) =>
+            match rest {
+                Nil() => (Nil, ident_name(id)),
+                Cons(_, _) =>
+                    let (prefix, last) = split_last(rest);
+                    (Cons(ident_name(id), prefix), last)
+            }
+    }
+}
+
+/// Extend a prefix with a path.
+fn extend_prefix_with_path(prefix: ElabModulePath, path: Path) -> ElabModulePath {
+    match path {
+        MkPath(segments, _) => extend_prefix_with_idents(prefix, segments)
+    }
+}
+
+/// Extend a prefix with ident segments.
+/// Uses cons-then-reverse pattern for O(n) total instead of O(n²).
+fn extend_prefix_with_idents(prefix: ElabModulePath, segments: List<Ident>) -> ElabModulePath {
+    match prefix {
+        MkElabModulePath(prefix_segs) =>
+            // Reverse prefix, then cons new segments on front, then reverse result
+            let reversed_prefix = list_reverse(prefix_segs);
+            let extended_reversed = extend_prefix_acc(reversed_prefix, segments);
+            MkElabModulePath(list_reverse(extended_reversed))
+    }
+}
+
+/// Accumulate ident names onto a reversed list.
+fn extend_prefix_acc(acc: List<String>, segments: List<Ident>) -> List<String> {
+    match segments {
+        Nil() => acc,
+        Cons(id, rest) => extend_prefix_acc(Cons(ident_name(id), acc), rest)
+    }
+}
+
+/// Combine two module paths.
+fn combine_paths(base: ElabModulePath, ext: ElabModulePath) -> ElabModulePath {
+    match ext {
+        MkElabModulePath(segments) => combine_paths_helper(base, segments)
+    }
+}
+
+/// Helper to combine paths.
+/// Uses cons-then-reverse pattern for O(n) total instead of O(n²).
+fn combine_paths_helper(base: ElabModulePath, segments: List<String>) -> ElabModulePath {
+    match base {
+        MkElabModulePath(base_segs) =>
+            // Reverse base, cons extension segments on front, reverse result
+            let reversed_base = list_reverse(base_segs);
+            let extended_reversed = combine_paths_acc(reversed_base, segments);
+            MkElabModulePath(list_reverse(extended_reversed))
+    }
+}
+
+/// Accumulate string segments onto a reversed list.
+fn combine_paths_acc(acc: List<String>, segments: List<String>) -> List<String> {
+    match segments {
+        Nil() => acc,
+        Cons(seg, rest) => combine_paths_acc(Cons(seg, acc), rest)
+    }
+}
+
+/// Convert a path to a string for error messages.
+fn path_to_string(path: Path) -> String {
+    match path {
+        MkPath(segments, _) => idents_to_string(segments, "")
+    }
+}
+
+/// Convert idents to a joined string.
+fn idents_to_string(segments: List<Ident>, acc: String) -> String {
+    match segments {
+        Nil() => acc,
+        Cons(id, rest) =>
+            let name = ident_name(id);
+            match rest {
+                Nil() =>
+                    if acc == "" { name } else { acc ++ "::" ++ name },
+                Cons(_, _) =>
+                    let new_acc = if acc == "" { name } else { acc ++ "::" ++ name };
+                    idents_to_string(rest, new_acc)
+            }
+    }
+}
+
+/// Look up an item in a module (type, value, or re-export).
+/// This checks the module at `path` for an item named `name`.
+fn lookup_in_module(env: Env, path: ElabModulePath, name: String) -> Bool {
+    // Look up the target module's contents
+    match module_map_lookup(env.modules, path) {
+        NoModuleContents() => false,
+        SomeModuleContents(contents) =>
+            // Check types in target module
+            match type_def_list_lookup(contents.types, name) {
+                SomeTypeDef(_) => true,
+                NoTypeDef() =>
+                    // Check values in target module
+                    match value_def_list_lookup(contents.values, name) {
+                        SomeValueDef(_) => true,
+                        NoValueDef() =>
+                            // Check imports (re-exports) in target module
+                            match import_list_lookup(contents.imports, name) {
+                                SomeImport(_) => true,
+                                NoImport() => false
+                            }
+                    }
+            }
+    }
+}
+
+/// Get all public items from a module.
+fn get_module_public_items(env: Env, path: ElabModulePath) -> List<String> {
+    // TODO: Look up module contents and filter by visibility
+    // For now, return empty list
+    Nil
+}

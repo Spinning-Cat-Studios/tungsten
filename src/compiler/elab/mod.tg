@@ -1,0 +1,147 @@
+// src/compiler/elab/mod.tg
+// Self-hosted elaborator module.
+//
+// This module provides the elaborator that transforms surface syntax (AST)
+// into Core terms, performing type checking and name resolution along the way.
+//
+// ## Main Entry Points
+//
+// - `elaborate_source(source, filename)` - End-to-end: lexer → parser → elaborator
+// - `elaborate_file(env, file)` - Elaborate a parsed SourceFile
+// - `elaborate_items(env, items)` - Elaborate a list of items
+//
+// ## Pipeline Architecture
+//
+// ```
+// Source String
+//     │
+//     ▼ tokenize()
+// List<Token> + LexErrors
+//     │
+//     ▼ parse_file()
+// SourceFile + ParseErrors
+//     │
+//     ▼ elaborate_file()
+// ElabResult (defs, errors)
+// ```
+
+/// FFI bindings for tungsten_core term construction.
+pub mod ffi;
+
+/// Environment and scoping for name resolution.
+pub mod env;
+
+/// Error types, codes, and formatting.
+pub mod error;
+
+/// Type elaboration (surface TypeExpr -> Core TypeHandle).
+pub mod types;
+
+/// ADT encoding (sum-of-products, μ-types).
+pub mod adt;
+
+/// Expression elaboration (surface Expr -> Core TermHandle).
+pub mod exprs;
+
+/// Item elaboration (functions, types, theorems -> Core definitions).
+pub mod items;
+
+/// CodegenIR - Pure Tungsten ADT mirroring Core terms for self-hosted codegen.
+pub mod cir;
+
+// Re-export env submodules for convenience
+pub use elab::env::*;
+
+// Note: elab::error is NOT glob-re-exported here to avoid import conflicts.
+// Import directly from elab::error::{...} when needed.
+
+// Re-export type elaboration
+pub use elab::types::*;
+
+// Re-export ADT encoding
+pub use elab::adt::*;
+
+// Re-export expression elaboration
+pub use elab::exprs::*;
+
+// Re-export item elaboration
+pub use elab::items::*;
+
+// Re-export CIR types and helpers
+pub use elab::cir::*;
+
+// ===========================================================================
+// END-TO-END PIPELINE
+// ===========================================================================
+
+use lexer::scanner::{tokenize, LexResult, lex_result_tokens, lex_result_errors, LexErrors, NoLexErrors, ConsLexError};
+use parser::lib::{parse_file, FileParseResult, file_parse_result_items, file_parse_result_errors, ParseErrors, NoParseErrors, ConsParseError};
+use parser::ast::SourceFile;
+use parser::error::{parse_error_count};
+
+/// Result of the full elaboration pipeline.
+pub type ElabSourceResult = {
+    result: ElabResult,
+    parse_errors: ParseErrors,
+    lex_errors: LexErrors
+}
+
+/// Create an ElabSourceResult.
+pub fn elab_source_result_new(
+    result: ElabResult,
+    parse_errors: ParseErrors,
+    lex_errors: LexErrors
+) -> ElabSourceResult {
+    { result: result, parse_errors: parse_errors, lex_errors: lex_errors }
+}
+
+/// Check if the full pipeline succeeded (no lex, parse, or elab errors).
+pub fn elab_source_ok(r: ElabSourceResult) -> Bool {
+    let lex_ok = match r.lex_errors {
+        NoLexErrors() => true,
+        ConsLexError(_, _) => false
+    };
+    let parse_ok = match r.parse_errors {
+        NoParseErrors() => true,
+        ConsParseError(_, _) => false
+    };
+    let elab_ok = elab_result_ok(r.result);
+    lex_ok && parse_ok && elab_ok
+}
+
+/// Count total errors across all phases.
+pub fn elab_source_error_count(r: ElabSourceResult) -> Nat {
+    let lex_count = lex_error_count(r.lex_errors);
+    let parse_count = parse_error_count(r.parse_errors);
+    let elab_count = elab_result_error_count(r.result);
+    lex_count + parse_count + elab_count
+}
+
+/// Count lex errors.
+fn lex_error_count(errs: LexErrors) -> Nat {
+    match errs {
+        NoLexErrors() => 0,
+        ConsLexError(_, rest) => 1 + lex_error_count(rest)
+    }
+}
+
+/// Elaborate source code end-to-end: lexer → parser → elaborator.
+///
+/// This is the main entry point for the self-hosted compiler pipeline.
+/// It runs all three phases and collects errors from each.
+pub fn elaborate_source(source: String, filename: String) -> ElabSourceResult {
+    // Phase 1: Lexer
+    let lex_result = tokenize(source, filename);
+    let tokens = lex_result_tokens(lex_result);
+    let lex_errors = lex_result_errors(lex_result);
+    
+    // Phase 2: Parser
+    let parse_result = parse_file(tokens, filename);
+    let items = file_parse_result_items(parse_result);
+    let parse_errors = file_parse_result_errors(parse_result);
+    
+    // Phase 3: Elaborator
+    let elab_result = elaborate_items_fresh(items);
+    
+    elab_source_result_new(elab_result, parse_errors, lex_errors)
+}

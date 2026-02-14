@@ -1,0 +1,19 @@
+// Test: Tuple inside Cons inside record field initialization
+// This tests whether the record field type List<Entry> propagates
+// through Cons into the tuple (name, val).
+
+type List<T> = | Nil | Cons(T, List<T>)
+type Entry = (String, Nat)
+type Registry = { entries: List<Entry> }
+
+fn make_registry(name: String, val: Nat) -> Registry {
+    { entries: Cons((name, val), Nil) }
+}
+
+fn main() -> Nat {
+    let r = make_registry("test", 42);
+    match r.entries {
+        Nil() => 0,
+        Cons((_, v), _) => v
+    }
+}

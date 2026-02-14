@@ -1,0 +1,246 @@
+// src/compiler/elab/error/mod.tg
+// Error types and formatting for the elaborator.
+//
+// This module re-exports all error-related types and functions.
+//
+// Structure:
+// - kinds.tg:    ElabErrorKind enum, error codes and messages
+// - expected.tg: ExpectedBecause for bidirectional type checking context
+// - list.tg:     ElabError type, list operations, deduplication
+// - source.tg:   SourceInfo for line/column lookup
+// - format.tg:   Basic plain-text error formatting
+// - render.tg:   Rust-style diagnostic rendering with source context
+
+// Submodules are private - only re-exported items are accessible
+mod kinds;
+mod expected;
+mod list;
+mod source;
+mod format;
+mod render;
+
+// Re-export from kinds
+pub use elab::error::kinds::{
+    ElabErrorKind,
+    ErrTypeMismatch, ErrArityMismatch, ErrNotAFunction, ErrNotAType,
+    ErrNotAnAdt, ErrNotASum, ErrNotAPair, ErrCannotInfer,
+    ErrUnresolvedType, ErrUnresolvedValue, ErrUnresolvedModule,
+    ErrDuplicateDef, ErrDuplicateImport, ErrPrivateAccess, ErrAmbiguousName,
+    ErrMissingReturnType, ErrInvalidExtern, ErrImportNotFound,
+    ErrGlobImportEmpty, ErrCyclicDependency, ErrInvalidVisibility, ErrMissingBody,
+    ErrInexhaustiveMatch, ErrUnreachablePattern, ErrConstructorNotFound,
+    ErrDuplicateField, ErrMissingField, ErrExtraField, ErrMultiArmMatch,
+    ErrProofRequired, ErrSorryInProd, ErrInvalidRefl,
+    ErrRefInPureContext, ErrCannotMutate,
+    ErrNoReturnContext, ErrNoMainFunction, ErrInvalidMainSig,
+    ErrRecursionLimitExceeded, ErrPhase1Violation, ErrNotImplemented, ErrOther,
+    error_kind_code, error_kind_message
+};
+
+// Re-export from expected
+pub use elab::error::expected::{
+    ExpectedBecause,
+    ExpFunctionReturn, ExpIfCondition, ExpIfBranch,
+    ExpMatchScrutinee, ExpMatchBranch, ExpLetAnnotation,
+    ExpArgumentType, ExpBinaryOperand, ExpUnaryOperand,
+    ExpFieldType, ExpConstructorArg, ExpTypeAnnotation,
+    ExpProofObligation, ExpOther,
+    MaybeExpectedBecause, NoExpectedBecause, SomeExpectedBecause,
+    expected_because_span, expected_because_message
+};
+
+// Re-export from list
+pub use elab::error::list::{
+    Suggestion, suggestion_new,
+    // SuggestionList is now List<Suggestion>
+    ElabError,
+    // ElabErrorList is now List<ElabError>
+    // Use generic helpers from driver::util: list_len, list_is_empty, list_append, list_reverse
+    string_list_join,
+    errors_deduplicate
+};
+
+// Re-export from source
+// LineList is now List<Nat> using driver::ffi::{List, Nil, Cons}
+pub use elab::error::source::{
+    SourceInfo, LineCol,
+    source_info_new, offset_to_line_col,
+    get_line_start, get_line_end, get_line_content, line_count
+};
+
+// Re-export from format
+pub use elab::error::format::{
+    format_elab_error, format_elab_errors
+};
+
+// Re-export from render
+pub use elab::error::render::{
+    // Colors
+    Color, ColorRed, ColorYellow, ColorBlue, ColorGreen, ColorCyan, ColorMagenta, ColorBold, ColorReset,
+    color_code, colorize, colorize_bold,
+    // Labels (DiagLabelList is now List<DiagLabel>)
+    DiagLabel,
+    // Rendering (plain)
+    render_diagnostic, render_diagnostics,
+    // Rendering (colored)
+    render_diagnostic_colored, render_diagnostics_colored,
+    // Rendering (with limits)
+    render_diagnostics_limited, default_max_errors,
+    // Helpers
+    detect_common_mistake, suggest_brace_syntax, suggest_line_comment
+};
+
+use lexer::span::Span;
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{TypeHandle, INVALID_HANDLE};
+
+// ===========================================================================
+// ERROR CONSTRUCTORS
+// ===========================================================================
+
+/// Create a basic error with just kind and span.
+pub fn elab_error_new(kind: ElabErrorKind, span: Span) -> ElabError {
+    {
+        kind: kind,
+        span: span,
+        notes: Nil,
+        suggestions: Nil,
+        help: NoString,
+        expected_because: NoExpectedBecause
+    }
+}
+
+/// Create an error with a simple message.
+pub fn elab_error_simple(msg: String, span: Span) -> ElabError {
+    elab_error_new(ErrOther(msg), span)
+}
+
+/// Create a type mismatch error.
+pub fn elab_error_type_mismatch(expected: TypeHandle, actual: TypeHandle, span: Span) -> ElabError {
+    elab_error_new(ErrTypeMismatch(expected, actual), span)
+}
+
+/// Create an arity mismatch error.
+pub fn elab_error_arity_mismatch(expected: Nat, actual: Nat, span: Span) -> ElabError {
+    elab_error_new(ErrArityMismatch(expected, actual), span)
+}
+
+/// Create a "not a function" error.
+pub fn elab_error_not_a_function(ty: TypeHandle, span: Span) -> ElabError {
+    elab_error_new(ErrNotAFunction(ty), span)
+}
+
+/// Create an unresolved type error.
+pub fn elab_error_unresolved_type(name: String, span: Span) -> ElabError {
+    elab_error_new(ErrUnresolvedType(name), span)
+}
+
+/// Create an unresolved value error.
+pub fn elab_error_unresolved_value(name: String, span: Span) -> ElabError {
+    elab_error_new(ErrUnresolvedValue(name), span)
+}
+
+/// Create a duplicate definition error.
+pub fn elab_error_duplicate(name: String, span: Span) -> ElabError {
+    elab_error_new(ErrDuplicateDef(name), span)
+}
+
+/// Create a no-return-context error.
+pub fn elab_error_no_return_context(span: Span) -> ElabError {
+    let err = elab_error_new(ErrNoReturnContext, span);
+    elab_error_with_note(err, "return can only be used inside a function body")
+}
+
+/// Create an inexhaustive match error.
+pub fn elab_error_inexhaustive_match(missing: List<String>, span: Span) -> ElabError {
+    elab_error_new(ErrInexhaustiveMatch(missing), span)
+}
+
+/// Create a constructor not found error.
+pub fn elab_error_constructor_not_found(ctor: String, ty: String, span: Span) -> ElabError {
+    elab_error_new(ErrConstructorNotFound(ctor, ty), span)
+}
+
+/// Create a not-implemented error.
+pub fn elab_error_not_implemented(what: String, span: Span) -> ElabError {
+    elab_error_new(ErrNotImplemented(what), span)
+}
+
+// ===========================================================================
+// ERROR MODIFIERS (Builder pattern)
+// ===========================================================================
+
+/// Add expected-because context to an error.
+pub fn elab_error_with_context(err: ElabError, ctx: ExpectedBecause) -> ElabError {
+    {
+        kind: err.kind,
+        span: err.span,
+        notes: err.notes,
+        suggestions: err.suggestions,
+        help: err.help,
+        expected_because: SomeExpectedBecause(ctx)
+    }
+}
+
+/// Add a note to an error.
+pub fn elab_error_with_note(err: ElabError, note: String) -> ElabError {
+    {
+        kind: err.kind,
+        span: err.span,
+        notes: Cons(note, err.notes),
+        suggestions: err.suggestions,
+        help: err.help,
+        expected_because: err.expected_because
+    }
+}
+
+/// Add a suggestion to an error.
+pub fn elab_error_with_suggestion(err: ElabError, suggestion: Suggestion) -> ElabError {
+    {
+        kind: err.kind,
+        span: err.span,
+        notes: err.notes,
+        suggestions: Cons(suggestion, err.suggestions),
+        help: err.help,
+        expected_because: err.expected_because
+    }
+}
+
+/// Add help text to an error.
+pub fn elab_error_with_help(err: ElabError, help: String) -> ElabError {
+    {
+        kind: err.kind,
+        span: err.span,
+        notes: err.notes,
+        suggestions: err.suggestions,
+        help: SomeString(help),
+        expected_because: err.expected_because
+    }
+}
+
+/// Create a duplicate import error with both import locations.
+pub fn elab_error_duplicate_import(
+    name: String,
+    first_span: Span,
+    second_span: Span,
+    first_module: String,
+    second_module: String
+) -> ElabError {
+    let err = elab_error_new(
+        ErrDuplicateImport(name, first_span, second_span, first_module, second_module),
+        second_span
+    );
+    // Add help text suggesting `as` rename
+    let help_text = "use `as` to rename one import: `use " ++ second_module ++ "::" ++ name ++ " as " ++ name ++ "_alias;`";
+    elab_error_with_help(err, help_text)
+}
+
+/// Create a private access error with module context.
+pub fn elab_error_private_access(
+    item_name: String,
+    defined_in: String,
+    accessed_from: String,
+    span: Span
+) -> ElabError {
+    elab_error_new(ErrPrivateAccess(item_name, defined_in, accessed_from), span)
+}

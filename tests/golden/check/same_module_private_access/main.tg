@@ -1,0 +1,16 @@
+// Regression test for E0016 false positive
+// Private types should be accessible within the same logical module,
+// even when the module path has different prefixes during compilation.
+//
+// This was previously a false positive where the bootstrap compiler
+// would report "type X is private (defined in main::foo) and cannot
+// be accessed from foo" - same file, different path prefixes.
+
+mod helper;
+
+// Import private helper from submodule, then use it internally
+use helper::{public_fn, public_helper_with_private};
+
+fn main() -> Nat { 
+    public_fn() + public_helper_with_private()
+}

@@ -1,0 +1,564 @@
+// src/compiler/elab/types.tg
+// Type elaboration for the self-hosted elaborator.
+//
+// This module transforms surface syntax TypeExpr into Core types (TypeHandle)
+// and CodegenIR types (CodegenType) in lockstep.
+// It handles all 14 TypeExpr variants from the parser AST.
+//
+// ## Elaboration Strategy
+//
+// - Simple types (Nat, Bool, etc.): Direct FFI calls + CIR type constructors
+// - Type variables: Look up in environment, compute de Bruijn index
+// - Binary constructors (Arrow, Product, Sum): Recursive elaboration
+// - TyForall: Bind type variable in env, elaborate body
+// - TyApp: Handle generics (future) or error
+// - TyEq: Elaborate left and right expressions, build equality type
+// - TyPtr/TyRef: FFI pointer and reference types
+//
+// ## CodegenType (CIR) Output
+//
+// Every type elaboration now produces both a TypeHandle (for Core) and a
+// CodegenType (for Phase 3.5 codegen). These are constructed in lockstep.
+
+use lexer::span::Span;
+use parser::ast::{
+    TypeExpr, TyPath, TyArrow, TyProduct, TySum, TyApp, TyForall,
+    TyProp, TyUnit, TyVoid, TyPtr, TyRef, TyEq, TyParen, TyError,
+    Expr,
+    Path, MkPath,
+    Ident, ident_name,
+    ident_list_len,
+    type_expr_span
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle, TermHandle, INVALID_HANDLE,
+    tg_type_nat, tg_type_bool, tg_type_string, tg_type_unit,
+    tg_type_void, tg_type_prop, tg_type_arrow, tg_type_product,
+    tg_type_sum, tg_type_forall, tg_type_var, tg_type_mu,
+    tg_type_ptr, tg_type_ref, tg_type_eq,
+    tg_string_to_cstr,
+    tg_types_equal,
+    tg_type_substitute,
+    tg_type_debug,
+    tg_type_is_tyvar, tg_type_get_tyvar_name,
+    tg_cstr_eq
+};
+use elab::env::{
+    Env, env_resolve_type_path, env_bind_type_var, env_unbind_type_var,
+    env_is_type_var,
+    TypePathResult, TypePathOk, TypePathErr,
+    ResolvedType, ResolvedTypeVar, ResolvedTypeDef,
+    TypeDefInfo,
+    EnvError, env_error_new,
+    MaybeTypeHandle, NoTypeHandle, SomeTypeHandle,
+    MaybeRecordFields, NoRecordFields, SomeRecordFields,
+    ident_list_head_name
+};
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CTNat, CTBool, CTString, CTUnit, CTVoid, CTProp,
+    CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq,
+    ct_nat, ct_bool, ct_string, ct_unit, ct_void, ct_prop,
+    ct_arrow, ct_pair, ct_sum, ct_ref, ct_ptr, ct_var, ct_forall, ct_mu, ct_eq
+};
+use elab::exprs::{synth, ElabExprResult, ElabExprOk, ElabExprErr};
+use elab::adt::string_to_ptr;
+use driver::util::{Char, list_reverse, list_len, list_get, nat_to_string, Option, Some, None, string_concat};
+
+// ===========================================================================
+// RESULT TYPE
+// ===========================================================================
+
+/// Result of type elaboration.
+/// Returns both TypeHandle (for Core) and CodegenType (for CIR) in lockstep.
+pub type ElabTypeResult =
+    | ElabTypeOk(TypeHandle, CodegenType)
+    | ElabTypeErr(ElabTypeError)
+
+/// Error during type elaboration.
+pub type ElabTypeError = {
+    message: String,
+    span: Span
+}
+
+/// Create a type elaboration error.
+fn elab_type_error(message: String, span: Span) -> ElabTypeError {
+    { message: message, span: span }
+}
+
+/// Result of elaborating type arguments for generic type application.
+/// Collects ALL errors rather than failing on first, for better diagnostics.
+pub type ElabTypeArgsResult =
+    | ElabTypeArgsOk(List<TypeHandle>, List<CodegenType>)
+    | ElabTypeArgsErr(List<ElabTypeError>)
+
+// ===========================================================================
+// MAIN ENTRY POINT
+// ===========================================================================
+
+/// Elaborate a type expression into a Core type and CodegenType.
+/// This is the main entry point for type elaboration.
+/// Returns both TypeHandle and CodegenType in lockstep.
+pub fn elab_type(env: Env, ty: TypeExpr) -> ElabTypeResult {
+    elab_type_impl(env, ty)
+}
+
+/// Implementation - separate to isolate the match
+fn elab_type_impl(env: Env, ty: TypeExpr) -> ElabTypeResult {
+    match ty {
+        TyPath(path) => elab_type_path(env, path),
+        TyArrow(left, right, span) => elab_type_arrow(env, left, right, span),
+        TyProduct(left, right, span) => elab_type_product(env, left, right, span),
+        TySum(left, right, span) => elab_type_sum(env, left, right, span),
+        TyApp(base, args, span) => elab_type_app(env, base, args, span),
+        TyForall(ident, body, span) => elab_type_forall(env, ident, body, span),
+        TyProp(span) => ElabTypeOk(tg_type_prop(), ct_prop()),
+        TyUnit(span) => ElabTypeOk(tg_type_unit(), ct_unit()),
+        TyVoid(span) => ElabTypeOk(tg_type_void(), ct_void()),
+        TyPtr(inner, span) => elab_type_ptr(env, inner, span),
+        TyRef(inner, span) => elab_type_ref(env, inner, span),
+        TyEq(left, right, span) => elab_type_eq(env, left, right, span),
+        TyParen(inner, span) => elab_type(env, inner),
+        TyError(span) => ElabTypeErr(elab_type_error("type error in source", span))
+    }
+}
+
+// ===========================================================================
+// PATH ELABORATION
+// ===========================================================================
+
+/// Elaborate a type path.
+/// Handles built-in types (Nat, Bool, etc.) and user-defined types.
+fn elab_type_path(env: Env, path: Path) -> ElabTypeResult {
+    match path {
+        MkPath(segments, span) =>
+            if ident_list_len(segments) == 1 {
+                // Simple name - check for built-ins first
+                let name = ident_list_head_name(segments);
+                match elab_builtin_type(name) {
+                    SomeBuiltin(h, ct) => ElabTypeOk(h, ct),
+                    NoBuiltin() =>
+                        // Not a built-in, resolve via environment
+                        elab_resolved_type_path(env, path, span)
+                }
+            } else {
+                // Qualified path - resolve via environment
+                elab_resolved_type_path(env, path, span)
+            }
+    }
+}
+
+/// Try to elaborate a built-in type by name.
+/// Returns both TypeHandle and CodegenType for built-in types.
+fn elab_builtin_type(name: String) -> MaybeBuiltinType {
+    if name == "Nat" {
+        SomeBuiltin(tg_type_nat(), ct_nat())
+    } else if name == "Bool" {
+        SomeBuiltin(tg_type_bool(), ct_bool())
+    } else if name == "String" {
+        SomeBuiltin(tg_type_string(), ct_string())
+    } else if name == "Unit" {
+        SomeBuiltin(tg_type_unit(), ct_unit())
+    } else if name == "Void" {
+        SomeBuiltin(tg_type_void(), ct_void())
+    } else if name == "Prop" {
+        SomeBuiltin(tg_type_prop(), ct_prop())
+    } else {
+        NoBuiltin
+    }
+}
+
+/// Result of looking up a built-in type.
+type MaybeBuiltinType =
+    | NoBuiltin
+    | SomeBuiltin(TypeHandle, CodegenType)
+
+// MaybeTypeHandle is imported from elab::env
+
+/// Resolve a type path through the environment.
+fn elab_resolved_type_path(env: Env, path: Path, span: Span) -> ElabTypeResult {
+    match env_resolve_type_path(env, path) {
+        TypePathOk(resolved) =>
+            match resolved {
+                ResolvedTypeVar(name) =>
+                    // Type variable - emit tg_type_var for Core, CTVar for CIR
+                    ElabTypeOk(tg_type_var(string_to_ptr(name)), ct_var(name)),
+                ResolvedTypeDef(def) =>
+                    // User-defined type
+                    // For RECORDS, we need to preserve the nominal type (TyVar) so 
+                    // that field access can look up the type definition.
+                    // For other types (sum types, aliases), return the encoded type.
+                    match def.record_fields {
+                        SomeRecordFields(_) =>
+                            // Record type - return TyVar with the record name
+                            ElabTypeOk(tg_type_var(string_to_ptr(def.name)), ct_var(def.name)),
+                        NoRecordFields() =>
+                            // Non-record type - return encoded type
+                            ElabTypeOk(def.encoded_type, ct_var(def.name))
+                    }
+            },
+        TypePathErr(err) =>
+            ElabTypeErr(elab_type_error(err.message, err.span))
+    }
+}
+
+// ===========================================================================
+// BINARY TYPE CONSTRUCTORS
+// ===========================================================================
+
+/// Elaborate arrow type: A -> B
+fn elab_type_arrow(env: Env, left: TypeExpr, right: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, left) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(left_h, left_ct) =>
+            match elab_type(env, right) {
+                ElabTypeErr(e) => ElabTypeErr(e),
+                ElabTypeOk(right_h, right_ct) =>
+                    ElabTypeOk(tg_type_arrow(left_h, right_h), ct_arrow(left_ct, right_ct))
+            }
+    }
+}
+
+/// Elaborate product type: A * B
+fn elab_type_product(env: Env, left: TypeExpr, right: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, left) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(left_h, left_ct) =>
+            match elab_type(env, right) {
+                ElabTypeErr(e) => ElabTypeErr(e),
+                ElabTypeOk(right_h, right_ct) =>
+                    ElabTypeOk(tg_type_product(left_h, right_h), ct_pair(left_ct, right_ct))
+            }
+    }
+}
+
+/// Elaborate sum type: A + B
+fn elab_type_sum(env: Env, left: TypeExpr, right: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, left) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(left_h, left_ct) =>
+            match elab_type(env, right) {
+                ElabTypeErr(e) => ElabTypeErr(e),
+                ElabTypeOk(right_h, right_ct) =>
+                    ElabTypeOk(tg_type_sum(left_h, right_h), ct_sum(left_ct, right_ct))
+            }
+    }
+}
+
+// ===========================================================================
+// FORALL TYPES
+// ===========================================================================
+
+/// Elaborate forall type: forall T. A
+fn elab_type_forall(env: Env, ident: Ident, body: TypeExpr, span: Span) -> ElabTypeResult {
+    let name = ident_name(ident);
+    // Bind the type variable in the environment
+    let env2 = env_bind_type_var(env, name);
+    // Elaborate the body with the new binding
+    match elab_type(env2, body) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(body_h, body_ct) =>
+            // Construct forall type for both Core and CIR
+            ElabTypeOk(tg_type_forall(string_to_ptr(name), body_h), ct_forall(name, body_ct))
+    }
+    // Note: no need to unbind since we use immutable env threading
+}
+
+// ===========================================================================
+// TYPE APPLICATION
+// ===========================================================================
+
+/// Elaborate type application: F<A, B, ...>
+/// Handles generic types like List<Nat>, Option<String>, etc.
+/// The base must be a TyPath that resolves to a generic type definition.
+fn elab_type_app(env: Env, base: TypeExpr, args: List<TypeExpr>, span: Span) -> ElabTypeResult {
+    // Step 1: Extract the path from the base type expression
+    // For now, base must be a TyPath - we don't support higher-kinded types
+    match base {
+        TyPath(path) =>
+            elab_type_app_path(env, path, args, span),
+        _ =>
+            ElabTypeErr(elab_type_error(
+                "type application requires a type name",
+                span
+            ))
+    }
+}
+
+/// Helper: elaborate type application when base is a path.
+/// Resolves the path, checks arity, elaborates arguments, and instantiates.
+fn elab_type_app_path(env: Env, path: Path, args: List<TypeExpr>, span: Span) -> ElabTypeResult {
+    // Step 2: Resolve the path to a type definition
+    match env_resolve_type_path(env, path) {
+        TypePathErr(err) =>
+            ElabTypeErr(elab_type_error(err.message, span)),
+        TypePathOk(resolved) =>
+            match resolved {
+                ResolvedTypeVar(_) =>
+                    // Type variables can't be generic (no higher-kinded types)
+                    ElabTypeErr(elab_type_error(
+                        "type variable cannot have type arguments",
+                        span
+                    )),
+                ResolvedTypeDef(info) =>
+                    elab_type_app_def(env, info, args, span)
+            }
+    }
+}
+
+/// Helper: elaborate type application for a resolved type definition.
+/// Checks arity, elaborates arguments, and builds the instantiated type.
+fn elab_type_app_def(env: Env, info: TypeDefInfo, args: List<TypeExpr>, span: Span) -> ElabTypeResult {
+    // Step 3: Check arity - does this type accept type arguments?
+    let expected = info.arity;
+    let actual = list_len(args);
+    if expected == 0 {
+        // Type is not generic - provide helpful error
+        ElabTypeErr(elab_type_error(
+            "type " ++ info.name ++ " is not generic",
+            span
+        ))
+    } else if actual != expected {
+        // Arity mismatch - show expected vs actual
+        ElabTypeErr(elab_type_error(
+            info.name ++ " expects " ++ nat_to_string(expected) ++ 
+            " type argument" ++ (if expected == 1 { "" } else { "s" }) ++
+            ", got " ++ nat_to_string(actual),
+            span
+        ))
+    } else {
+        // Step 4: Elaborate all type arguments
+        match elab_type_args(env, args) {
+            ElabTypeArgsErr(errors) =>
+                // Return first error (all were collected but we can only return one)
+                first_error_or_default(errors, span),
+            ElabTypeArgsOk(arg_handles, arg_ctypes) =>
+                // Step 5: Build the instantiated type
+                build_instantiated_type(info, arg_handles, arg_ctypes, span)
+        }
+    }
+}
+
+/// Extract the first error from a list, or create a default error.
+/// Used when we've collected multiple errors but can only return one.
+fn first_error_or_default(errors: List<ElabTypeError>, span: Span) -> ElabTypeResult {
+    match errors {
+        Nil() => ElabTypeErr(elab_type_error("type argument error", span)),
+        Cons(err, _) => ElabTypeErr(err)
+    }
+}
+
+/// Elaborate a list of type expressions into type handles and codegen types.
+/// Collects ALL errors rather than failing on first, for better diagnostics.
+/// Used by elab_type_app for generic type arguments.
+pub fn elab_type_args(env: Env, args: List<TypeExpr>) -> ElabTypeArgsResult {
+    elab_type_args_acc(env, args, Nil, Nil, Nil)
+}
+
+/// Accumulator-based helper for elab_type_args.
+/// Processes args left-to-right, collecting results or errors.
+fn elab_type_args_acc(
+    env: Env,
+    args: List<TypeExpr>,
+    handles_acc: List<TypeHandle>,
+    ctypes_acc: List<CodegenType>,
+    errors_acc: List<ElabTypeError>
+) -> ElabTypeArgsResult {
+    match args {
+        Nil() =>
+            // Done processing - return success if no errors, otherwise all errors
+            match errors_acc {
+                Nil() => ElabTypeArgsOk(list_reverse(handles_acc), list_reverse(ctypes_acc)),
+                Cons(_, _) => ElabTypeArgsErr(list_reverse(errors_acc))
+            },
+        Cons(arg, rest) =>
+            match elab_type(env, arg) {
+                ElabTypeOk(handle, ctype) =>
+                    // Success - add to accumulators and continue
+                    elab_type_args_acc(env, rest,
+                        Cons(handle, handles_acc),
+                        Cons(ctype, ctypes_acc),
+                        errors_acc),
+                ElabTypeErr(err) =>
+                    // Error - add to error list and continue processing
+                    elab_type_args_acc(env, rest,
+                        handles_acc,
+                        ctypes_acc,
+                        Cons(err, errors_acc))
+            }
+    }
+}
+
+// ===========================================================================
+// TYPE INSTANTIATION
+// ===========================================================================
+
+/// Build an instantiated type by substituting type arguments for type parameters.
+/// Given TypeDefInfo for a generic type and elaborated type arguments,
+/// substitutes each param[i] with arg[i] in the encoded_type.
+fn build_instantiated_type(
+    info: TypeDefInfo,
+    arg_handles: List<TypeHandle>,
+    arg_ctypes: List<CodegenType>,
+    span: Span
+) -> ElabTypeResult {
+    // Check that encoded_type is valid (collection phase should have populated it)
+    // Also check for placeholder TyVar(name) that preregister_type_var sets as a temporary encoding.
+    // A placeholder is a TyVar whose name matches the type definition's name.
+    if info.encoded_type == INVALID_HANDLE {
+        ElabTypeErr(elab_type_error(
+            "type not yet elaborated: " ++ info.name,
+            span
+        ))
+    } else if is_placeholder_encoding(info.encoded_type, info.name) {
+        // Type is still being elaborated (placeholder from preregister_type_vars).
+        // Return the placeholder as-is — the fixup passes (records, aliases) will
+        // re-elaborate this type after all ADT bodies are processed, replacing
+        // the placeholder with the real encoding. Erroring here would produce
+        // stale errors that the fixup passes can't remove.
+        let ctype = ct_var(info.name);
+        ElabTypeOk(info.encoded_type, ctype)
+    } else {
+        // Substitute all type parameters in the encoded type
+        let instantiated = substitute_all_params(info.encoded_type, info.params, arg_handles);
+        
+        // Use ct_var as placeholder for CodegenType (matches existing pattern)
+        let ctype = ct_var(info.name);
+        
+        ElabTypeOk(instantiated, ctype)
+    }
+}
+
+/// Check if an encoded_type is a placeholder TyVar(name) matching the type definition's name.
+/// During preregister_type_var, types get a temporary encoded_type = TyVar(type_name).
+/// This should not be used for instantiation since it's not the real structural type.
+pub fn is_placeholder_encoding(encoded: TypeHandle, type_name: String) -> Bool {
+    if tg_type_is_tyvar(encoded) {
+        let var_name = tg_type_get_tyvar_name(encoded);
+        let expected_name = tg_string_to_cstr(type_name);
+        tg_cstr_eq(var_name, expected_name)
+    } else {
+        false
+    }
+}
+
+/// Substitute all type parameters in a type.
+/// Iterates through params and args in parallel, applying tg_type_substitute for each pair.
+fn substitute_all_params(
+    base_type: TypeHandle,
+    params: List<String>,
+    args: List<TypeHandle>
+) -> TypeHandle {
+    substitute_params_loop(base_type, params, args, 0)
+}
+
+/// Index-based loop for type parameter substitution.
+/// For each index, gets params[i] and args[i], substitutes, then recurses.
+fn substitute_params_loop(
+    ty: TypeHandle,
+    params: List<String>,
+    args: List<TypeHandle>,
+    index: Nat
+) -> TypeHandle {
+    match list_get(params, index) {
+        None() => ty,  // No more params - done
+        Some(param_name) =>
+            match list_get(args, index) {
+                None() => ty,  // No more args - shouldn't happen if arity checked
+                Some(arg_type) =>
+                    // Substitute this param with its arg, then continue
+                    let var_ptr = string_to_ptr(param_name);
+                    let substituted = tg_type_substitute(ty, var_ptr, arg_type);
+                    substitute_params_loop(substituted, params, args, index + 1)
+            }
+    }
+}
+
+// ===========================================================================
+// POINTER AND REFERENCE TYPES
+// ===========================================================================
+
+/// Elaborate pointer type: *T
+fn elab_type_ptr(env: Env, inner: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, inner) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(inner_h, inner_ct) =>
+            ElabTypeOk(tg_type_ptr(inner_h), ct_ptr(inner_ct))
+    }
+}
+
+/// Elaborate reference type: Ref<T>
+fn elab_type_ref(env: Env, inner: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, inner) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(inner_h, inner_ct) =>
+            ElabTypeOk(tg_type_ref(inner_h), ct_ref(inner_ct))
+    }
+}
+
+// ===========================================================================
+// EQUALITY TYPES
+// ===========================================================================
+
+/// Elaborate equality type: left = right
+/// This creates a propositional equality type between two terms.
+fn elab_type_eq(env: Env, left: Expr, right: Expr, span: Span) -> ElabTypeResult {
+    // Synthesize the left term
+    match synth(env, left) {
+        ElabExprErr(e) =>
+            ElabTypeErr(elab_type_error(e.message, span)),
+        ElabExprOk(env1, left_term, left_ty, left_cir) =>
+            // Synthesize the right term
+            match synth(env1, right) {
+                ElabExprErr(e) =>
+                    ElabTypeErr(elab_type_error(e.message, span)),
+                ElabExprOk(env2, right_term, right_ty, right_cir) =>
+                    // Check that both terms have the same type
+                    if tg_types_equal(left_ty, right_ty) {
+                        // Build equality type: left_ty with left_term = right_term
+                        // For CIR, we need to derive CodegenType from TypeHandle
+                        // TODO: Store CIR type info properly - for now use CTNat placeholder
+                        let cir_ty = ct_nat();  // Placeholder - should derive from left_ty
+                        ElabTypeOk(
+                            tg_type_eq(left_ty, left_term, right_term),
+                            ct_eq(cir_ty, left_cir, right_cir)
+                        )
+                    } else {
+                        ElabTypeErr(elab_type_error(
+                            "equality type requires both sides to have the same type",
+                            span
+                        ))
+                    }
+            }
+    }
+}
+
+// ===========================================================================
+// TYPE LIST ELABORATION
+// ===========================================================================
+
+/// Elaborate a list of type expressions.
+/// Used for function parameters, ADT constructors, etc.
+/// Returns both TypeHandle list and CodegenType list.
+pub fn elab_type_list(env: Env, types: List<TypeExpr>) -> ElabTypeListResult {
+    match types {
+        Nil() => ElabTypeListOk(Nil(), Nil()),
+        Cons(ty, rest) =>
+            match elab_type(env, ty) {
+                ElabTypeErr(e) => ElabTypeListErr(e),
+                ElabTypeOk(h, ct) =>
+                    match elab_type_list(env, rest) {
+                        ElabTypeListErr(e) => ElabTypeListErr(e),
+                        ElabTypeListOk(hs, cts) => 
+                            ElabTypeListOk(Cons(h, hs), Cons(ct, cts))
+                    }
+            }
+    }
+}
+
+/// Result of elaborating a type list.
+pub type ElabTypeListResult =
+    | ElabTypeListOk(List<TypeHandle>, List<CodegenType>)
+    | ElabTypeListErr(ElabTypeError)
+

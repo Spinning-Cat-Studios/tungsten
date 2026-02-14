@@ -1,0 +1,50 @@
+// src/compiler/parser/items/recovery.tg
+// Error recovery for item parsing.
+
+use lexer::token::{TokenKind, TokFn, TokType, TokPub, TokExtern, TokMod, TokUse,
+    TokTheorem, TokLemma, TokAxiom, TokEof};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_check, cursor_advance,
+    cursor_is_eof};
+use parser::option::{Option, None, Some};
+
+// ===========================================================================
+// ERROR RECOVERY
+// ===========================================================================
+
+/// Synchronize to the next item boundary for error recovery.
+/// Advances the cursor until it finds a token that could start a new item.
+pub fn synchronize(cur: Cursor) -> Cursor {
+    synchronize_loop(cur)
+}
+
+/// Internal loop for synchronization.
+fn synchronize_loop(cur: Cursor) -> Cursor {
+    if cursor_is_eof(cur) || cursor_check(cur, TokEof()) {
+        cur
+    } else if is_item_start(cur) {
+        cur
+    } else {
+        synchronize_loop(cursor_advance(cur))
+    }
+}
+
+/// Check if current token could start an item.
+pub fn is_item_start(cur: Cursor) -> Bool {
+    match cursor_peek_kind(cur) {
+        None() => false,
+        Some(kind) => {
+            match kind {
+                TokPub() => true,
+                TokFn() => true,
+                TokType() => true,
+                TokExtern() => true,
+                TokMod() => true,
+                TokUse() => true,
+                TokTheorem() => true,
+                TokLemma() => true,
+                TokAxiom() => true,
+                _ => false
+            }
+        }
+    }
+}

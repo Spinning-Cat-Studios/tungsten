@@ -1,0 +1,15 @@
+// Regression test for ADR 31: Cross-Module Generic Type Resolution
+// Tests: Option<T> re-exported through intermediate module
+//
+// This was the root cause of E9999 "expected sum type" errors in
+// driver/cli.tg where Option was re-exported through parser::option.
+
+pub mod core;
+pub mod middle;
+pub mod consumer;
+
+use consumer::test_option_match;
+
+fn main() -> Nat {
+    test_option_match()
+}

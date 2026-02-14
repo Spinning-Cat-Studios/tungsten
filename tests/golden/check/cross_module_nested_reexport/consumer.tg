@@ -1,0 +1,13 @@
+// Consumer: imports from Level A (the canonical definition module)
+// Tests that types from sibling modules can be imported and used
+// with pattern matching working correctly across module boundaries.
+
+use level_a::{Result, Ok, Err};
+
+pub fn test_nested_reexport_match() -> Nat {
+    let res: Result<Nat, String> = Ok(42);
+    match res {
+        Err(msg) => 0,
+        Ok(n) => n
+    }
+}

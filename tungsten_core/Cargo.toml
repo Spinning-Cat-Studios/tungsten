@@ -1,0 +1,20 @@
+[package]
+name = "tungsten_core"
+description = "Core calculus (kernel) for the Tungsten proof language"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+atty = "0.2"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

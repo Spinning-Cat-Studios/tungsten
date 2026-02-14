@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussion
+    url: https://github.com/Spinning-Cat-Studios/tungsten/discussions
+    about: Ask questions or discuss ideas in GitHub Discussions

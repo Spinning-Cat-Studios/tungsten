@@ -1,0 +1,14 @@
+// Error test for ADR 31: Cross-Module Generic Type Resolution
+// Tests: Type mismatch with generic type across modules
+//
+// When a function expects List<String> but receives List<Nat>,
+// the error should show the user-friendly type names.
+
+pub mod list;
+pub mod consumer;
+
+use consumer::test_type_mismatch;
+
+fn main() -> Nat {
+    test_type_mismatch()
+}

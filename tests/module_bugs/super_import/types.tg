@@ -1,0 +1,6 @@
+// types module - exports Config
+pub type Config = { debug: Nat, verbose: Nat }
+
+pub fn default_config() -> Config {
+    { debug: 0, verbose: 0 }
+}

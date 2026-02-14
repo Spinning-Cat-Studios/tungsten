@@ -1,0 +1,224 @@
+// src/compiler/parser/lib.tg
+// Top-level parser API for the Tungsten self-hosted compiler.
+//
+// Provides the main entry points for parsing Tungsten source files:
+// - parse_file: Parse from a token list
+// - parse_source: Parse from source string (uses lexer)
+//
+// Returns FileParseResult with both parsed items and accumulated errors,
+// enabling the parser to report multiple errors in a single pass.
+
+use lexer::span::{Span, span_empty, span_merge};
+use lexer::scanner::{LexResult, lex_result_tokens, lex_result_errors,
+    tokenize_no_trivia, LexErrors, NoLexErrors, ConsLexError};
+use lexer::token::{Token, TokEof};
+
+use parser::cursor::{Cursor, cursor_new, cursor_peek, cursor_check, cursor_is_eof, cursor_advance};
+use parser::error::{ParseError, parse_errors_empty, parse_errors_push, parse_errors_reverse, parse_error_count};
+
+// Re-export error types for convenience
+pub use parser::error::{ParseErrors, NoParseErrors, ConsParseError};
+use parser::ast::nodes::{Item, SourceFile, source_file_new};
+use parser::items::dispatch::{parse_item};
+use parser::items::result::{ParseResultItem, ParseOkItem, ParseErrItem, item_list_reverse};
+use parser::items::recovery::{synchronize};
+use parser::option::{Option, None, Some};
+use driver::ffi::{List, Nil, Cons, eprintln};
+
+// ===========================================================================
+// FILE PARSE RESULT
+// ===========================================================================
+
+/// Result of parsing an entire source file.
+/// Contains both successfully parsed items and any errors encountered.
+pub type FileParseResult = {
+    items: List<Item>,        // Successfully parsed items
+    errors: ParseErrors,    // Accumulated parse errors
+    span: Span              // Full file span
+}
+
+/// Create a new file parse result.
+pub fn file_parse_result_new(items: List<Item>, errors: ParseErrors, span: Span) -> FileParseResult {
+    { items: items, errors: errors, span: span }
+}
+
+/// Get items from a file parse result.
+pub fn file_parse_result_items(r: FileParseResult) -> List<Item> {
+    r.items
+}
+
+/// Get errors from a file parse result.
+pub fn file_parse_result_errors(r: FileParseResult) -> ParseErrors {
+    r.errors
+}
+
+/// Get span from a file parse result.
+pub fn file_parse_result_span(r: FileParseResult) -> Span {
+    r.span
+}
+
+/// Check if parsing succeeded with no errors.
+pub fn file_parse_ok(result: FileParseResult) -> Bool {
+    match result.errors {
+        NoParseErrors() => true,
+        ConsParseError(_, _) => false
+    }
+}
+
+/// Get the number of parse errors.
+pub fn file_parse_error_count(result: FileParseResult) -> Nat {
+    parse_error_count(result.errors)
+}
+
+// ===========================================================================
+// COMBINED RESULT (Lex + Parse)
+// ===========================================================================
+
+/// Combined result including both lex and parse errors.
+pub type FullParseResult = {
+    items: List<Item>,
+    lex_errors: LexErrors,
+    parse_errors: ParseErrors,
+    span: Span
+}
+
+/// Create a full parse result.
+pub fn full_parse_result_new(items: List<Item>, lex_errors: LexErrors, 
+                              parse_errors: ParseErrors, span: Span) -> FullParseResult {
+    { items: items, lex_errors: lex_errors, parse_errors: parse_errors, span: span }
+}
+
+/// Check if full parse succeeded with no errors.
+pub fn full_parse_ok(result: FullParseResult) -> Bool {
+    let no_lex_errors = match result.lex_errors {
+        NoLexErrors() => true,
+        ConsLexError(_, _) => false
+    };
+    let no_parse_errors = match result.parse_errors {
+        NoParseErrors() => true,
+        ConsParseError(_, _) => false
+    };
+    no_lex_errors && no_parse_errors
+}
+
+// ===========================================================================
+// MAIN ENTRY POINTS
+// ===========================================================================
+
+/// Parse a token list into items.
+/// This is the primary entry point when you already have tokens.
+///
+/// Example:
+///   let tokens = tokenize_no_trivia(source, "test.tg");
+///   let result = parse_file(tokens.tokens, "test.tg");
+pub fn parse_file(tokens: List<Token>, filename: String) -> FileParseResult {
+    let cur = cursor_new(tokens, filename);
+    let start_span = cursor_span_or_empty(cur, filename);
+    
+    // Parse all items with error recovery
+    let (items, errors, cur2) = parse_items_with_recovery(cur, Nil, NoParseErrors);
+    
+    let end_span = cursor_span_or_empty(cur2, filename);
+    let file_span = span_merge(start_span, end_span);
+    
+    file_parse_result_new(
+        item_list_reverse(items),
+        parse_errors_reverse(errors),
+        file_span
+    )
+}
+
+/// Parse source code string into items.
+/// Convenience function that handles both lexing and parsing.
+///
+/// Example:
+///   let result = parse_source("fn main() { 42 }", "test.tg");
+///   if full_parse_ok(result) { ... }
+pub fn parse_source(source: String, filename: String) -> FullParseResult {
+    // Lex the source
+    let lex_result = tokenize_no_trivia(source, filename);
+    let tokens = lex_result_tokens(lex_result);
+    let lex_errors = lex_result_errors(lex_result);
+    
+    // Parse the tokens
+    let parse_result = parse_file(tokens, filename);
+    
+    let result = full_parse_result_new(
+        parse_result.items,
+        lex_errors,
+        parse_result.errors,
+        parse_result.span
+    );
+    result
+}
+
+/// Parse source code and return a SourceFile AST node.
+/// Returns the SourceFile along with any errors.
+pub fn parse_to_source_file(source: String, filename: String) -> (SourceFile, ParseErrors, LexErrors) {
+    let result = parse_source(source, filename);
+    let sf = source_file_new(result.items, result.span);
+    (sf, result.parse_errors, result.lex_errors)
+}
+
+// ===========================================================================
+// INTERNAL: ERROR-ACCUMULATING PARSE LOOP
+// ===========================================================================
+
+/// Parse items with error recovery, accumulating errors instead of failing fast.
+fn parse_items_with_recovery(cur: Cursor, items: List<Item>, errors: ParseErrors) 
+    -> (List<Item>, ParseErrors, Cursor) 
+{
+    let is_eof = cursor_is_eof(cur);
+    let is_eof_tok = cursor_check(cur, TokEof());
+    if is_eof || is_eof_tok {
+        (items, errors, cur)
+    } else {
+        match parse_item(cur) {
+            ParseOkItem(item, cur2) => {
+                // Successfully parsed an item
+                parse_items_with_recovery(cur2, Cons(item, items), errors)
+            },
+            ParseErrItem(err) => {
+                // Record error and synchronize to next item boundary
+                let new_errors = ConsParseError(err, errors);
+                let cur2 = synchronize(cur);
+                
+                // Ensure progress to avoid infinite loop
+                let cur3 = if cursor_is_same_position(cur, cur2) {
+                    // Synchronize didn't advance - force advance one token
+                    cursor_advance_safe(cur2)
+                } else {
+                    cur2
+                };
+                
+                parse_items_with_recovery(cur3, items, new_errors)
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Get current span or empty span if at end.
+fn cursor_span_or_empty(cur: Cursor, filename: String) -> Span {
+    match cursor_peek(cur) {
+        None() => span_empty(cur.position, filename),
+        Some(tok) => tok.span
+    }
+}
+
+/// Check if two cursors are at the same position.
+fn cursor_is_same_position(a: Cursor, b: Cursor) -> Bool {
+    a.position == b.position
+}
+
+/// Safely advance cursor (handles end of file).
+fn cursor_advance_safe(cur: Cursor) -> Cursor {
+    if cursor_is_eof(cur) {
+        cur
+    } else {
+        cursor_advance(cur)
+    }
+}

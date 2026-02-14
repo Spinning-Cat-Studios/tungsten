@@ -1,0 +1,26 @@
+// Test case: List<Point> - recursive ADT with generic type parameter
+// This tests two-phase substitution: type params AND μ-substitution must compose correctly
+// The pattern variable `p` in `Cons(p, _)` should have type Point
+
+type Point = { x: Nat, y: Nat }
+type List<T> = | Nil | Cons(T, List<T>)
+
+fn first_x(points: List<Point>) -> Nat {
+    match points {
+        Nil() => 0,
+        Cons(p, _) => p.x  // p must be Point, not T or Nat
+    }
+}
+
+fn first_y(points: List<Point>) -> Nat {
+    match points {
+        Nil() => 0,
+        Cons(p, _) => p.y
+    }
+}
+
+fn main() -> Nat {
+    let p1: Point = { x: 42, y: 10 };
+    let pts: List<Point> = Cons(p1, Nil);
+    first_x(pts)  // Should return 42
+}

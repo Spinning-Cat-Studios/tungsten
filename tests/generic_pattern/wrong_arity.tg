@@ -1,0 +1,13 @@
+// Negative test: Wrong arity in constructor pattern
+// Some has 1 field, not 2 - should produce an error
+
+type Option<T> = | None | Some(T)
+
+fn bad(opt: Option<Nat>) -> Nat {
+    match opt {
+        None() => 0,
+        Some(x, y) => x  // ERROR: Some has 1 field, not 2
+    }
+}
+
+fn main() -> Nat { bad(None) }

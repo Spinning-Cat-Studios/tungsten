@@ -1,0 +1,12 @@
+// inner module - imports from root-level types module
+// Note: super:: not yet implemented, use absolute path from crate root
+use types::{Config, default_config};
+
+pub fn make_debug_config() -> Config {
+    { debug: 1, verbose: 1 }
+}
+
+pub fn test() -> Nat {
+    let cfg = default_config();
+    cfg.debug + cfg.verbose
+}

@@ -1,0 +1,24 @@
+// Test case: Result<A, B> - multiple type parameters
+// Both A and B should be substituted correctly in pattern bindings
+
+type Result<A, B> = | Ok(A) | Err(B)
+type Point = { x: Nat, y: Nat }
+
+fn unwrap_or_zero(r: Result<Nat, String>) -> Nat {
+    match r {
+        Ok(n) => n,
+        Err(_) => 0
+    }
+}
+
+fn get_point_x_or_default(r: Result<Point, Nat>) -> Nat {
+    match r {
+        Ok(p) => p.x,
+        Err(default) => default
+    }
+}
+
+fn main() -> Nat {
+    let ok: Result<Nat, String> = Ok(42);
+    unwrap_or_zero(ok)
+}

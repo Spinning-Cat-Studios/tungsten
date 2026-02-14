@@ -1,0 +1,13 @@
+// Helper module demonstrating private type usage within same file
+// PrivateResult is private but used within the same file's functions
+
+type PrivateResult = Nat
+
+pub fn public_fn() -> Nat { 42 }
+
+// This function uses a private type in its implementation
+// but exposes only public types in its signature
+pub fn public_helper_with_private() -> Nat {
+    let private_val: PrivateResult = 10;
+    private_val
+}

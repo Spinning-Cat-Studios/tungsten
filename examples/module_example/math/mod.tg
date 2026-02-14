@@ -1,0 +1,3 @@
+/// Math module — declares sub-modules.
+
+pub mod ops;

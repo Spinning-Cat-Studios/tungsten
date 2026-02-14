@@ -1,0 +1,9 @@
+/// Computes a result using the math module.
+
+use math::ops::{add, double};
+
+/// The answer to everything.
+pub fn answer() -> Nat {
+    let base = add(20, 1);
+    double(base)
+}

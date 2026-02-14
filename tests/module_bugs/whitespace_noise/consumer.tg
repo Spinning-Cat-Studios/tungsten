@@ -1,0 +1,32 @@
+// Consumer module with use near lots of whitespace
+
+
+
+
+// Lots of blank lines above
+
+// Comment before use
+
+/* Another
+   multi-line
+   comment */
+
+// And another comment
+use helper::{Data, make_data};  // Comment on same line as use
+// Comment after use
+
+
+
+// Blank lines after use
+
+pub fn process(d: Data) -> Nat {
+    d.value * 2
+}
+
+pub fn test() -> Nat {
+    let d = make_data(21);
+    process(d)
+}
+
+
+// Trailing whitespace

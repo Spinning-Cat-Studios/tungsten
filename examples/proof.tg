@@ -1,0 +1,13 @@
+// Proof examples
+// Note: Equality types (Eq) are not yet exposed in surface syntax.
+// This file shows what theorem syntax looks like.
+
+// A simple theorem - returns a natural number
+pub theorem zero_is_nat() -> Nat {
+    0
+}
+
+fn main() -> Nat {
+    // Run the theorem
+    zero_is_nat()
+}

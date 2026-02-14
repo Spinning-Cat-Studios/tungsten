@@ -1,0 +1,12 @@
+// List module: defines generic List<T>
+
+pub type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+pub fn process_strings(xs: List<String>) -> Nat {
+    match xs {
+        Nil => 0,
+        Cons(s, rest) => 1
+    }
+}

@@ -1,0 +1,9 @@
+// Helper module with private and public items
+
+// This is private (no pub)
+type PrivateType = Nat
+
+// This is public
+pub type PublicType = Nat
+
+pub fn public_fn() -> Nat { 0 }

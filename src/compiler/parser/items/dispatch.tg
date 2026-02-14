@@ -1,0 +1,96 @@
+// src/compiler/parser/items/dispatch.tg
+// Main item dispatch and top-level parsing loop.
+
+use lexer::token::{TokenKind, Token, TokPub, TokFn, TokType, TokExtern,
+    TokMod, TokUse, TokTheorem, TokLemma, TokAxiom, TokEof};
+use lexer::span::{Span, span_empty};
+use parser::error::{ParseError, parse_error_expected, parse_error_unexpected_eof};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_is_eof, token_kind_name};
+use parser::option::{Option, None, Some};
+use parser::ast::nodes::Item;
+use result::{ParseResultItem, ParseOkItem, ParseErrItem,
+    ParseResultItemList, ParseOkItemList, ParseErrItemList,
+    ParseResultVisibility, ParseOkVisibility, ParseErrVisibility,
+    item_list_reverse};
+use visibility::{parse_visibility};
+use functions::{parse_fn};
+use parser::types::{parse_type_item};
+use theorems::{parse_theorem, parse_lemma, parse_axiom};
+use extern_fn::{parse_extern};
+use use_decl::{parse_mod, parse_use_item};
+use parser::items::recovery::{synchronize};
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// TOP-LEVEL ITEM LIST PARSING
+// ===========================================================================
+
+/// Parse a list of items (top-level declarations).
+/// Recovers from errors to continue parsing subsequent items.
+pub fn parse_items(cur: Cursor) -> ParseResultItemList {
+    parse_items_acc(cur, Nil)
+}
+
+/// Accumulator-based item list parsing with error recovery.
+fn parse_items_acc(cur: Cursor, acc: List<Item>) -> ParseResultItemList {
+    if cursor_is_eof(cur) || cursor_check(cur, TokEof()) {
+        ParseOkItemList(item_list_reverse(acc), cur)
+    } else {
+        match parse_item(cur) {
+            ParseOkItem(item, cur2) => {
+                parse_items_acc(cur2, Cons(item, acc))
+            },
+            ParseErrItem(e) => {
+                // Error recovery: skip to next item boundary
+                let cur2 = synchronize(cur);
+                // Continue parsing, but report the first error
+                // For now, we'll continue and collect what we can
+                parse_items_acc(cur2, acc)
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// SINGLE ITEM PARSING
+// ===========================================================================
+
+/// Parse a single top-level item.
+///
+/// Grammar:
+///   Item = Visibility? ItemKind
+///   ItemKind = FnDef | TypeDef | Theorem | Lemma | Axiom | Extern | Mod | Use
+pub fn parse_item(cur: Cursor) -> ParseResultItem {
+    let start_span = cursor_peek_span(cur);
+    
+    // Parse optional visibility modifier
+    let vis_result = parse_visibility(cur);
+    match vis_result {
+        ParseErrVisibility(e) => ParseErrItem(e),
+        ParseOkVisibility(vis, cur2) => dispatch_item(cur2, vis, start_span)
+    }
+}
+
+/// Dispatch to the appropriate item parser based on keyword.
+fn dispatch_item(cur: Cursor, vis: Visibility, start_span: Span) -> ParseResultItem {
+    match cursor_peek_kind(cur) {
+        None() => ParseErrItem(parse_error_unexpected_eof(start_span)),
+        Some(kind) => {
+            match kind {
+                TokFn() => parse_fn(cur, vis, start_span),
+                TokType() => parse_type_item(cur, vis, start_span),
+                TokTheorem() => parse_theorem(cur, vis, start_span),
+                TokLemma() => parse_lemma(cur, vis, start_span),
+                TokAxiom() => parse_axiom(cur, vis, start_span),
+                TokExtern() => parse_extern(cur, vis, start_span),
+                TokMod() => parse_mod(cur, vis, start_span),
+                TokUse() => parse_use_item(cur, vis, start_span),
+                _ => {
+                    let found = token_kind_name(kind);
+                    ParseErrItem(parse_error_expected("item", found, cursor_peek_span(cur)))
+                }
+            }
+        }
+    }
+}

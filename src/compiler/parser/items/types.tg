@@ -1,0 +1,413 @@
+// src/compiler/parser/items/types.tg
+// Type definition parsing: ADT, record, and alias types.
+
+use lexer::token::{TokenKind, TokType, TokEq, TokPipe, TokLParen, TokRParen,
+    TokLBrace, TokRBrace, TokComma, TokColon};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    ParseResultToken, ParseOkToken, ParseErrToken,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, Visibility};
+use parser::ast::nodes::{Item, ItemType, TypeExpr, type_expr_span, TypeDefBody,
+    TypeDefAdt, TypeDefRecord, TypeDefAlias,
+    Variant, RecordField};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use result::{ParseResultItem, ParseOkItem, ParseErrItem,
+    ParseResultTypeParams, ParseOkTypeParams, ParseErrTypeParams};
+use type_params::{parse_optional_type_params};
+use parser::types::{parse_type, ParseResultType, ParseOkType, ParseErrType};
+
+// ===========================================================================
+// TYPE ITEM PARSING
+// ===========================================================================
+
+/// Parse a type definition.
+///
+/// Grammar:
+///   Type = "type" IDENT TypeParams? "=" TypeDefBody
+///   TypeDefBody = AdtBody | RecordBody | TypeExpr
+pub fn parse_type_item(cur: Cursor, vis: Visibility, start_span: Span) -> ParseResultItem {
+    // Consume "type" keyword
+    let cur2 = cursor_advance(cur);
+    
+    // Parse type name
+    match cursor_eat_ident(cur2) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur2) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            ParseErrItem(parse_error_expected("type name", found, cursor_peek_span(cur2)))
+        },
+        SomeIdentResult(name, cur3) => {
+            let name_span = cursor_peek_span(cur2);
+            
+            // Parse optional type parameters
+            match parse_optional_type_params(cur3) {
+                ParseErrTypeParams(e) => ParseErrItem(e),
+                ParseOkTypeParams(type_params, cur4) => {
+                    // Expect "="
+                    match cursor_expect(cur4, TokEq()) {
+                        ParseErrToken(e) => ParseErrItem(e),
+                        ParseOkToken(_, cur5) => {
+                            // Parse the type definition body
+                            match parse_type_def_body(cur5) {
+                                ParseErrTypeDefBody(e) => ParseErrItem(e),
+                                ParseOkTypeDefBody(body, end_span, cur6) => {
+                                    // Check if this is a type alias - if so, create ItemTypeAlias
+                                    match body {
+                                        TypeDefAlias(ty) => {
+                                            let alias_def: TypeAliasDef = {
+                                                vis: vis,
+                                                name: ident_new(name, name_span),
+                                                type_params: type_params,
+                                                ty: ty,
+                                                span: span_merge(start_span, end_span)
+                                            };
+                                            ParseOkItem(ItemTypeAlias(alias_def), cur6)
+                                        },
+                                        _ => {
+                                            // ADT or Record - wrap in ItemType
+                                            let type_def: TypeDef = {
+                                                vis: vis,
+                                                name: ident_new(name, name_span),
+                                                type_params: type_params,
+                                                body: body,
+                                                span: span_merge(start_span, end_span)
+                                            };
+                                            ParseOkItem(ItemType(type_def), cur6)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// TYPE DEFINITION BODY PARSING
+// ===========================================================================
+
+/// Result of parsing a type definition body.
+type ParseResultTypeDefBody =
+    | ParseOkTypeDefBody(TypeDefBody, Span, Cursor)
+    | ParseErrTypeDefBody(ParseError)
+
+/// Parse the body of a type definition.
+/// Determines if it's an ADT (|), record ({), or type alias.
+fn parse_type_def_body(cur: Cursor) -> ParseResultTypeDefBody {
+    match cursor_peek_kind(cur) {
+        None() => {
+            ParseErrTypeDefBody(parse_error_expected("type body", "end of file", cursor_peek_span(cur)))
+        },
+        Some(kind) => {
+            match kind {
+                // ADT: starts with | or variant name
+                TokPipe() => parse_adt_body(cur),
+                // Record: starts with {
+                TokLBrace() => parse_record_body(cur),
+                // Type alias: anything else is a type expression
+                _ => {
+                    // Check if it looks like an ADT (identifier followed by |)
+                    if is_adt_start(cur) {
+                        parse_adt_body(cur)
+                    } else {
+                        // Parse as type alias
+                        match parse_type(cur) {
+                            ParseErrType(e) => ParseErrTypeDefBody(e),
+                            ParseOkType(ty, cur2) => {
+                                let ty_span = type_expr_span(ty);
+                                ParseOkTypeDefBody(TypeDefAlias(ty), ty_span, cur2)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check if current position looks like an ADT start.
+/// Returns true if we see: IDENT ("(" | "|" | where_clause_or_next_item).
+fn is_adt_start(cur: Cursor) -> Bool {
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => false,
+        SomeIdentResult(_, cur2) => {
+            match cursor_peek_kind(cur2) {
+                None() => false,
+                Some(kind) => {
+                    match kind {
+                        TokLParen() => true,
+                        TokPipe() => true,
+                        _ => false
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// ADT BODY PARSING
+// ===========================================================================
+
+/// Parse an ADT body.
+///
+/// Grammar:
+///   AdtBody = "|"? Variant ("|" Variant)*
+fn parse_adt_body(cur: Cursor) -> ParseResultTypeDefBody {
+    // Optional leading |
+    let cur2 = if cursor_check(cur, TokPipe()) {
+        cursor_advance(cur)
+    } else {
+        cur
+    };
+    
+    // Parse first variant
+    match parse_variant(cur2) {
+        ParseErrVariant(e) => ParseErrTypeDefBody(e),
+        ParseOkVariant(variant, cur3) => {
+            parse_variants_rest(cur3, Cons(variant, Nil()))
+        }
+    }
+}
+
+/// Result of parsing a single variant.
+type ParseResultVariant =
+    | ParseOkVariant(Variant, Cursor)
+    | ParseErrVariant(ParseError)
+
+/// Parse a single ADT variant.
+///
+/// Grammar:
+///   Variant = IDENT ("(" TypeExprList ")")?
+fn parse_variant(cur: Cursor) -> ParseResultVariant {
+    let start_span = cursor_peek_span(cur);
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            ParseErrVariant(parse_error_expected("variant name", found, cursor_peek_span(cur)))
+        },
+        SomeIdentResult(name, cur2) => {
+            // Check for optional payload types
+            if cursor_check(cur2, TokLParen()) {
+                let cur3 = cursor_advance(cur2);
+                // Check for empty ()
+                if cursor_check(cur3, TokRParen()) {
+                    let cur4 = cursor_advance(cur3);
+                    let variant: Variant = {
+                        name: ident_new(name, start_span),
+                        fields: Nil(),
+                        span: span_merge(start_span, cursor_peek_span(cur3))
+                    };
+                    ParseOkVariant(variant, cur4)
+                } else {
+                    match parse_variant_fields(cur3) {
+                        ParseErrVariantFields(e) => ParseErrVariant(e),
+                        ParseOkVariantFields(fields, end_span, cur4) => {
+                            match cursor_expect(cur4, TokRParen()) {
+                                ParseErrToken(e) => ParseErrVariant(e),
+                                ParseOkToken(end_tok, cur5) => {
+                                    let variant: Variant = {
+                                        name: ident_new(name, start_span),
+                                        fields: fields,
+                                        span: span_merge(start_span, end_tok.span)
+                                    };
+                                    ParseOkVariant(variant, cur5)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // No payload
+                let variant: Variant = {
+                    name: ident_new(name, start_span),
+                    fields: Nil(),
+                    span: start_span
+                };
+                ParseOkVariant(variant, cur2)
+            }
+        }
+    }
+}
+
+/// Result of parsing variant fields.
+type ParseResultVariantFields =
+    | ParseOkVariantFields(List<TypeExpr>, Span, Cursor)
+    | ParseErrVariantFields(ParseError)
+
+/// Parse variant fields: comma-separated type list.
+fn parse_variant_fields(cur: Cursor) -> ParseResultVariantFields {
+    match parse_type(cur) {
+        ParseErrType(e) => ParseErrVariantFields(e),
+        ParseOkType(ty, cur2) => {
+            parse_variant_fields_rest(cur2, Cons(ty, Nil()), type_expr_span(ty))
+        }
+    }
+}
+
+/// Parse remaining variant fields.
+fn parse_variant_fields_rest(cur: Cursor, acc: List<TypeExpr>, last_span: Span) -> ParseResultVariantFields {
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma
+        if cursor_check(cur2, TokRParen()) {
+            ParseOkVariantFields(list_reverse(acc), last_span, cur2)
+        } else {
+            match parse_type(cur2) {
+                ParseErrType(e) => ParseErrVariantFields(e),
+                ParseOkType(ty, cur3) => {
+                    parse_variant_fields_rest(cur3, Cons(ty, acc), type_expr_span(ty))
+                }
+            }
+        }
+    } else {
+        ParseOkVariantFields(list_reverse(acc), last_span, cur)
+    }
+}
+
+/// Parse remaining variants.
+fn parse_variants_rest(cur: Cursor, acc: List<Variant>) -> ParseResultTypeDefBody {
+    if cursor_check(cur, TokPipe()) {
+        let cur2 = cursor_advance(cur);
+        match parse_variant(cur2) {
+            ParseErrVariant(e) => ParseErrTypeDefBody(e),
+            ParseOkVariant(variant, cur3) => {
+                parse_variants_rest(cur3, Cons(variant, acc))
+            }
+        }
+    } else {
+        let reversed = list_reverse(acc);
+        let last_span = variant_list_last_span(reversed);
+        ParseOkTypeDefBody(TypeDefAdt(reversed), last_span, cur)
+    }
+}
+
+/// Get span of last variant in list (or empty span if list is empty).
+fn variant_list_last_span(list: List<Variant>) -> Span {
+    match list {
+        Nil() => span_empty(0, ""),
+        Cons(v, Nil()) => v.span,
+        Cons(_, rest) => variant_list_last_span(rest)
+    }
+}
+
+// ===========================================================================
+// RECORD BODY PARSING
+// ===========================================================================
+
+/// Parse a record body.
+///
+/// Grammar:
+///   RecordBody = "{" RecordField ("," RecordField)* ","? "}"
+fn parse_record_body(cur: Cursor) -> ParseResultTypeDefBody {
+    match cursor_expect(cur, TokLBrace()) {
+        ParseErrToken(e) => ParseErrTypeDefBody(e),
+        ParseOkToken(_, cur2) => {
+            // Check for empty record
+            if cursor_check(cur2, TokRBrace()) {
+                let cur3 = cursor_advance(cur2);
+                let end_span = cursor_peek_span(cur2);
+                ParseOkTypeDefBody(TypeDefRecord(Nil()), end_span, cur3)
+            } else {
+                // Parse first field
+                match parse_record_field(cur2) {
+                    ParseErrRecordField(e) => ParseErrTypeDefBody(e),
+                    ParseOkRecordField(field, cur3) => {
+                        parse_record_fields_rest(cur3, Cons(field, Nil()))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Result of parsing a single record field.
+type ParseResultRecordField =
+    | ParseOkRecordField(RecordField, Cursor)
+    | ParseErrRecordField(ParseError)
+
+/// Parse a single record field.
+///
+/// Grammar:
+///   RecordField = IDENT ":" TypeExpr
+fn parse_record_field(cur: Cursor) -> ParseResultRecordField {
+    let start_span = cursor_peek_span(cur);
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            ParseErrRecordField(parse_error_expected("field name", found, cursor_peek_span(cur)))
+        },
+        SomeIdentResult(name, cur2) => {
+            match cursor_expect(cur2, TokColon()) {
+                ParseErrToken(e) => ParseErrRecordField(e),
+                ParseOkToken(_, cur3) => {
+                    match parse_type(cur3) {
+                        ParseErrType(e) => ParseErrRecordField(e),
+                        ParseOkType(ty, cur4) => {
+                            let field: RecordField = {
+                                name: ident_new(name, start_span),
+                                ty: ty,
+                                span: span_merge(start_span, type_expr_span(ty))
+                            };
+                            ParseOkRecordField(field, cur4)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse remaining record fields.
+fn parse_record_fields_rest(cur: Cursor, acc: List<RecordField>) -> ParseResultTypeDefBody {
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma
+        if cursor_check(cur2, TokRBrace()) {
+            match cursor_expect(cur2, TokRBrace()) {
+                ParseErrToken(e) => ParseErrTypeDefBody(e),
+                ParseOkToken(end_tok, cur3) => {
+                    ParseOkTypeDefBody(TypeDefRecord(list_reverse(acc)), end_tok.span, cur3)
+                }
+            }
+        } else {
+            match parse_record_field(cur2) {
+                ParseErrRecordField(e) => ParseErrTypeDefBody(e),
+                ParseOkRecordField(field, cur3) => {
+                    parse_record_fields_rest(cur3, Cons(field, acc))
+                }
+            }
+        }
+    } else if cursor_check(cur, TokRBrace()) {
+        match cursor_expect(cur, TokRBrace()) {
+            ParseErrToken(e) => ParseErrTypeDefBody(e),
+            ParseOkToken(end_tok, cur2) => {
+                ParseOkTypeDefBody(TypeDefRecord(list_reverse(acc)), end_tok.span, cur2)
+            }
+        }
+    } else {
+        let found = match cursor_peek_kind(cur) {
+            None() => "end of file",
+            Some(k) => token_kind_name(k)
+        };
+        ParseErrTypeDefBody(parse_error_expected("',' or '}'", found, cursor_peek_span(cur)))
+    }
+}
+
+// record_field_list_reverse removed - using list_reverse from driver::util

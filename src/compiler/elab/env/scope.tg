@@ -1,0 +1,109 @@
+// src/compiler/elab/env/scope.tg
+// Scope and local binding types for the environment.
+
+use elab::ffi::TypeHandle;
+
+// ===========================================================================
+// LOCAL BINDING
+// ===========================================================================
+
+/// A local variable binding in a scope.
+pub type LocalBinding = {
+    name: String,
+    ty: TypeHandle,
+    level: Nat
+}
+
+/// Create a new local binding.
+pub fn local_binding_new(name: String, ty: TypeHandle, level: Nat) -> LocalBinding {
+    { name: name, ty: ty, level: level }
+}
+
+// ===========================================================================
+// SCOPE
+// ===========================================================================
+
+/// Linked list of local bindings (a scope).
+pub type Scope =
+    | ScopeNil
+    | ScopeCons(LocalBinding, Scope)
+
+/// Create an empty scope.
+pub fn scope_empty() -> Scope {
+    ScopeNil
+}
+
+/// Add a binding to a scope.
+pub fn scope_add(binding: LocalBinding, scope: Scope) -> Scope {
+    ScopeCons(binding, scope)
+}
+
+/// Look up a name in a scope.
+/// Returns Option containing the binding if found.
+pub type MaybeLocalBinding =
+    | NoLocalBinding
+    | SomeLocalBinding(LocalBinding)
+
+pub fn scope_lookup(scope: Scope, name: String) -> MaybeLocalBinding {
+    match scope {
+        ScopeNil() => NoLocalBinding,
+        ScopeCons(binding, rest) =>
+            if binding.name == name {
+                SomeLocalBinding(binding)
+            } else {
+                scope_lookup(rest, name)
+            }
+    }
+}
+
+// ===========================================================================
+// SCOPE STACK
+// ===========================================================================
+
+/// Stack of scopes for nested lexical environments.
+pub type ScopeStack =
+    | ScopeStackNil
+    | ScopeStackCons(Scope, ScopeStack)
+
+/// Create an empty scope stack.
+pub fn scope_stack_empty() -> ScopeStack {
+    ScopeStackNil
+}
+
+/// Push a scope onto the stack.
+pub fn scope_stack_push(scope: Scope, stack: ScopeStack) -> ScopeStack {
+    ScopeStackCons(scope, stack)
+}
+
+/// Pop a scope from the stack.
+/// Returns the remaining stack, or empty if already empty.
+pub fn scope_stack_pop(stack: ScopeStack) -> ScopeStack {
+    match stack {
+        ScopeStackNil() => ScopeStackNil,
+        ScopeStackCons(_, rest) => rest
+    }
+}
+
+/// Get the current (top) scope.
+pub type MaybeScope =
+    | NoScope
+    | SomeScope(Scope)
+
+pub fn scope_stack_current(stack: ScopeStack) -> MaybeScope {
+    match stack {
+        ScopeStackNil() => NoScope,
+        ScopeStackCons(scope, _) => SomeScope(scope)
+    }
+}
+
+/// Look up a name in the entire scope stack (innermost first).
+pub fn scope_stack_lookup(stack: ScopeStack, name: String) -> MaybeLocalBinding {
+    match stack {
+        ScopeStackNil() => NoLocalBinding,
+        ScopeStackCons(scope, rest) =>
+            match scope_lookup(scope, name) {
+                SomeLocalBinding(b) => SomeLocalBinding(b),
+                NoLocalBinding() => scope_stack_lookup(rest, name)
+            }
+    }
+}

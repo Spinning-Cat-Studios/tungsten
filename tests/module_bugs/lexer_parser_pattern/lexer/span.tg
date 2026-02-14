@@ -1,0 +1,6 @@
+// Span type - used by both lexer and parser
+pub type Span = { start: Nat, end: Nat }
+
+pub fn span_len(s: Span) -> Nat {
+    s.end - s.start
+}

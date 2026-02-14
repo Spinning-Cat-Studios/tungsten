@@ -1,0 +1,9 @@
+// Test: Wildcard patterns inside constructor patterns (E0100 fix)
+// Direct match in main (no function calls) to verify the pattern matching works.
+
+type Span = MkSpan(Nat, Nat, Nat)
+
+fn main() -> Nat {
+    let s = MkSpan(42, 0, 0);
+    match s { MkSpan(start, _, _) => start }
+}

@@ -1,0 +1,9 @@
+[E0016] Error: type `PrivateType` is private (defined in `helper`) and cannot be accessed from `main`
+   ╭─[tests/golden/error/private_item_access/main.tg:9:14]
+   │
+ 9 │ fn main() -> PrivateType { 0 }  // Should error: PrivateType is private
+   │              ─────┬─────  
+   │                   ╰─────── 
+───╯
+
+error: aborting due to 1 error

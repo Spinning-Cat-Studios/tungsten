@@ -1,0 +1,4 @@
+// Simple hello world that returns a number
+fn main() -> Nat {
+    42
+}

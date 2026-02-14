@@ -1,0 +1,14 @@
+pub type MySpan = { start: Nat, end: Nat, file: String }
+
+pub fn make_span(s: Nat, e: Nat, f: String) -> MySpan {
+    { start: s, end: e, file: f }
+}
+
+pub fn get_start(s: MySpan) -> Nat {
+    s.start
+}
+
+fn main() -> Nat {
+    let sp = make_span(1, 10, "test.tg");
+    get_start(sp)
+}

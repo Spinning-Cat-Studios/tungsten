@@ -1,0 +1,12 @@
+// Test: Basic sibling module import (main entry point)
+// Bug #1: Cross-module type resolution
+//
+// child2 imports a type from child1.
+// Currently fails due to span-based module ownership heuristics.
+
+mod child1;
+mod child2;
+
+fn main() -> Nat {
+    child2::test()
+}

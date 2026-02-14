@@ -1,0 +1,17 @@
+// Test: 3-tuple inside generic Cons constructor
+// This tests whether larger tuples (encoded as nested pairs) work
+// correctly with bidirectional type inference.
+
+type List<T> = | Nil | Cons(T, List<T>)
+type Triple = (String, Nat, Bool)
+
+fn make_triple_list() -> List<Triple> {
+    Cons(("first", 1, true), Cons(("second", 2, false), Nil))
+}
+
+fn main() -> Nat {
+    match make_triple_list() {
+        Nil() => 0,
+        Cons((_, n, _), _) => n
+    }
+}

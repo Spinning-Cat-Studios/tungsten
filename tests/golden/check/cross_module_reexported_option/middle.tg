@@ -1,0 +1,4 @@
+// Middle module: re-exports Option from core
+// This is the pattern used in parser::option re-exporting from core::option
+
+pub use core::{Option, None, Some};

@@ -1,0 +1,14 @@
+[E0007] Error: the name `Foo` is imported multiple times
+   ╭─[tests/golden/error/duplicate_import_same_module/main.tg:8:12]
+   │
+ 7 │ use mymod::Foo;
+   │            ─┬─  
+   │             ╰─── first imported here
+ 8 │ use mymod::Foo;  // duplicate import!
+   │            ─┬─  
+   │             ╰─── 
+   │ 
+   │ Help: use `as` to rename one import: `use main::mymod::Foo as foo_alias;`
+───╯
+
+error: aborting due to 1 error

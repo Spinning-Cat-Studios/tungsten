@@ -1,0 +1,173 @@
+// src/compiler/driver/modules/info.tg
+// ModuleItemNames and ModuleInfo types for the driver.
+//
+// Tracks which types, values, and constructors belong to which modules.
+// Note: This is separate from elab::env::ModuleContents which has richer type info.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option, Some, None, list_append};
+use parser::ast::common::{Visibility};
+use driver::modules::path::{ModulePath, module_path_eq};
+
+// ===========================================================================
+// MODULE ITEM NAMES
+// ===========================================================================
+
+/// Item names registered for a module (types, values, constructors).
+/// This is a simpler structure than elab::env::ModuleContents - just names.
+pub type ModuleItemNames = {
+    types: List<String>,
+    values: List<String>,
+    constructors: List<String>
+}
+
+/// Create empty module item names.
+pub fn module_item_names_empty() -> ModuleItemNames {
+    { types: Nil, values: Nil, constructors: Nil }
+}
+
+/// Add a type to module item names.
+pub fn module_item_names_add_type(mc: ModuleItemNames, name: String) -> ModuleItemNames {
+    { types: Cons(name, mc.types), values: mc.values, constructors: mc.constructors }
+}
+
+/// Add a value to module item names.
+pub fn module_item_names_add_value(mc: ModuleItemNames, name: String) -> ModuleItemNames {
+    { types: mc.types, values: Cons(name, mc.values), constructors: mc.constructors }
+}
+
+/// Add a constructor to module item names.
+pub fn module_item_names_add_ctor(mc: ModuleItemNames, name: String) -> ModuleItemNames {
+    { types: mc.types, values: mc.values, constructors: Cons(name, mc.constructors) }
+}
+
+// ===========================================================================
+// MODULE INFO
+// ===========================================================================
+
+/// Module visibility entry: (module_path, visibility, parent_module).
+pub type VisibilityEntry = (ModulePath, Visibility, Option<ModulePath>)
+
+/// Module file entry: (module_path, file_path).
+pub type ModuleFileEntry = (ModulePath, String)
+
+/// Item module entry: (item_name, module_path).
+pub type ItemModuleEntry = (String, ModulePath)
+
+/// Module registry entry: (module_path, contents).
+pub type ModuleRegistryEntry = (ModulePath, ModuleItemNames)
+
+/// Information about modules for the elaborator.
+pub type ModuleInfo = {
+    /// Module registry: maps module paths to their contents
+    modules: List<ModuleRegistryEntry>,
+    /// Item to module mapping: item name → module path
+    item_modules: List<ItemModuleEntry>,
+    /// Module visibility: maps module paths to (visibility, parent_module)
+    module_visibility: List<VisibilityEntry>,
+    /// Module to file path mapping: module path → source file path
+    module_files: List<ModuleFileEntry>
+}
+
+/// Create empty module info.
+pub fn module_info_empty() -> ModuleInfo {
+    {
+        modules: Nil,
+        item_modules: Nil,
+        module_visibility: Nil,
+        module_files: Nil
+    }
+}
+
+/// Register a module in the info.
+pub fn module_info_register_module(
+    info: ModuleInfo,
+    path: ModulePath,
+    contents: ModuleItemNames,
+    visibility: Visibility,
+    parent: Option<ModulePath>,
+    file_path: String
+) -> ModuleInfo {
+    {
+        modules: Cons((path, contents), info.modules),
+        item_modules: info.item_modules,
+        module_visibility: Cons((path, visibility, parent), info.module_visibility),
+        module_files: Cons((path, file_path), info.module_files)
+    }
+}
+
+/// Register an item in the info.
+pub fn module_info_register_item(
+    info: ModuleInfo,
+    item_name: String,
+    module_path: ModulePath
+) -> ModuleInfo {
+    {
+        modules: info.modules,
+        item_modules: Cons((item_name, module_path), info.item_modules),
+        module_visibility: info.module_visibility,
+        module_files: info.module_files
+    }
+}
+
+/// Get module contents for a path.
+pub fn module_info_get_module(info: ModuleInfo, path: ModulePath) -> Option<ModuleItemNames> {
+    module_info_get_module_loop(info.modules, path)
+}
+
+fn module_info_get_module_loop(
+    modules: List<ModuleRegistryEntry>,
+    path: ModulePath
+) -> Option<ModuleItemNames> {
+    match modules {
+        Nil() => None,
+        Cons(entry, rest) =>
+            let (p, contents) = entry;
+            if module_path_eq(p, path) {
+                Some(contents)
+            } else {
+                module_info_get_module_loop(rest, path)
+            }
+    }
+}
+
+/// Update module contents in info.
+pub fn module_info_update_contents(
+    info: ModuleInfo,
+    path: ModulePath,
+    contents: ModuleItemNames
+) -> ModuleInfo {
+    {
+        modules: update_module_contents_loop(info.modules, path, contents),
+        item_modules: info.item_modules,
+        module_visibility: info.module_visibility,
+        module_files: info.module_files
+    }
+}
+
+fn update_module_contents_loop(
+    modules: List<ModuleRegistryEntry>,
+    path: ModulePath,
+    new_contents: ModuleItemNames
+) -> List<ModuleRegistryEntry> {
+    match modules {
+        Nil() => Nil,
+        Cons(entry, rest) =>
+            let (p, contents) = entry;
+            if module_path_eq(p, path) {
+                Cons((p, new_contents), rest)
+            } else {
+                Cons((p, contents), update_module_contents_loop(rest, path, new_contents))
+            }
+    }
+}
+
+/// Merge two ModuleInfo structures.
+pub fn merge_module_info(base: ModuleInfo, other: ModuleInfo) -> ModuleInfo {
+    {
+        modules: list_append(base.modules, other.modules),
+        item_modules: list_append(base.item_modules, other.item_modules),
+        module_visibility: list_append(base.module_visibility, other.module_visibility),
+        module_files: list_append(base.module_files, other.module_files)
+    }
+}

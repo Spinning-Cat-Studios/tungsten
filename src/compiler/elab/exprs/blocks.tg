@@ -1,0 +1,680 @@
+// src/compiler/elab/exprs/blocks.tg
+// Block and statement elaboration.
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr,
+    MaybeExpr, NoExpr, SomeExpr,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    Stmt, StmtLet, StmtExpr, StmtItem,
+    Pattern, PatTuple, PatVar, PatWildcard,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_unit, tg_term_var, tg_term_let, tg_term_fst, tg_term_snd,
+    tg_type_unit,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_types_equal, tg_string_to_cstr
+};
+use elab::env::{Env, env_push_scope, env_pop_scope, env_bind_local};
+use elab::types::{elab_type, ElabTypeOk, ElabTypeErr};
+use elab::exprs::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, type_error_to_expr_error, pattern_to_name, pattern_get_span,
+    add_expected_because
+};
+use elab::error::ExpLetAnnotation;
+use elab::cir::{
+    CodegenIR, CodegenType, 
+    CIRUnit, CIRLet, CIRVar, CIRFst, CIRSnd,
+    CIRStmtLet, CIRStmtExpr, CIRStmtList,
+    ElabStmtInfo, ElabStmtLetInfo, ElabStmtExprInfo, ElabStmtSkip,
+    ct_unit
+};
+
+// Import synth/check from parent module for mutual recursion
+use elab::exprs::{synth, check};
+
+// ===========================================================================
+// BLOCK ELABORATION
+// ===========================================================================
+
+/// Synthesize a block expression.
+pub fn synth_block(
+    env: Env,
+    stmts: List<Stmt>,
+    final_expr: MaybeExpr,
+    span: Span
+) -> ElabExprResult {
+    // Push scope for block
+    let env2 = env_push_scope(env);
+    
+    match final_expr {
+        NoExpr() =>
+            // Block with no final expression returns Unit
+            // Elaborate all statements, collecting their CIR
+            match elab_stmts_collecting(env2, stmts, span) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env3, _, _, _) =>
+                    // Build the CIR chain
+                    let result_cir = build_cir_from_collected(env2, stmts, CIRUnit(), span);
+                    let env4 = env_pop_scope(env3);
+                    ElabExprOk(env4, tg_term_unit(), tg_type_unit(), result_cir)
+            },
+        SomeExpr(e) =>
+            // Elaborate statements forward, collecting CIR
+            match elab_stmts_collecting(env2, stmts, span) {
+                ElabExprErr(err) => ElabExprErr(err),
+                ElabExprOk(env3, _, _, stmts_cir) =>
+                    // Now elaborate final expression with accumulated env
+                    match synth(env3, e) {
+                        ElabExprErr(err) => ElabExprErr(err),
+                        ElabExprOk(env4, term, ty, final_cir) =>
+                            // Build CIR chain wrapping final_cir
+                            let result_cir = wrap_in_cir_chain(stmts_cir, final_cir);
+                            let env5 = env_pop_scope(env4);
+                            ElabExprOk(env5, term, ty, result_cir)
+                    }
+            }
+    }
+}
+
+/// Check a block against expected type.
+pub fn check_block(
+    env: Env,
+    stmts: List<Stmt>,
+    final_expr: MaybeExpr,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    let env2 = env_push_scope(env);
+    
+    match final_expr {
+        NoExpr() => {
+            // Check Unit against expected
+            let unit_ty = tg_type_unit();
+            if tg_types_equal(unit_ty, expected) {
+                match elab_stmts_collecting(env2, stmts, span) {
+                    ElabExprErr(e) => ElabExprErr(e),
+                    ElabExprOk(env3, _, _, stmts_cir) =>
+                        let result_cir = wrap_in_cir_chain(stmts_cir, CIRUnit());
+                        let env4 = env_pop_scope(env3);
+                        ElabExprOk(env4, tg_term_unit(), unit_ty, result_cir)
+                }
+            } else {
+                ElabExprErr(elab_expr_error(
+                    "block has no final expression but expected non-Unit type",
+                    span
+                ))
+            }
+        },
+        SomeExpr(e) =>
+            // Elaborate statements forward, collecting CIR
+            match elab_stmts_collecting(env2, stmts, span) {
+                ElabExprErr(err) => ElabExprErr(err),
+                ElabExprOk(env3, _, _, stmts_cir) =>
+                    match check(env3, e, expected) {
+                        ElabExprErr(err) => ElabExprErr(err),
+                        ElabExprOk(env4, term, ty, final_cir) =>
+                            let result_cir = wrap_in_cir_chain(stmts_cir, final_cir);
+                            let env5 = env_pop_scope(env4);
+                            ElabExprOk(env5, term, ty, result_cir)
+                    }
+            }
+    }
+}
+
+// ===========================================================================
+// STATEMENT ELABORATION
+// ===========================================================================
+
+/// Elaborate statements forward, collecting their CIR info.
+/// Returns (final_env, _, _, collected_info_list).
+/// The collected info is in FORWARD order (first stmt first).
+fn elab_stmts_collecting(env: Env, stmts: List<Stmt>, span: Span) -> ElabExprResult {
+    elab_stmts_collecting_aux(env, stmts, Nil(), span)
+}
+
+/// Helper that accumulates collected CIR info in reverse order.
+fn elab_stmts_collecting_aux(
+    env: Env,
+    stmts: List<Stmt>,
+    acc: List<ElabStmtInfo>,
+    span: Span
+) -> ElabExprResult {
+    match stmts {
+        Nil() =>
+            // Return with CIR list wrapped in dummy (we thread through CodegenIR field)
+            ElabExprOk(env, tg_term_unit(), tg_type_unit(), CIRStmtList(list_reverse_stmt_info(acc))),
+        Cons(stmt, rest) =>
+            match elab_stmt_collecting(env, stmt, span) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, _, _, info_cir) =>
+                    let info = cir_to_stmt_info(info_cir);
+                    elab_stmts_collecting_aux(env2, rest, Cons(info, acc), span)
+            }
+    }
+}
+
+/// Elaborate a single statement, returning its CIR info.
+fn elab_stmt_collecting(env: Env, stmt: Stmt, block_span: Span) -> ElabExprResult {
+    match stmt {
+        StmtLet(pat, ty_annot, rhs, span) =>
+            match pat {
+                PatTuple(sub_pats, pat_span) =>
+                    elab_stmt_tuple_collecting(env, sub_pats, ty_annot, rhs, span),
+                _ => {
+                    let name = pattern_to_name(pat);
+                    match ty_annot {
+                        SomeTypeExpr(ty_expr) =>
+                            let annot_span = span;
+                            match elab_type(env, ty_expr) {
+                                ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+                                ElabTypeOk(expected_ty, expected_ct) =>
+                                    match check(env, rhs, expected_ty) {
+                                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpLetAnnotation(annot_span))),
+                                        ElabExprOk(env2, term, ty, cir) => {
+                                            let env3 = env_bind_local(env2, name, ty);
+                                            ElabExprOk(env3, term, ty, CIRStmtLet(name, expected_ct, cir))
+                                        }
+                                    }
+                            },
+                        NoTypeExpr() =>
+                            match synth(env, rhs) {
+                                ElabExprErr(e) => ElabExprErr(e),
+                                ElabExprOk(env2, term, ty, cir) => {
+                                    let env3 = env_bind_local(env2, name, ty);
+                                    ElabExprOk(env3, term, ty, CIRStmtLet(name, ct_unit(), cir))
+                                }
+                            }
+                    }
+                }
+            },
+        
+        StmtExpr(e, span) =>
+            match synth(env, e) {
+                ElabExprErr(err) => ElabExprErr(err),
+                ElabExprOk(env2, _, _, expr_cir) =>
+                    ElabExprOk(env2, tg_term_unit(), tg_type_unit(), CIRStmtExpr(expr_cir))
+            },
+        
+        StmtItem(item) =>
+            ElabExprErr(elab_expr_error(
+                "nested items not yet implemented (3C-6)",
+                block_span
+            ))
+    }
+}
+
+/// Elaborate tuple pattern in let statement, collecting CIR.
+fn elab_stmt_tuple_collecting(
+    env: Env,
+    sub_pats: List<Pattern>,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    span: Span
+) -> ElabExprResult {
+    // Type annotations not supported on tuple patterns
+    match ty_annot {
+        SomeTypeExpr(_) =>
+            ElabExprErr(elab_expr_error(
+                "type annotations not supported on tuple patterns",
+                span
+            )),
+        NoTypeExpr() =>
+            match synth(env, rhs) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, term, ty, cir) => {
+                    // Bind all tuple element variables to the environment
+                    let env3 = bind_tuple_pattern_to_env(env2, sub_pats, ty);
+                    // For tuple patterns, we use a special CIR representation
+                    // that will be expanded by wrap_in_cir_chain later
+                    // For now, use Skip as tuple patterns need more complex handling
+                    ElabExprOk(env3, term, ty, CIRStmtExpr(cir))
+                }
+            }
+    }
+}
+
+/// Convert CIR marker to stmt info.
+fn cir_to_stmt_info(cir: CodegenIR) -> ElabStmtInfo {
+    match cir {
+        CIRStmtLet(name, ct, inner) => ElabStmtLetInfo(name, ct, inner),
+        CIRStmtExpr(inner) => ElabStmtExprInfo(inner),
+        _ => ElabStmtSkip()
+    }
+}
+
+/// Reverse a list of stmt infos.
+fn list_reverse_stmt_info(list: List<ElabStmtInfo>) -> List<ElabStmtInfo> {
+    list_reverse_stmt_info_aux(list, Nil())
+}
+
+fn list_reverse_stmt_info_aux(list: List<ElabStmtInfo>, acc: List<ElabStmtInfo>) -> List<ElabStmtInfo> {
+    match list {
+        Nil() => acc,
+        Cons(h, t) => list_reverse_stmt_info_aux(t, Cons(h, acc))
+    }
+}
+
+/// Wrap body CIR in the collected stmt chain.
+fn wrap_in_cir_chain(stmts_cir: CodegenIR, body: CodegenIR) -> CodegenIR {
+    match stmts_cir {
+        CIRStmtList(infos) => wrap_in_cir_chain_aux(infos, body),
+        _ => body  // No statements
+    }
+}
+
+fn wrap_in_cir_chain_aux(infos: List<ElabStmtInfo>, body: CodegenIR) -> CodegenIR {
+    match infos {
+        Nil() => body,
+        Cons(info, rest) =>
+            let inner = wrap_in_cir_chain_aux(rest, body);
+            match info {
+                ElabStmtLetInfo(name, ct, rhs_cir) => CIRLet(name, ct, rhs_cir, inner),
+                ElabStmtExprInfo(expr_cir) => CIRLet("_", ct_unit(), expr_cir, inner),
+                ElabStmtSkip() => inner
+            }
+    }
+}
+
+/// Build CIR from collected stmts (legacy helper, kept for compat).
+fn build_cir_from_collected(env: Env, stmts: List<Stmt>, body: CodegenIR, span: Span) -> CodegenIR {
+    body  // Placeholder - not used in new flow
+}
+
+// Legacy functions kept for tuple handling
+
+/// Elaborate a list of statements just for environment updates.
+/// Returns dummy CIR - use build_stmt_cir_chain to construct the actual CIR.
+fn elab_stmts_for_env(env: Env, stmts: List<Stmt>, span: Span) -> ElabExprResult {
+    match stmts {
+        Nil() =>
+            // No statements - return dummy
+            ElabExprOk(env, tg_term_unit(), tg_type_unit(), CIRUnit()),
+        Cons(stmt, rest) =>
+            match elab_stmt_for_env(env, stmt, span) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, _, _, _) => elab_stmts_for_env(env2, rest, span)
+            }
+    }
+}
+
+/// Elaborate statements and wrap body_cir in CIRLet chain.
+fn elab_stmts_with_body(
+    env: Env,
+    stmts: List<Stmt>,
+    body_cir: CodegenIR,
+    body_term: TermHandle,
+    body_ty: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match stmts {
+        Nil() =>
+            // No statements - just return body
+            ElabExprOk(env, body_term, body_ty, body_cir),
+        Cons(stmt, rest) =>
+            // First elaborate remaining stmts with body, then wrap in this stmt's let
+            match elab_stmts_with_body(env, rest, body_cir, body_term, body_ty, span) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, inner_term, inner_ty, inner_cir) =>
+                    wrap_stmt_cir(env2, stmt, inner_cir, inner_term, inner_ty, span)
+            }
+    }
+}
+
+/// Build CIR let-chain for statements wrapping a final expression CIR.
+fn build_stmt_cir_chain(
+    env: Env,
+    stmts: List<Stmt>,
+    final_cir: CodegenIR,
+    final_term: TermHandle,
+    final_ty: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    elab_stmts_with_body(env, stmts, final_cir, final_term, final_ty, span)
+}
+
+/// Elaborate a statement just for environment updates (no CIR building).
+fn elab_stmt_for_env(env: Env, stmt: Stmt, block_span: Span) -> ElabExprResult {
+    match stmt {
+        StmtLet(pat, ty_annot, rhs, span) =>
+            // Check for tuple pattern - handle specially
+            match pat {
+                PatTuple(sub_pats, pat_span) =>
+                    elab_stmt_tuple_for_env(env, sub_pats, ty_annot, rhs, span),
+                _ => {
+                    // Simple pattern (variable or wildcard)
+                    let name = pattern_to_name(pat);
+                    match ty_annot {
+                        SomeTypeExpr(ty_expr) =>
+                            let annot_span = span;
+                            match elab_type(env, ty_expr) {
+                                ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+                                ElabTypeOk(expected_ty, _) =>
+                                    match check(env, rhs, expected_ty) {
+                                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpLetAnnotation(annot_span))),
+                                        ElabExprOk(env2, term, ty, cir) => {
+                                            let env3 = env_bind_local(env2, name, ty);
+                                            ElabExprOk(env3, term, ty, cir)
+                                        }
+                                    }
+                            },
+                        NoTypeExpr() =>
+                            match synth(env, rhs) {
+                                ElabExprErr(e) => ElabExprErr(e),
+                                ElabExprOk(env2, term, ty, cir) => {
+                                    let env3 = env_bind_local(env2, name, ty);
+                                    ElabExprOk(env3, term, ty, cir)
+                                }
+                            }
+                    }
+                }
+            },
+        
+        StmtExpr(e, span) =>
+            // Expression statement - elaborate for effect
+            synth(env, e),
+        
+        StmtItem(item) =>
+            // Nested item - defer to item elaboration (3C-6)
+            ElabExprErr(elab_expr_error(
+                "nested items not yet implemented (3C-6)",
+                block_span
+            ))
+    }
+}
+
+/// Elaborate tuple pattern in let statement for environment updates.
+fn elab_stmt_tuple_for_env(
+    env: Env,
+    sub_pats: List<Pattern>,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    span: Span
+) -> ElabExprResult {
+    // Type annotations not supported on tuple patterns
+    match ty_annot {
+        SomeTypeExpr(_) =>
+            ElabExprErr(elab_expr_error(
+                "type annotations not supported on tuple patterns",
+                span
+            )),
+        NoTypeExpr() =>
+            match synth(env, rhs) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, term, ty, cir) =>
+                    // Bind all tuple element variables to the environment
+                    let env3 = bind_tuple_pattern_to_env(env2, sub_pats, ty);
+                    ElabExprOk(env3, term, ty, cir)
+            }
+    }
+}
+
+/// Bind variables from a tuple pattern to the environment.
+fn bind_tuple_pattern_to_env(env: Env, pats: List<Pattern>, ty: TypeHandle) -> Env {
+    match pats {
+        Nil() => env,
+        Cons(p, rest) =>
+            let pat_name = pattern_to_name(p);
+            // Get type of this element
+            let is_prod = tg_type_is_product(ty);
+            let elem_ty = if is_prod {
+                tg_type_get_product_left(ty)
+            } else {
+                ty  // Last element (or non-product type)
+            };
+            // Get type of remaining elements
+            let rest_ty = if is_prod {
+                tg_type_get_product_right(ty)
+            } else {
+                tg_type_unit()  // No more elements
+            };
+            
+            // Bind this element
+            let env2 = bind_single_pattern_to_env(env, p, elem_ty);
+            
+            // Continue with rest
+            bind_tuple_pattern_to_env(env2, rest, rest_ty)
+    }
+}
+
+/// Bind a single pattern element to the environment.
+fn bind_single_pattern_to_env(env: Env, p: Pattern, ty: TypeHandle) -> Env {
+    match p {
+        PatVar(id) =>
+            let name = ident_name(id);
+            env_bind_local(env, name, ty),
+        PatWildcard(_) =>
+            env,  // Wildcards don't bind
+        PatTuple(sub_pats, _) =>
+            // Nested tuple - recursively bind
+            bind_tuple_pattern_to_env(env, sub_pats, ty),
+        _ =>
+            env  // Other patterns not supported in let
+    }
+}
+
+/// Wrap inner CIR in a let-binding for this statement.
+fn wrap_stmt_cir(
+    env: Env,
+    stmt: Stmt,
+    inner_cir: CodegenIR,
+    inner_term: TermHandle,
+    inner_ty: TypeHandle,
+    block_span: Span
+) -> ElabExprResult {
+    match stmt {
+        StmtLet(pat, ty_annot, rhs, span) =>
+            // Check for tuple pattern - handle specially
+            match pat {
+                PatTuple(sub_pats, pat_span) =>
+                    wrap_stmt_tuple_cir(env, sub_pats, ty_annot, rhs, inner_cir, inner_term, inner_ty, span),
+                _ =>
+                    // Simple pattern (variable or wildcard)
+                    let name = pattern_to_name(pat);
+                    match ty_annot {
+                        SomeTypeExpr(ty_expr) =>
+                            let annot_span = span;
+                            match elab_type(env, ty_expr) {
+                                ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+                                ElabTypeOk(expected_ty, expected_ct) =>
+                                    match check(env, rhs, expected_ty) {
+                                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpLetAnnotation(annot_span))),
+                                        ElabExprOk(env2, term, ty, rhs_cir) =>
+                                            let env3 = env_bind_local(env2, name, ty);
+                                            let let_cir = CIRLet(name, expected_ct, rhs_cir, inner_cir);
+                                            ElabExprOk(env3, inner_term, inner_ty, let_cir)
+                                    }
+                            },
+                        NoTypeExpr() =>
+                            match synth(env, rhs) {
+                                ElabExprErr(e) => ElabExprErr(e),
+                                ElabExprOk(env2, term, ty, rhs_cir) =>
+                                    let env3 = env_bind_local(env2, name, ty);
+                                    let let_cir = CIRLet(name, ct_unit(), rhs_cir, inner_cir);
+                                    ElabExprOk(env3, inner_term, inner_ty, let_cir)
+                            }
+                    }
+            },
+        
+        StmtExpr(e, span) =>
+            // Expression statement - elaborate and wrap as let _ = e in body
+            match synth(env, e) {
+                ElabExprErr(err) => ElabExprErr(err),
+                ElabExprOk(env2, _, _, expr_cir) =>
+                    // Use _ as the name for discarded expressions
+                    let let_cir = CIRLet("_", ct_unit(), expr_cir, inner_cir);
+                    ElabExprOk(env2, inner_term, inner_ty, let_cir)
+            },
+        
+        StmtItem(item) =>
+            ElabExprErr(elab_expr_error(
+                "nested items not yet implemented (3C-6)",
+                block_span
+            ))
+    }
+}
+
+/// Wrap inner CIR with tuple pattern destructuring.
+/// 
+/// Desugars `let (a, b) = expr` to:
+///   let __tup = expr;
+///   let a = fst(__tup);
+///   let b = snd(__tup);
+///   inner
+fn wrap_stmt_tuple_cir(
+    env: Env,
+    sub_pats: List<Pattern>,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    inner_cir: CodegenIR,
+    inner_term: TermHandle,
+    inner_ty: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    // Type annotations not supported on tuple patterns
+    match ty_annot {
+        SomeTypeExpr(_) =>
+            ElabExprErr(elab_expr_error(
+                "type annotations not supported on tuple patterns",
+                span
+            )),
+        NoTypeExpr() =>
+            match synth(env, rhs) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, term, ty, rhs_cir) =>
+                    // Generate fresh name for the tuple temp
+                    let tup_name = "__tup";
+                    
+                    // Build the projection CIR chain
+                    let projected_cir = build_tuple_projection_cir(
+                        sub_pats, ty, CIRVar(tup_name), inner_cir
+                    );
+                    
+                    // Wrap with the initial tuple binding
+                    let outer_cir = CIRLet(tup_name, ct_unit(), rhs_cir, projected_cir);
+                    
+                    // Update environment with all bindings
+                    let env3 = bind_tuple_pattern_to_env(env2, sub_pats, ty);
+                    
+                    ElabExprOk(env3, inner_term, inner_ty, outer_cir)
+            }
+    }
+}
+
+/// Build CIR let chain for tuple pattern projections.
+/// 
+/// For pattern (a, b) and tuple temp __tup:
+///   CIRLet("a", CIRFst(CIRVar("__tup")),
+///     CIRLet("b", CIRSnd(CIRVar("__tup")),
+///       inner))
+fn build_tuple_projection_cir(
+    pats: List<Pattern>,
+    ty: TypeHandle,
+    base_cir: CodegenIR,
+    inner_cir: CodegenIR
+) -> CodegenIR {
+    build_tuple_projection_cir_aux(pats, ty, base_cir, inner_cir, 0)
+}
+
+/// Helper for building projection CIR with index tracking.
+fn build_tuple_projection_cir_aux(
+    pats: List<Pattern>,
+    ty: TypeHandle,
+    base_cir: CodegenIR,
+    inner_cir: CodegenIR,
+    depth: Nat
+) -> CodegenIR {
+    match pats {
+        Nil() => inner_cir,
+        Cons(p, rest) =>
+            // Get type of this element
+            let elem_ty = if tg_type_is_product(ty) {
+                tg_type_get_product_left(ty)
+            } else {
+                ty
+            };
+            // Get type of remaining elements
+            let rest_ty = if tg_type_is_product(ty) {
+                tg_type_get_product_right(ty)
+            } else {
+                tg_type_unit()
+            };
+            
+            // Build projection to this element
+            let proj_cir = build_index_projection_cir(base_cir, depth);
+            
+            // Check if there are more elements
+            let has_rest = match rest { Nil() => false, _ => true };
+            
+            // For intermediate elements, the next element projects from snd
+            let next_base = if has_rest {
+                build_index_projection_cir_snd(base_cir, depth)
+            } else {
+                base_cir
+            };
+            
+            // Build inner CIR for remaining patterns
+            let rest_cir = build_tuple_projection_cir_aux(rest, rest_ty, next_base, inner_cir, 0);
+            
+            // Wrap with binding for this element
+            build_pattern_binding_cir(p, elem_ty, proj_cir, rest_cir)
+    }
+}
+
+/// Build CIR binding for a single pattern element.
+fn build_pattern_binding_cir(
+    p: Pattern,
+    ty: TypeHandle,
+    value_cir: CodegenIR,
+    inner_cir: CodegenIR
+) -> CodegenIR {
+    match p {
+        PatVar(id) =>
+            let name = ident_name(id);
+            CIRLet(name, ct_unit(), value_cir, inner_cir),
+        PatWildcard(_) =>
+            // Wildcard - still evaluate but discard
+            CIRLet("_", ct_unit(), value_cir, inner_cir),
+        PatTuple(sub_pats, _) =>
+            // Nested tuple - generate temp and project
+            let tup_name = "__tup_nested";
+            let projected = build_tuple_projection_cir(sub_pats, ty, CIRVar(tup_name), inner_cir);
+            CIRLet(tup_name, ct_unit(), value_cir, projected),
+        _ =>
+            // Other patterns - just discard (shouldn't happen in valid code)
+            CIRLet("_", ct_unit(), value_cir, inner_cir)
+    }
+}
+
+/// Build projection CIR to access element at index in tuple.
+/// Index 0: fst(base)
+/// Index > 0: fst(snd^n(base))
+fn build_index_projection_cir(base: CodegenIR, index: Nat) -> CodegenIR {
+    if index == 0 {
+        CIRFst(base)
+    } else {
+        CIRFst(build_snd_chain(base, index))
+    }
+}
+
+/// Build snd chain to skip to position in nested tuple.
+fn build_snd_chain(base: CodegenIR, count: Nat) -> CodegenIR {
+    if count == 0 {
+        base
+    } else {
+        build_snd_chain(CIRSnd(base), count - 1)
+    }
+}
+
+/// Build projection CIR for the "rest" of tuple (snd^n(base)).
+fn build_index_projection_cir_snd(base: CodegenIR, index: Nat) -> CodegenIR {
+    if index == 0 {
+        CIRSnd(base)
+    } else {
+        build_snd_chain(CIRSnd(base), index)
+    }
+}

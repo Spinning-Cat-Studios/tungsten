@@ -1,0 +1,60 @@
+// Test: Catch-all patterns (wildcard and variable) as final match arm
+// This is the E9999 fix - no longer require all arms to be constructor patterns.
+
+// Token kind enum with many variants
+type TokenKind = 
+    TokEof 
+  | TokIdent 
+  | TokNumber 
+  | TokString 
+  | TokPlus 
+  | TokMinus 
+  | TokStar
+
+// Wildcard catch-all: match one specific case, wildcard for rest
+fn is_eof(kind: TokenKind) -> Bool {
+    match kind {
+        TokEof() => true,
+        _ => false,
+    }
+}
+
+fn is_operator(kind: TokenKind) -> Bool {
+    match kind {
+        TokPlus() => true,
+        TokMinus() => true,
+        TokStar() => true,
+        _ => false,
+    }
+}
+
+// Variable catch-all with binding
+fn describe_kind(kind: TokenKind) -> Nat {
+    match kind {
+        TokEof() => 0,
+        TokIdent() => 1,
+        other => 99,  // All other kinds return 99
+    }
+}
+
+// Single arm catch-all was removed because it goes through a different code path
+// that doesn't support single-arm matches. The catch-all works when there are
+// explicit constructor arms before it.
+
+// Mixed: some constructors + wildcard
+fn is_literal(kind: TokenKind) -> Bool {
+    match kind {
+        TokNumber() => true,
+        TokString() => true,
+        _ => false,
+    }
+}
+
+// Direct test in main - returns 99 if catch-all works
+fn main() -> Nat {
+    let kind = TokIdent();
+    match kind {
+        TokEof() => 1,
+        _ => 99,  // Catch-all should match TokIdent
+    }
+}
