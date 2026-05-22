@@ -1,0 +1,83 @@
+// src/compiler/elab/exprs/control/try_block.tg
+// Elaboration of `try { body }` expressions (ADR 15.5.26d).
+//
+// `try { body }` desugars to:
+//   1. Set return context to Result<T, E> (via TryBlockTypeHandle, so `return` is rejected)
+//   2. Elaborate body checking against T
+//   3. Wrap result in Ok (Inl for Result, since Result = Ok(T) | Err(E) and Ok is index 0 = left)
+//
+// Sum encoding note (ADR 19.5.26d §P3): L2's Result<T, E> = Ok(T) | Err(E)
+// encodes as Sum(T, E). Ok is at source-order index 0, which maps to Inl
+// (left side of Sum). This hardcodes Ok=left; for dynamic index lookup see
+// try_expr.tg. Adding new module imports here triggers latent tungsten1
+// elaboration-ordering bugs, so we keep imports minimal.
+//
+// In synth mode, try blocks cannot infer — they need a type annotation.
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_inl, tg_term_fold,
+    tg_type_is_mu, tg_type_get_mu_var, tg_type_get_mu_body,
+    tg_type_is_sum, tg_type_get_sum_left,
+    tg_type_substitute
+};
+use elab::env::{
+    Env, env_set_try_block_return_type
+};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error
+};
+use elab::exprs::{check};
+use elab::cir::{CodegenIR, CIRUnit};
+
+/// Synthesize `try { body }` — always errors, needs type annotation.
+pub fn synth_try_block(env: Env, body: Expr, span: Span) -> ElabExprResult {
+    ElabExprErr(elab_expr_error(
+        "cannot infer type of `try` block; add a type annotation (e.g., `let x: Result<T, E> = try { ... }`)",
+        span
+    ))
+}
+
+/// Check `try { body }` against an expected Result<T, E> type.
+pub fn check_try_block(env: Env, body: Expr, expected: TypeHandle, span: Span) -> ElabExprResult {
+    // Unfold mu if needed to get the Sum type
+    let unfolded = if tg_type_is_mu(expected) {
+        let mu_var = tg_type_get_mu_var(expected);
+        let mu_body = tg_type_get_mu_body(expected);
+        tg_type_substitute(mu_body, mu_var, expected)
+    } else {
+        expected
+    };
+
+    // Check it's a Sum type (Result = Sum(T, E) where Ok=left, Err=right)
+    if tg_type_is_sum(unfolded) {
+        let success_ty = tg_type_get_sum_left(unfolded);
+
+        // Set return context to the Result type so ? works inside.
+        // Use TryBlockTypeHandle so that `return` is rejected.
+        let env2 = env_set_try_block_return_type(env, expected);
+
+        // Elaborate body checking against the success type T
+        match check(env2, body, success_ty) {
+            ElabExprErr(e) => ElabExprErr(e),
+            ElabExprOk(env3, body_term, body_ty, body_cir) =>
+                // Wrap in Ok (Inl for Result<T, E> where Ok is index 0)
+                let ok_term = tg_term_inl(unfolded, body_term);
+                // Fold back into mu if the expected type is recursive
+                let final_term = if tg_type_is_mu(expected) {
+                    tg_term_fold(expected, ok_term)
+                } else {
+                    ok_term
+                };
+                ElabExprOk(env3, final_term, expected, CIRUnit)
+        }
+    } else {
+        ElabExprErr(elab_expr_error(
+            "`try` block requires Result type annotation",
+            span
+        ))
+    }
+}

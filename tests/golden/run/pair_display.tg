@@ -1,0 +1,6 @@
+// W1 regression test: Pair/tuple display
+// Verifies that pair values display as (a, b)
+
+pub fn main() -> (Nat, Nat) {
+    (1, 2)
+}

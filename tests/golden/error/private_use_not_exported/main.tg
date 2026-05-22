@@ -1,0 +1,12 @@
+// Test: private use does not leak to downstream modules.
+// Importing secret_fn from middle should fail because middle only has
+// a private `use`, not `pub use`.
+
+pub mod source;
+pub mod middle;
+
+use middle::secret_fn;
+
+fn main() -> Nat {
+    secret_fn()
+}

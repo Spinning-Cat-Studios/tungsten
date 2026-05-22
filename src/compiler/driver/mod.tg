@@ -24,40 +24,38 @@ pub mod modules;
 pub mod pipeline;
 
 // Re-export commonly used FFI wrappers
-pub use ffi::{
-    // File I/O
-    read_file, write_file, file_exists, is_directory, list_directory,
-    parent_directory, path_join,
-    // CLI
-    argc, argv, get_args,
-    // Console
-    print, println, eprintln,
-    // Process
-    process_exit,
-    // TTY
-    stdout_is_tty, stderr_is_tty,
-    // Types
+pub use driver::ffi::types::{
     FfiResult, FfiOk, FfiErr, List, Nil, Cons,
-    // Handle sentinel (Note: TermHandle is in elab::ffi)
-    invalid_handle,
-    // Evaluator
+    invalid_handle
+};
+pub use driver::ffi::io::{
+    read_file, write_file, file_exists, is_directory, list_directory,
+    parent_directory, path_join
+};
+pub use driver::ffi::process::{
+    argc, argv, get_args,
+    print, println, eprintln,
+    process_exit,
+    stdout_is_tty, stderr_is_tty
+};
+pub use driver::ffi::eval::{
     EvalEnvHandle, invalid_env_handle,
     eval_env_new, eval_env_add, eval_env_free,
     eval_run, eval_run_with_limit, eval_display, eval_display_value
 };
 
 // Re-export utility types
-pub use util::{Option, Some, None, Result, Ok, Err};
+pub use driver::util::{Option, Some, None, Result, Ok, Err};
 
 // Re-export CLI types and functions
-pub use cli::{
-    Command, CmdCheck, CmdRun, CmdCompile, CmdHelp, CmdVersion, CmdError,
-    CheckOpts, RunOpts, CompileOpts, CliError,
+pub use driver::cli::{
+    Command, CmdCheck, CmdRun, CmdCompile, CmdTest, CmdInfo, CmdExplain, CmdHelp, CmdVersion, CmdError,
+    CheckOpts, RunOpts, CompileOpts, TestOpts, InfoOpts, ExplainOpts, CliError,
     parse_args, print_help, print_version, print_error
 };
 
 // Re-export module resolution types and functions
-pub use modules::{
+pub use driver::modules::{
     // Path types
     ModulePath, module_path_root, module_path_new, module_path_single,
     module_path_child, module_path_parent, module_path_display,
@@ -77,12 +75,16 @@ pub use modules::{
 };
 
 // Re-export pipeline types and functions
-pub use pipeline::{
+pub use driver::pipeline::{
     // Result types
     PipelineResult, PipelineOk, PipelineErr,
     pipeline_ok, pipeline_exit_code,
     // Exit codes
     exit_success, exit_error, exit_io_error,
-    // Main entry points
-    dispatch_command, run_check, run_run, run_compile
+    // Main dispatch
+    dispatch_command
 };
+pub use driver::pipeline::check::run_check;
+pub use driver::pipeline::run::run_run;
+pub use driver::pipeline::compile::run_compile;
+pub use driver::pipeline::test::run_test;

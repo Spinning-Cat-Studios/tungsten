@@ -1,0 +1,6 @@
+// src/compiler/parser/items/shared/mod.tg
+// Shared helper parsers for item parsing.
+
+pub mod params;
+pub mod type_params;
+pub mod visibility;

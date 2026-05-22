@@ -1,0 +1,275 @@
+// src/compiler/parser/items/theorems.tg
+// Theorem, lemma, and axiom parsing.
+
+use lexer::token::{TokenKind, TokTheorem, TokLemma, TokAxiom, TokLBrace, TokRBrace, TokColon, TokArrow};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat, cursor_eat_ident, token_kind_name,
+    MaybeCursor, SomeCursor, NoCursor,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use driver::util::{Result, Ok, Err};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, Visibility};
+use parser::ast::nodes::{Item, ItemTheorem, ItemLemma, ItemAxiom, TypeExpr, type_expr_span, Expr, expr_span,
+    TypeParam, Param};
+use parser::items::shared::type_params::{parse_optional_type_params};
+use parser::items::shared::params::{parse_params};
+use parser::types::{parse_type};
+use parser::exprs::{parse_expr};
+use driver::ffi::{List};
+
+// ===========================================================================
+// SHARED CONTEXT — bundled invariant state for proof declaration pipelines
+// ===========================================================================
+
+/// Accumulated parser state shared across theorem/lemma/axiom steps.
+type ProofDeclCtx = {
+    name: Ident,
+    vis: Visibility,
+    start_span: Span,
+    type_params: List<TypeParam>,
+    params: List<Param>
+}
+
+// ===========================================================================
+// THEOREM PARSING
+// ===========================================================================
+
+/// Parse a theorem definition.
+///
+/// Grammar:
+///   Theorem = "theorem" IDENT TypeParams? Params ":" TypeExpr "{" Expr "}"
+pub fn parse_theorem(cur: Cursor, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    // Consume "theorem" keyword
+    let cur2 = cursor_advance(cur);
+    
+    // Parse theorem name
+    match cursor_eat_ident(cur2) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur2) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            Err(parse_error_expected("theorem name", found, cursor_peek_span(cur2)))
+        },
+        SomeIdentResult(name, cur3) => {
+            let name_span = cursor_peek_span(cur2);
+            parse_theorem_body(cur3, ident_new(name, name_span), vis, start_span)
+        }
+    }
+}
+
+/// Parse the body of a theorem (type params, params, return type, body).
+fn parse_theorem_body(cur: Cursor, name: Ident, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    let (type_params, cur2) = parse_optional_type_params(cur)?;
+    let (params, cur3) = parse_params(cur2)?;
+    let ctx: ProofDeclCtx = {
+        name: name, vis: vis, start_span: start_span,
+        type_params: type_params, params: params
+    };
+    parse_theorem_body_colon(ctx, cur3)
+}
+
+fn parse_theorem_body_colon(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    // Accept both `:` and `->` for the proposition type (L1/L2 parity)
+    match cursor_eat(cur, TokColon()) {
+        SomeCursor(cur2) => parse_theorem_body_type(ctx, cur2),
+        NoCursor() => match cursor_eat(cur, TokArrow()) {
+            SomeCursor(cur2) => parse_theorem_body_type(ctx, cur2),
+            NoCursor() => {
+                let found = match cursor_peek_kind(cur) {
+                    None() => "end of file",
+                    Some(k) => token_kind_name(k)
+                };
+                Err(parse_error_expected("':' or '->'", found, cursor_peek_span(cur)))
+            }
+        }
+    }
+}
+
+fn parse_theorem_body_type(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (prop_type, cur2) = parse_type(cur)?;
+    parse_theorem_body_open(ctx, prop_type, cur2)
+}
+
+fn parse_theorem_body_open(ctx: ProofDeclCtx, prop_type: TypeExpr, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokLBrace())?;
+    parse_theorem_body_expr(ctx, prop_type, cur2)
+}
+
+fn parse_theorem_body_expr(ctx: ProofDeclCtx, prop_type: TypeExpr, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (body, cur2) = parse_expr(cur)?;
+    parse_theorem_body_close(ctx, prop_type, body, cur2)
+}
+
+fn parse_theorem_body_close(ctx: ProofDeclCtx, prop_type: TypeExpr, body: Expr, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (end_tok, cur2) = cursor_expect(cur, TokRBrace())?;
+    let thm_def: TheoremDef = {
+        vis: ctx.vis,
+        name: ctx.name,
+        type_params: ctx.type_params,
+        params: ctx.params,
+        prop: prop_type,
+        body: body,
+        span: span_merge(ctx.start_span, end_tok.span)
+    };
+    Ok((ItemTheorem(thm_def), cur2))
+}
+
+// ===========================================================================
+// LEMMA PARSING
+// ===========================================================================
+
+/// Parse a lemma definition (same structure as theorem).
+///
+/// Grammar:
+///   Lemma = "lemma" IDENT TypeParams? Params ":" TypeExpr "{" Expr "}"
+pub fn parse_lemma(cur: Cursor, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    // Consume "lemma" keyword
+    let cur2 = cursor_advance(cur);
+    
+    // Parse lemma name
+    match cursor_eat_ident(cur2) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur2) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            Err(parse_error_expected("lemma name", found, cursor_peek_span(cur2)))
+        },
+        SomeIdentResult(name, cur3) => {
+            let name_span = cursor_peek_span(cur2);
+            parse_lemma_body(cur3, ident_new(name, name_span), vis, start_span)
+        }
+    }
+}
+
+/// Parse the body of a lemma.
+fn parse_lemma_body(cur: Cursor, name: Ident, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    let (type_params, cur2) = parse_optional_type_params(cur)?;
+    let (params, cur3) = parse_params(cur2)?;
+    let ctx: ProofDeclCtx = {
+        name: name, vis: vis, start_span: start_span,
+        type_params: type_params, params: params
+    };
+    parse_lemma_body_colon(ctx, cur3)
+}
+
+fn parse_lemma_body_colon(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    // Accept both `:` and `->` for the proposition type (L1/L2 parity)
+    match cursor_eat(cur, TokColon()) {
+        SomeCursor(cur2) => parse_lemma_body_type(ctx, cur2),
+        NoCursor() => match cursor_eat(cur, TokArrow()) {
+            SomeCursor(cur2) => parse_lemma_body_type(ctx, cur2),
+            NoCursor() => {
+                let found = match cursor_peek_kind(cur) {
+                    None() => "end of file",
+                    Some(k) => token_kind_name(k)
+                };
+                Err(parse_error_expected("':' or '->'", found, cursor_peek_span(cur)))
+            }
+        }
+    }
+}
+
+fn parse_lemma_body_type(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (prop_type, cur2) = parse_type(cur)?;
+    parse_lemma_body_open(ctx, prop_type, cur2)
+}
+
+fn parse_lemma_body_open(ctx: ProofDeclCtx, prop_type: TypeExpr, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokLBrace())?;
+    parse_lemma_body_expr(ctx, prop_type, cur2)
+}
+
+fn parse_lemma_body_expr(ctx: ProofDeclCtx, prop_type: TypeExpr, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (body, cur2) = parse_expr(cur)?;
+    parse_lemma_body_close(ctx, prop_type, body, cur2)
+}
+
+fn parse_lemma_body_close(ctx: ProofDeclCtx, prop_type: TypeExpr, body: Expr, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (end_tok, cur2) = cursor_expect(cur, TokRBrace())?;
+    let lem_def: TheoremDef = {
+        vis: ctx.vis,
+        name: ctx.name,
+        type_params: ctx.type_params,
+        params: ctx.params,
+        prop: prop_type,
+        body: body,
+        span: span_merge(ctx.start_span, end_tok.span)
+    };
+    Ok((ItemLemma(lem_def), cur2))
+}
+
+// ===========================================================================
+// AXIOM PARSING
+// ===========================================================================
+
+/// Parse an axiom definition.
+///
+/// Grammar:
+///   Axiom = "axiom" IDENT TypeParams? Params ":" TypeExpr
+///
+/// Note: Axioms have no body - they are assumed truths.
+pub fn parse_axiom(cur: Cursor, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    // Consume "axiom" keyword
+    let cur2 = cursor_advance(cur);
+    
+    // Parse axiom name
+    match cursor_eat_ident(cur2) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur2) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            Err(parse_error_expected("axiom name", found, cursor_peek_span(cur2)))
+        },
+        SomeIdentResult(name, cur3) => {
+            let name_span = cursor_peek_span(cur2);
+            parse_axiom_body(cur3, ident_new(name, name_span), vis, start_span)
+        }
+    }
+}
+
+/// Parse the body of an axiom.
+fn parse_axiom_body(cur: Cursor, name: Ident, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    let (type_params, cur2) = parse_optional_type_params(cur)?;
+    let (params, cur3) = parse_params(cur2)?;
+    let ctx: ProofDeclCtx = {
+        name: name, vis: vis, start_span: start_span,
+        type_params: type_params, params: params
+    };
+    parse_axiom_body_colon(ctx, cur3)
+}
+
+fn parse_axiom_body_colon(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    // Accept both `:` and `->` for the proposition type (L1/L2 parity)
+    match cursor_eat(cur, TokColon()) {
+        SomeCursor(cur2) => parse_axiom_body_type(ctx, cur2),
+        NoCursor() => match cursor_eat(cur, TokArrow()) {
+            SomeCursor(cur2) => parse_axiom_body_type(ctx, cur2),
+            NoCursor() => {
+                let found = match cursor_peek_kind(cur) {
+                    None() => "end of file",
+                    Some(k) => token_kind_name(k)
+                };
+                Err(parse_error_expected("':' or '->'", found, cursor_peek_span(cur)))
+            }
+        }
+    }
+}
+
+fn parse_axiom_body_type(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (prop_type, cur2) = parse_type(cur)?;
+    let end_span = type_expr_span(prop_type);
+    let ax_def: AxiomDef = {
+        vis: ctx.vis,
+        name: ctx.name,
+        type_params: ctx.type_params,
+        params: ctx.params,
+        prop: prop_type,
+        span: span_merge(ctx.start_span, end_span)
+    };
+    Ok((ItemAxiom(ax_def), cur2))
+}

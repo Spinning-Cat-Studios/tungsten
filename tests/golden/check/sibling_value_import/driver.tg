@@ -1,0 +1,7 @@
+// Driver module — imports from sibling 'lexer'.
+// This tests cross-branch value visibility (Phase A.5).
+use lexer::lex;
+
+pub fn run() -> Nat {
+    lex(41)
+}

@@ -1,0 +1,12 @@
+// Test: pub use re-exports make items available to downstream importers.
+
+pub mod source;
+pub mod reexporter;
+
+use reexporter::ReType;
+use reexporter::re_fn;
+
+fn main() -> Nat {
+    let x: ReType = 42;
+    re_fn(x)
+}

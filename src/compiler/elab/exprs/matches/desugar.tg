@@ -1,0 +1,296 @@
+// Nested constructor pattern desugaring (ADR 13.5.26c).
+//
+// Transforms: Some(Cons(x, _)) => x
+// Into:       Some(__nested) => match __nested { Cons(x, _) => x }
+//
+// Only single-field outer constructors are desugared.
+
+use parser::ast::{
+    Pattern, PatVar, PatWildcard, PatConstructor,
+    MatchArm,
+    Expr, ExprMatch, ExprPath,
+    MaybeExpr, NoExpr,
+    Ident, ident_new,
+    Path, path_simple,
+    pattern_span
+};
+use lexer::span::Span;
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
+use elab::exprs::matches::patterns::{
+    is_catch_all_pattern, pattern_constructor_name
+};
+
+// ===========================================================================
+// CONSTANTS
+// ===========================================================================
+
+/// Maximum allowed nesting depth for constructor patterns.
+fn max_pattern_depth() -> Nat { 3 }
+
+// ===========================================================================
+// DEPTH CHECKING
+// ===========================================================================
+
+/// Compute the nesting depth of a pattern.
+/// Variable/wildcard = 0, constructor = 1 + max depth of sub-patterns.
+fn pattern_nesting_depth(p: Pattern) -> Nat {
+    match p {
+        PatConstructor(_, subs, _) => 1 + max_sub_depth(subs),
+        _ => 0
+    }
+}
+
+/// Maximum nesting depth across a list of patterns.
+fn max_sub_depth(pats: List<Pattern>) -> Nat {
+    match pats {
+        Nil() => 0,
+        Cons(p, rest) => {
+            let d = pattern_nesting_depth(p);
+            let r = max_sub_depth(rest);
+            if d > r { d } else { r }
+        }
+    }
+}
+
+/// Check that no arm's pattern exceeds the depth limit.
+/// Returns the span of the offending pattern on failure.
+fn check_all_depths(arms: List<MatchArm>) -> DesugarResult {
+    match arms {
+        Nil() => DesugarOk(Nil()),
+        Cons(arm, rest) =>
+            if pattern_nesting_depth(arm.pattern) > max_pattern_depth() {
+                DesugarErr(
+                    "pattern nesting depth exceeds maximum of 3",
+                    pattern_span(arm.pattern)
+                )
+            } else {
+                check_all_depths(rest)
+            }
+    }
+}
+
+// ===========================================================================
+// NESTED PATTERN DETECTION
+// ===========================================================================
+
+/// Check if an arm has a single-field constructor pattern whose
+/// sub-pattern is itself a constructor (needs desugaring).
+fn arm_needs_desugaring(arm: MatchArm) -> Bool {
+    match arm.pattern {
+        PatConstructor(_, subs, _) =>
+            has_single_constructor_sub(subs),
+        _ => false
+    }
+}
+
+fn has_single_constructor_sub(subs: List<Pattern>) -> Bool {
+    match subs {
+        Nil() => false,
+        Cons(sub, rest) =>
+            if list_is_empty(rest) {
+                is_constructor_pattern(sub)
+            } else {
+                false
+            }
+    }
+}
+
+fn is_constructor_pattern(p: Pattern) -> Bool {
+    match p {
+        PatConstructor(_, _, _) => true,
+        _ => false
+    }
+}
+
+/// Check if any arm in the list needs desugaring.
+fn any_arm_needs_desugaring(arms: List<MatchArm>) -> Bool {
+    match arms {
+        Nil() => false,
+        Cons(arm, rest) =>
+            if arm_needs_desugaring(arm) { true }
+            else { any_arm_needs_desugaring(rest) }
+    }
+}
+
+// ===========================================================================
+// DESUGARING RESULT
+// ===========================================================================
+
+/// Result of the desugaring pass.
+pub type DesugarResult =
+    | DesugarOk(List<MatchArm>)
+    | DesugarErr(String, Span)
+
+// ===========================================================================
+// ARM GROUPING
+// ===========================================================================
+
+/// Take consecutive arms from the front that share the same outer
+/// constructor name. Returns (group, remaining).
+fn take_same_ctor(
+    arms: List<MatchArm>,
+    name: String
+) -> (List<MatchArm>, List<MatchArm>) {
+    match arms {
+        Nil() => (Nil(), Nil()),
+        Cons(arm, rest) =>
+            if pattern_constructor_name(arm.pattern) == name {
+                let (group, remaining) = take_same_ctor(rest, name);
+                (Cons(arm, group), remaining)
+            } else {
+                (Nil(), arms)
+            }
+    }
+}
+
+/// Prepend a list of arms onto another list.
+fn prepend_arms(
+    prefix: List<MatchArm>,
+    suffix: List<MatchArm>
+) -> List<MatchArm> {
+    match prefix {
+        Nil() => suffix,
+        Cons(arm, rest) => Cons(arm, prepend_arms(rest, suffix))
+    }
+}
+
+// ===========================================================================
+// CORE DESUGARING
+// ===========================================================================
+
+/// Main entry point: desugar nested constructor patterns in a sorted arm list.
+/// Arms must already be sorted by constructor index.
+pub fn desugar_nested_arms(
+    arms: List<MatchArm>,
+    span: Span
+) -> DesugarResult {
+    match check_all_depths(arms) {
+        DesugarErr(msg, s) => DesugarErr(msg, s),
+        DesugarOk(_) => desugar_arm_groups(arms, span)
+    }
+}
+
+/// Process sorted arms group-by-group.
+/// Desugar remaining arms and prepend the given arms to the result.
+fn desugar_prepend_and_continue(
+    arms: List<MatchArm>,
+    remaining: List<MatchArm>,
+    span: Span
+) -> DesugarResult {
+    match desugar_arm_groups(remaining, span) {
+        DesugarErr(msg, s) => DesugarErr(msg, s),
+        DesugarOk(rest_result) =>
+            DesugarOk(prepend_arms(arms, rest_result))
+    }
+}
+
+fn desugar_arm_groups(
+    arms: List<MatchArm>,
+    span: Span
+) -> DesugarResult {
+    match arms {
+        Nil() => DesugarOk(Nil()),
+        Cons(arm, rest) =>
+            if is_catch_all_pattern(arm.pattern) {
+                // Catch-all: pass through, recurse on rest
+                match desugar_arm_groups(rest, span) {
+                    DesugarErr(msg, s) => DesugarErr(msg, s),
+                    DesugarOk(rest_result) =>
+                        DesugarOk(Cons(arm, rest_result))
+                }
+            } else {
+                let ctor_name = pattern_constructor_name(arm.pattern);
+                let (group, remaining) = take_same_ctor(arms, ctor_name);
+                if any_arm_needs_desugaring(group) {
+                    // Desugar this constructor group into a single arm
+                    match desugar_group(group, span) {
+                        DesugarErr(msg, s) => DesugarErr(msg, s),
+                        DesugarOk(desugared) =>
+                            desugar_prepend_and_continue(desugared, remaining, span)
+                    }
+                } else {
+                    // No nested patterns — pass through
+                    desugar_prepend_and_continue(group, remaining, span)
+                }
+            }
+    }
+}
+
+/// Desugar a constructor group into a single arm with an inner match.
+fn desugar_group(
+    group: List<MatchArm>,
+    span: Span
+) -> DesugarResult {
+    match group {
+        Nil() => DesugarErr("empty constructor group", span),
+        Cons(first_arm, _) =>
+            desugar_constructor_group(group, first_arm, span)
+    }
+}
+
+fn desugar_constructor_group(
+    group: List<MatchArm>,
+    first_arm: MatchArm,
+    span: Span
+) -> DesugarResult {
+    match first_arm.pattern {
+        PatConstructor(path, _, pat_span) => {
+            let fresh_ident = ident_new("__nested", pat_span);
+            let outer_pat = PatConstructor(
+                path,
+                Cons(PatVar(fresh_ident), Nil()),
+                pat_span
+            );
+            let inner_arms = build_inner_arms(group);
+            let inner_scrutinee = ExprPath(path_simple(fresh_ident));
+            let inner_match = ExprMatch(inner_scrutinee, inner_arms, span);
+            let desugared: MatchArm = {
+                pattern: outer_pat,
+                guard: NoExpr,
+                body: inner_match,
+                span: first_arm.span
+            };
+            DesugarOk(Cons(desugared, Nil()))
+        },
+        _ => DesugarErr("expected constructor pattern in group", span)
+    }
+}
+
+/// Build inner match arms from the original arms' sub-patterns.
+fn build_inner_arms(arms: List<MatchArm>) -> List<MatchArm> {
+    match arms {
+        Nil() => Nil(),
+        Cons(arm, rest) => {
+            let inner_pat = extract_inner_pattern(arm.pattern);
+            let inner_arm: MatchArm = {
+                pattern: inner_pat,
+                guard: arm.guard,
+                body: arm.body,
+                span: arm.span
+            };
+            Cons(inner_arm, build_inner_arms(rest))
+        }
+    }
+}
+
+/// Extract the inner pattern from a constructor pattern's sub-patterns.
+fn extract_inner_pattern(p: Pattern) -> Pattern {
+    match p {
+        PatConstructor(_, subs, s) =>
+            extract_from_subs(subs, s),
+        _ => p
+    }
+}
+
+fn extract_from_subs(subs: List<Pattern>, s: Span) -> Pattern {
+    match subs {
+        Nil() => PatWildcard(s),
+        Cons(sub, rest) =>
+            if list_is_empty(rest) {
+                sub
+            } else {
+                PatWildcard(s)
+            }
+    }
+}

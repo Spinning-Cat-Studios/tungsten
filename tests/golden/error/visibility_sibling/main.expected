@@ -1,0 +1,9 @@
+[E0016] Error: type `SecretType` is private (defined in `main::sibling_a`) and cannot be accessed from `sibling_b`
+   ╭─[tests/golden/error/visibility_sibling/sibling_b.tg:4:14]
+   │
+ 4 │     let x: sibling_a::SecretType = 42;
+   │              ──────────┬──────────  
+   │                        ╰──────────── 
+───╯
+
+error: aborting due to 1 error

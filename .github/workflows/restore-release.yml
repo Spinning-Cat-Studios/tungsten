@@ -1,0 +1,62 @@
+name: Restore Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to restore (e.g. v1.5.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    name: Restore Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Validate tag exists
+        run: |
+          if ! git rev-parse "refs/tags/${{ inputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ inputs.tag }} does not exist"
+            exit 1
+          fi
+
+      - name: Validate release notes exist
+        run: |
+          VERSION="${{ inputs.tag }}"
+          VERSION="${VERSION#v}"
+          NOTES="changelog/v${VERSION}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "::error::No changelog at $NOTES — cannot restore without release notes"
+            exit 1
+          fi
+          cp "$NOTES" release-notes.md
+
+      - name: Check release does not already exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ inputs.tag }}" >/dev/null 2>&1; then
+            echo "::notice::Release ${{ inputs.tag }} already exists — nothing to do"
+            exit 0
+          fi
+          echo "NEEDS_RESTORE=true" >> "$GITHUB_ENV"
+
+      - name: Restore release
+        if: env.NEEDS_RESTORE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ inputs.tag }}"
+          VERSION="${VERSION#v}"
+          gh release create "${{ inputs.tag }}" \
+            --title "Tungsten ${VERSION}" \
+            --notes-file release-notes.md
+          echo "::notice::Release ${{ inputs.tag }} restored from changelog"

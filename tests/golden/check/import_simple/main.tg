@@ -1,0 +1,11 @@
+// Test: simple import resolves a type and value from a submodule.
+
+pub mod mymod;
+
+use mymod::MyType;
+use mymod::my_fn;
+
+fn main() -> Nat {
+    let x: MyType = 42;
+    my_fn(x)
+}

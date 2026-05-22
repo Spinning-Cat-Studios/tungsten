@@ -1,0 +1,5 @@
+// Helper module with a private generic type.
+
+type Secret<T> = T
+
+pub type Public<T> = T

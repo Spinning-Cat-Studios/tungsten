@@ -1,0 +1,14 @@
+fn test_add() -> Unit {
+    expect_type(42, "Nat");
+    ()
+}
+
+fn test_sub() -> Unit {
+    expect_type(true, "Bool");
+    ()
+}
+
+fn test_addition_overflow() -> Unit {
+    expect_type(0, "Nat");
+    ()
+}

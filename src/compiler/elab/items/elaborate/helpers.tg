@@ -1,0 +1,144 @@
+// src/compiler/elab/items/elaborate/helpers.tg
+// Shared helpers for item body elaboration.
+
+use parser::ast::{
+    Param, TypeParam,
+    Ident, ident_name,
+    Pattern, PatVar, PatWildcard
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_abs, tg_term_type_abs,
+    tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
+    tg_string_to_cstr
+};
+use elab::env::{
+    Env, env_bind_local, env_push_type_var, env_pop_type_var
+};
+use elab::items::result::{
+    ElabContext, elab_context_with_env
+};
+use elab::cir::{CodegenIR, CodegenType, CIRLambda, CIRTypeAbs, ct_unit};
+use elab::cir::free_vars::free_vars;
+
+// ===========================================================================
+// PARAMETER BINDING
+// ===========================================================================
+
+/// Bind function parameters and extract return type.
+pub fn bind_params_and_get_return(
+    ctx: ElabContext,
+    params: List<Param>,
+    fn_type: TypeHandle
+) -> (ElabContext, TypeHandle) {
+    match params {
+        Nil() => (ctx, fn_type),  // Return type is what's left
+        Cons(param, rest) =>
+            // Bind this parameter
+            let param_name = extract_param_name(param);
+            // Get param type from the arrow type
+            let param_type = get_arrow_domain(fn_type);
+            let env2 = env_bind_local(ctx.env, param_name, param_type);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            // Continue with the codomain
+            let rest_type = tg_type_get_arrow_codomain(fn_type);
+            bind_params_and_get_return(ctx2, rest, rest_type)
+    }
+}
+
+/// Extract parameter name from a Param's pattern.
+pub fn extract_param_name(p: Param) -> String {
+    match p.pattern {
+        PatVar(ident) => ident_name(ident),
+        PatWildcard(_) => "_",
+        _ => "_arg"  // Complex patterns get placeholder name
+    }
+}
+
+/// Get the domain of an arrow type (returns INVALID_HANDLE if not an arrow).
+pub fn get_arrow_domain(ty: TypeHandle) -> TypeHandle {
+    tg_type_get_arrow_domain(ty)
+}
+
+// ===========================================================================
+// LAMBDA BUILDING
+// ===========================================================================
+
+/// Build a lambda term from parameters.
+pub fn build_lambda(params: List<Param>, body: TermHandle, fn_type: TypeHandle) -> TermHandle {
+    match params {
+        Nil() => body,
+        Cons(param, rest) =>
+            let param_name = extract_param_name(param);
+            let param_type = get_arrow_domain(fn_type);
+            let inner = build_lambda(rest, body, tg_type_get_arrow_codomain(fn_type));
+            tg_term_abs(tg_string_to_cstr(param_name), param_type, inner)
+    }
+}
+
+/// Build a CIR lambda from parameters.
+pub fn build_lambda_cir(params: List<Param>, body: CodegenIR, fn_type: TypeHandle) -> CodegenIR {
+    match params {
+        Nil() => body,
+        Cons(param, rest) =>
+            let param_name = extract_param_name(param);
+            // For now use ct_unit() as placeholder type
+            // Full implementation would convert TypeHandle to CodegenType
+            let inner = build_lambda_cir(rest, body, tg_type_get_arrow_codomain(fn_type));
+            let captures = free_vars(inner, Cons(param_name, Nil()));
+            CIRLambda(param_name, ct_unit(), inner, captures, ct_unit())
+    }
+}
+
+// ===========================================================================
+// TYPE ABSTRACTION WRAPPING
+// ===========================================================================
+
+/// Wrap a term in type abstractions for type parameters.
+pub fn wrap_type_abs(term: TermHandle, params: List<TypeParam>) -> TermHandle {
+    match params {
+        Nil() => term,
+        Cons(param, rest) =>
+            let inner = wrap_type_abs(term, rest);
+            let name = ident_name(param.name);
+            tg_term_type_abs(tg_string_to_cstr(name), inner)
+    }
+}
+
+/// Wrap CIR in type abstractions for type parameters.
+pub fn wrap_type_abs_cir(cir: CodegenIR, params: List<TypeParam>) -> CodegenIR {
+    match params {
+        Nil() => cir,
+        Cons(param, rest) =>
+            let inner = wrap_type_abs_cir(cir, rest);
+            let name = ident_name(param.name);
+            CIRTypeAbs(name, inner)
+    }
+}
+
+// ===========================================================================
+// TYPE PARAMETER SCOPE MANAGEMENT
+// ===========================================================================
+
+/// Push type parameters for elaboration.
+pub fn push_type_params_elab(ctx: ElabContext, params: List<TypeParam>) -> ElabContext {
+    match params {
+        Nil() => ctx,
+        Cons(param, rest) =>
+            let env2 = env_push_type_var(ctx.env, ident_name(param.name));
+            let ctx2 = elab_context_with_env(ctx, env2);
+            push_type_params_elab(ctx2, rest)
+    }
+}
+
+/// Pop type parameters after elaboration.
+pub fn pop_type_params_elab(ctx: ElabContext, params: List<TypeParam>) -> ElabContext {
+    match params {
+        Nil() => ctx,
+        Cons(_, rest) =>
+            let env2 = env_pop_type_var(ctx.env);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            pop_type_params_elab(ctx2, rest)
+    }
+}

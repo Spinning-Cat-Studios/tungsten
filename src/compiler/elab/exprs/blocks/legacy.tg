@@ -1,0 +1,274 @@
+// Legacy statement elaboration functions.
+// These are retained for backward compatibility but may be dead code.
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    Stmt, StmtLet, StmtLetElse, StmtExpr, StmtItem,
+    Pattern, PatTuple
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_unit,
+    tg_type_unit
+};
+use elab::env::{Env, env_bind_local};
+use elab::types::{elab_type, ElabTypeOk, ElabTypeErr};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, type_error_to_expr_error, pattern_to_name,
+    add_expected_because, TermInfo
+};
+use elab::error::ExpLetAnnotation;
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CIRUnit, CIRLet, CIRVar,
+    ct_unit,
+    type_handle_to_codegen_type
+};
+use elab::exprs::{synth, check};
+use elab::exprs::blocks::tuple::{bind_tuple_pattern_to_env, build_tuple_projection_cir};
+
+/// Elaborate a list of statements just for environment updates.
+pub fn elab_stmts_for_env(env: Env, stmts: List<Stmt>, span: Span) -> ElabExprResult {
+    match stmts {
+        Nil() =>
+            ElabExprOk(env, tg_term_unit(), tg_type_unit(), CIRUnit()),
+        Cons(stmt, rest) =>
+            match elab_stmt_for_env(env, stmt, span) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, _, _, _) => elab_stmts_for_env(env2, rest, span)
+            }
+    }
+}
+
+/// Elaborate statements and wrap body_cir in CIRLet chain.
+pub fn elab_stmts_with_body(
+    env: Env,
+    stmts: List<Stmt>,
+    body: TermInfo,
+    span: Span
+) -> ElabExprResult {
+    match stmts {
+        Nil() =>
+            ElabExprOk(env, body.term, body.ty, body.cir),
+        Cons(stmt, rest) =>
+            match elab_stmts_with_body(env, rest, body, span) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, inner_term, inner_ty, inner_cir) =>
+                    let inner: TermInfo = { term: inner_term, ty: inner_ty, cir: inner_cir };
+                    wrap_stmt_cir(env2, stmt, inner, span)
+            }
+    }
+}
+
+/// Build CIR let-chain for statements wrapping a final expression CIR.
+pub fn build_stmt_cir_chain(
+    env: Env,
+    stmts: List<Stmt>,
+    final_result: TermInfo,
+    span: Span
+) -> ElabExprResult {
+    elab_stmts_with_body(env, stmts, final_result, span)
+}
+
+/// Elaborate a statement just for environment updates (no CIR building).
+fn elab_stmt_for_env(env: Env, stmt: Stmt, block_span: Span) -> ElabExprResult {
+    match stmt {
+        StmtLet(pat, ty_annot, rhs, span) =>
+            match pat {
+                PatTuple(sub_pats, pat_span) =>
+                    elab_stmt_tuple_for_env(env, sub_pats, ty_annot, rhs, span),
+                _ =>
+                    elab_simple_let_for_env(env, pat, ty_annot, rhs, span)
+            },
+        
+        StmtExpr(e, span) =>
+            synth(env, e),
+        
+        StmtItem(item) =>
+            ElabExprErr(elab_expr_error(
+                "nested items not yet implemented (3C-6)",
+                block_span
+            )),
+        StmtLetElse(_, _, _, _, span) =>
+            ElabExprErr(elab_expr_error(
+                "let-else not supported in legacy block elaboration",
+                span
+            ))
+    }
+}
+
+/// Elaborate a simple (non-tuple) let statement for environment updates.
+fn elab_simple_let_for_env(
+    env: Env,
+    pat: Pattern,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    span: Span
+) -> ElabExprResult {
+    let name = pattern_to_name(pat);
+    match ty_annot {
+        SomeTypeExpr(ty_expr) =>
+            let annot_span = span;
+            match elab_type(env, ty_expr) {
+                ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+                ElabTypeOk(expected_ty, _) =>
+                    match check(env, rhs, expected_ty) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpLetAnnotation(annot_span))),
+                        ElabExprOk(env2, term, ty, cir) => {
+                            let env3 = env_bind_local(env2, name, ty);
+                            ElabExprOk(env3, term, ty, cir)
+                        }
+                    }
+            },
+        NoTypeExpr() =>
+            match synth(env, rhs) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, term, ty, cir) => {
+                    let env3 = env_bind_local(env2, name, ty);
+                    ElabExprOk(env3, term, ty, cir)
+                }
+            }
+    }
+}
+
+/// Elaborate tuple pattern in let statement for environment updates.
+fn elab_stmt_tuple_for_env(
+    env: Env,
+    sub_pats: List<Pattern>,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    span: Span
+) -> ElabExprResult {
+    match ty_annot {
+        SomeTypeExpr(_) =>
+            ElabExprErr(elab_expr_error(
+                "type annotations not supported on tuple patterns",
+                span
+            )),
+        NoTypeExpr() =>
+            match synth(env, rhs) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, term, ty, cir) =>
+                    let env3 = bind_tuple_pattern_to_env(env2, sub_pats, ty);
+                    ElabExprOk(env3, term, ty, cir)
+            }
+    }
+}
+
+/// Wrap inner CIR in a let-binding for this statement.
+fn wrap_stmt_cir(
+    env: Env,
+    stmt: Stmt,
+    inner: TermInfo,
+    block_span: Span
+) -> ElabExprResult {
+    match stmt {
+        StmtLet(pat, ty_annot, rhs, span) =>
+            match pat {
+                PatTuple(sub_pats, pat_span) =>
+                    let parts: TupleStmtParts = { sub_pats: sub_pats, ty_annot: ty_annot, rhs: rhs };
+                    wrap_stmt_tuple_cir(env, parts, inner, span),
+                _ =>
+                    let name = pattern_to_name(pat);
+                    let parts: LetStmtParts = { name: name, ty_annot: ty_annot, rhs: rhs, span: span };
+                    wrap_stmt_let_cir(env, parts, inner)
+            },
+        
+        StmtExpr(e, span) =>
+            match synth(env, e) {
+                ElabExprErr(err) => ElabExprErr(err),
+                ElabExprOk(env2, _, _, expr_cir) =>
+                    let let_cir = CIRLet("_", ct_unit(), expr_cir, inner.cir);
+                    ElabExprOk(env2, inner.term, inner.ty, let_cir)
+            },
+        
+        StmtItem(item) =>
+            ElabExprErr(elab_expr_error(
+                "nested items not yet implemented (3C-6)",
+                block_span
+            )),
+        StmtLetElse(_, _, _, _, span) =>
+            ElabExprErr(elab_expr_error(
+                "let-else not supported in legacy block elaboration",
+                span
+            ))
+    }
+}
+
+/// Wrap inner CIR with a non-tuple let-binding (ADR 10.5.26k §2.2).
+fn wrap_stmt_let_cir(
+    env: Env,
+    parts: LetStmtParts,
+    inner: TermInfo
+) -> ElabExprResult {
+    match parts.ty_annot {
+        SomeTypeExpr(ty_expr) =>
+            let annot_span = parts.span;
+            match elab_type(env, ty_expr) {
+                ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+                ElabTypeOk(expected_ty, expected_ct) =>
+                    match check(env, parts.rhs, expected_ty) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpLetAnnotation(annot_span))),
+                        ElabExprOk(env2, term, ty, rhs_cir) =>
+                            let env3 = env_bind_local(env2, parts.name, ty);
+                            let let_cir = CIRLet(parts.name, expected_ct, rhs_cir, inner.cir);
+                            ElabExprOk(env3, inner.term, inner.ty, let_cir)
+                    }
+            },
+        NoTypeExpr() =>
+            match synth(env, parts.rhs) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, term, ty, rhs_cir) =>
+                    let env3 = env_bind_local(env2, parts.name, ty);
+                    let let_cir = CIRLet(parts.name, ct_unit(), rhs_cir, inner.cir);
+                    ElabExprOk(env3, inner.term, inner.ty, let_cir)
+            }
+    }
+}
+
+/// Bundled let-statement parts (ADR 10.5.26k — param count reduction).
+type LetStmtParts = {
+    name: String,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    span: Span
+}
+
+/// Bundled tuple statement parts.
+type TupleStmtParts = {
+    sub_pats: List<Pattern>,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr
+}
+
+/// Wrap inner CIR with tuple pattern destructuring.
+fn wrap_stmt_tuple_cir(
+    env: Env,
+    parts: TupleStmtParts,
+    inner: TermInfo,
+    span: Span
+) -> ElabExprResult {
+    match parts.ty_annot {
+        SomeTypeExpr(_) =>
+            ElabExprErr(elab_expr_error(
+                "type annotations not supported on tuple patterns",
+                span
+            )),
+        NoTypeExpr() =>
+            match synth(env, parts.rhs) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, term, ty, rhs_cir) =>
+                    let tup_name = "__tup";
+                    let projected_cir = build_tuple_projection_cir(
+                        parts.sub_pats, ty, CIRVar(tup_name, type_handle_to_codegen_type(ty)), inner.cir
+                    );
+                    let outer_cir = CIRLet(tup_name, ct_unit(), rhs_cir, projected_cir);
+                    let env3 = bind_tuple_pattern_to_env(env2, parts.sub_pats, ty);
+                    ElabExprOk(env3, inner.term, inner.ty, outer_cir)
+            }
+    }
+}

@@ -1,0 +1,11 @@
+// Test: cross-file diagnostic spans (ADR 15.5.26a)
+// When a function from another module returns Bool but Nat is expected,
+// the error should show a cross-file note pointing to the callee's definition.
+
+pub mod helper;
+
+use helper::get_value;
+
+fn main() -> Nat {
+    get_value()
+}

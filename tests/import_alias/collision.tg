@@ -1,0 +1,10 @@
+// AC3: Name collision resolved by aliasing (no E0007)
+mod math;
+mod util;
+
+use math::add as math_add;
+use util::add as util_add;
+
+fn main() -> Nat {
+    math_add(1, util_add(2, 3))
+}

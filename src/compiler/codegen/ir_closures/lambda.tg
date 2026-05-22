@@ -1,0 +1,183 @@
+// src/compiler/codegen/ir_closures/lambda.tg
+// Lambda emission — non-capturing and capturing closures.
+//
+// Non-capturing: inner function takes (ptr %env_unused, <param_type> %param),
+//   closure pair is { @lambda.N, null }.
+// Capturing: allocate env struct, store captures, build closure pair.
+//
+// Body emission uses fork/merge to emit the inner function body into a
+// separate output buffer, then appends it to the deferred buffer.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::nat_to_string;
+use elab::cir::types::{
+    CodegenIR, CodegenType,
+    CIRCaptureList, CIRCaptureNil, CIRCaptureCons, CIRCapture
+};
+use elab::cir::capture::{cir_captures_is_empty};
+use codegen::capture_layout::{capture_env_type, capture_env_size};
+use codegen::ir_builder::{
+    IRState, fresh_name, fresh_lambda_name,
+    emit_line, emit_deferred, emit_env_type,
+    ir_state_fork_body, ir_state_merge_body, ir_state_to_string
+};
+use codegen::ir_types::{llvm_type};
+use codegen::ir_expr::{emit_expr};
+
+/// Bundled context for lambda inner-function emission.
+type LambdaCtx = {
+    lambda_name: String,      // e.g. "@lambda.0"
+    env_type_name: String,    // e.g. "%env.0"
+    param_name: String,       // source param name
+    param_ty_str: String,     // LLVM type of param, e.g. "i64"
+    ret_ty_str: String        // LLVM type of return, e.g. "i64"
+}
+
+// ===========================================================================
+// LAMBDA EMISSION
+// ===========================================================================
+
+/// Emit a lambda closure.
+/// Emits the inner function to the deferred buffer, then builds the
+/// closure pair { fn_ptr, env_ptr } at the current insertion point.
+pub fn emit_lambda(
+    st: IRState, param_name: String, param_type: CodegenType,
+    body: CodegenIR, captures: CIRCaptureList, ret_type: CodegenType
+) -> (String, IRState) {
+    let param_ty_str = llvm_type(param_type);
+    let ret_ty_str = llvm_type(ret_type);
+
+    // Generate unique lambda name
+    let (lambda_name, st) = fresh_lambda_name(st);
+    let env_type_name = "%env." ++ nat_to_string(st.next_lambda - 1);
+
+    let ctx: LambdaCtx = {
+        lambda_name: lambda_name, env_type_name: env_type_name,
+        param_name: param_name, param_ty_str: param_ty_str,
+        ret_ty_str: ret_ty_str
+    };
+
+    if cir_captures_is_empty(captures) {
+        emit_lambda_non_capturing(st, ctx, body)
+    } else {
+        emit_lambda_capturing(st, ctx, body, captures)
+    }
+}
+
+// ===========================================================================
+// NON-CAPTURING LAMBDA
+// ===========================================================================
+
+/// Emit a non-capturing lambda: inner function + closure with null env.
+fn emit_lambda_non_capturing(
+    st: IRState, ctx: LambdaCtx, body: CodegenIR
+) -> (String, IRState) {
+    // Emit env type declaration (empty struct)
+    let st = emit_env_type(st, ctx.env_type_name ++ " = type {}");
+
+    // Fork state: emit body into a separate output buffer
+    let body_st = ir_state_fork_body(st);
+    let (ret_val, body_st) = emit_expr(body_st, body);
+    let body_ir = ir_state_to_string(body_st);
+
+    // Merge counters and deferred/env_types back, keep caller output
+    let st = ir_state_merge_body(st, body_st);
+
+    // Emit inner function to deferred buffer
+    let st = emit_deferred(st, "define " ++ ctx.ret_ty_str ++ " " ++ ctx.lambda_name ++ "(ptr %__env, " ++ ctx.param_ty_str ++ " %" ++ ctx.param_name ++ ") {");
+    let st = emit_deferred(st, "entry:");
+    let st = emit_deferred(st, body_ir);
+    let st = emit_deferred(st, "  ret " ++ ctx.ret_ty_str ++ " " ++ ret_val);
+    let st = emit_deferred(st, "}");
+    let st = emit_deferred(st, "");
+
+    // Build closure pair: { @lambda.N, null }
+    let (c1, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ c1 ++ " = insertvalue { ptr, ptr } undef, ptr " ++ ctx.lambda_name ++ ", 0");
+    let (c2, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ c2 ++ " = insertvalue { ptr, ptr } " ++ c1 ++ ", ptr null, 1");
+
+    (c2, st)
+}
+
+// ===========================================================================
+// CAPTURING LAMBDA
+// ===========================================================================
+
+/// Emit a capturing lambda: allocate env, store captures, build closure.
+fn emit_lambda_capturing(
+    st: IRState, ctx: LambdaCtx,
+    body: CodegenIR, captures: CIRCaptureList
+) -> (String, IRState) {
+    // Emit env struct type declaration
+    let env_ty_str = capture_env_type(captures);
+    let st = emit_env_type(st, ctx.env_type_name ++ " = type " ++ env_ty_str);
+
+    // Fork state: emit capture loads + body into separate buffer
+    let body_st = ir_state_fork_body(st);
+    let body_st = emit_capture_loads(body_st, ctx.env_type_name, captures, 0);
+    let (ret_val, body_st) = emit_expr(body_st, body);
+    let body_ir = ir_state_to_string(body_st);
+
+    // Merge counters back
+    let st = ir_state_merge_body(st, body_st);
+
+    // Emit inner function to deferred buffer
+    let st = emit_deferred(st, "define " ++ ctx.ret_ty_str ++ " " ++ ctx.lambda_name ++ "(ptr %__env, " ++ ctx.param_ty_str ++ " %" ++ ctx.param_name ++ ") {");
+    let st = emit_deferred(st, "entry:");
+    let st = emit_deferred(st, body_ir);
+    let st = emit_deferred(st, "  ret " ++ ctx.ret_ty_str ++ " " ++ ret_val);
+    let st = emit_deferred(st, "}");
+    let st = emit_deferred(st, "");
+
+    // Allocate environment: malloc(size)
+    let env_size = capture_env_size(captures);
+    let (env_mem, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ env_mem ++ " = call ptr @malloc(i64 " ++ nat_to_string(env_size) ++ ")");
+
+    // Store each capture into the environment
+    let st = emit_capture_stores(st, ctx.env_type_name, env_mem, captures, 0);
+
+    // Build closure pair: { @lambda.N, env_mem }
+    let (c1, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ c1 ++ " = insertvalue { ptr, ptr } undef, ptr " ++ ctx.lambda_name ++ ", 0");
+    let (c2, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ c2 ++ " = insertvalue { ptr, ptr } " ++ c1 ++ ", ptr " ++ env_mem ++ ", 1");
+
+    (c2, st)
+}
+
+/// Emit GEP+load for each capture inside the inner function body.
+/// Called on the forked body state — emits to output (not deferred).
+fn emit_capture_loads(
+    st: IRState, env_type_name: String,
+    captures: CIRCaptureList, idx: Nat
+) -> IRState {
+    match captures {
+        CIRCaptureNil() => st,
+        CIRCaptureCons(cap, rest) =>
+            let ty_str = llvm_type(cap.ty);
+            let idx_str = nat_to_string(idx);
+            let (ptr_name, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ ptr_name ++ " = getelementptr " ++ env_type_name ++ ", ptr %__env, i32 0, i32 " ++ idx_str);
+            let st = emit_line(st, "  %" ++ cap.name ++ " = load " ++ ty_str ++ ", ptr " ++ ptr_name);
+            emit_capture_loads(st, env_type_name, rest, idx + 1)
+    }
+}
+
+/// Emit GEP+store for each capture at the call site (to main output).
+fn emit_capture_stores(
+    st: IRState, env_type_name: String, env_mem: String,
+    captures: CIRCaptureList, idx: Nat
+) -> IRState {
+    match captures {
+        CIRCaptureNil() => st,
+        CIRCaptureCons(cap, rest) =>
+            let ty_str = llvm_type(cap.ty);
+            let idx_str = nat_to_string(idx);
+            let (ptr_name, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ ptr_name ++ " = getelementptr " ++ env_type_name ++ ", ptr " ++ env_mem ++ ", i32 0, i32 " ++ idx_str);
+            let st = emit_line(st, "  store " ++ ty_str ++ " %" ++ cap.name ++ ", ptr " ++ ptr_name);
+            emit_capture_stores(st, env_type_name, env_mem, rest, idx + 1)
+    }
+}

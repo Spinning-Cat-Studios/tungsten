@@ -1,0 +1,5 @@
+// Module with private and public functions.
+
+fn private_fn() -> Nat { 42 }
+
+pub fn public_fn() -> Nat { 0 }

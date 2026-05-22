@@ -1,0 +1,63 @@
+// src/compiler/elab/adt/injection.tg
+// Constructor injection path computation.
+
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::TypeHandle;
+use elab::adt::{AdtVariant, MaybeNat, NoNat, SomeNat};
+use driver::util::list_len;
+
+// ===========================================================================
+// CONSTRUCTOR INJECTION
+// ===========================================================================
+
+/// The injection path for a constructor in an ADT.
+pub type InjectionPath =
+    | InjectionPathNil
+    | InjectionPathLeft(InjectionPath)   // inl
+    | InjectionPathRight(InjectionPath)  // inr
+
+/// Compute the injection path for constructor at given index.
+pub fn compute_injection_path(index: Nat, total: Nat) -> InjectionPath {
+    if total <= 1 {
+        InjectionPathNil
+    } else if index == 0 {
+        InjectionPathLeft(InjectionPathNil)
+    } else {
+        InjectionPathRight(compute_injection_path(index - 1, total - 1))
+    }
+}
+
+/// Look up a constructor by name in the variant list.
+/// Returns the index if found.
+pub fn find_constructor_index(variants: List<AdtVariant>, name: String) -> MaybeNat {
+    find_constructor_index_helper(variants, name, 0)
+}
+
+fn find_constructor_index_helper(
+    variants: List<AdtVariant>,
+    name: String,
+    current: Nat
+) -> MaybeNat {
+    match variants {
+        Nil() => NoNat,
+        Cons(v, rest) =>
+            if v.name == name {
+                SomeNat(current)
+            } else {
+                find_constructor_index_helper(rest, name, current + 1)
+            }
+    }
+}
+
+/// Get the fields of the variant at a given index.
+pub fn get_variant_at_index(variants: List<AdtVariant>, index: Nat) -> List<TypeHandle> {
+    match variants {
+        Nil() => Nil(),
+        Cons(v, rest) =>
+            if index == 0 {
+                v.fields
+            } else {
+                get_variant_at_index(rest, index - 1)
+            }
+    }
+}

@@ -1,0 +1,6 @@
+// Test: relative import triggers a compiler warning (ADR 10.5.26m)
+mod inner;
+
+fn main() -> String {
+    inner::get_zero()
+}

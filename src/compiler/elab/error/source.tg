@@ -70,17 +70,20 @@ fn find_line_col(lines: List<Nat>, offset: Nat, line_num: Nat) -> LineCol {
     match lines {
         Nil() => { line: line_num, col: offset + 1 } : LineCol,
         Cons(start, rest) =>
-            // Check if this is the last line or if we need to look ahead
-            match rest {
-                Nil() =>
-                    // Last line
-                    { line: line_num, col: offset - start + 1 } : LineCol,
-                Cons(next_start, rest2) =>
-                    if offset < next_start {
-                        { line: line_num, col: offset - start + 1 } : LineCol
-                    } else {
-                        find_line_col(Cons(next_start, rest2), offset, line_num + 1)
-                    }
+            find_line_col_at(start, rest, offset, line_num)
+    }
+}
+
+fn find_line_col_at(start: Nat, rest: List<Nat>, offset: Nat, line_num: Nat) -> LineCol {
+    match rest {
+        Nil() =>
+            // Last line
+            { line: line_num, col: offset - start + 1 } : LineCol,
+        Cons(next_start, rest2) =>
+            if offset < next_start {
+                { line: line_num, col: offset - start + 1 } : LineCol
+            } else {
+                find_line_col(Cons(next_start, rest2), offset, line_num + 1)
             }
     }
 }
@@ -116,13 +119,17 @@ fn get_line_end_acc(lines: List<Nat>, target: Nat, current: Nat, total_len: Nat)
         Nil() => total_len,
         Cons(start, rest) =>
             if current == target {
-                match rest {
-                    Nil() => total_len,
-                    Cons(next_start, _) => next_start - 1  // Exclude newline
-                }
+                get_line_end_at(rest, total_len)
             } else {
                 get_line_end_acc(rest, target, current + 1, total_len)
             }
+    }
+}
+
+fn get_line_end_at(rest: List<Nat>, total_len: Nat) -> Nat {
+    match rest {
+        Nil() => total_len,
+        Cons(next_start, _) => next_start - 1
     }
 }
 

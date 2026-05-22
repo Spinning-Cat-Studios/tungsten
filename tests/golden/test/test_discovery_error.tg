@@ -1,0 +1,12 @@
+fn test_good() -> Unit {
+    expect_type(42, "Nat");
+    ()
+}
+
+fn test_with_args(n: Nat) -> Unit {
+    ()
+}
+
+fn test_returns_nat() -> Nat {
+    42
+}

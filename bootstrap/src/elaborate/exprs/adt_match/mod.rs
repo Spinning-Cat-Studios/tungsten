@@ -24,6 +24,7 @@
 //! - Missing Phase 1 causes leaked `α_List` variables in error messages
 
 mod arm_elaboration;
+mod arm_product_destruct;
 mod classification;
 mod codegen;
 mod context;
@@ -35,6 +36,7 @@ mod unfolding;
 mod tests;
 
 // Re-export the context types
+use context::AdtIdentity;
 pub(super) use context::ClassifiedArms;
 
 use crate::ast;
@@ -83,43 +85,31 @@ impl<'a> Elaborator<'a> {
         self.check_exhaustiveness(&classified, num_ctors, span)?;
 
         // Phase 5: Determine result type
-        let result_ty = self.infer_match_result_type(
-            expected,
-            &classified,
-            &inner_type,
-            &ctx.constructors,
-            &scrutinee_ty,
-            &ctx.type_def.params,
-        )?;
+        let match_type_ctx = inference::MatchTypeCtx {
+            sum_type: &inner_type,
+            constructors: &ctx.constructors,
+            scrutinee_ty: &scrutinee_ty,
+            type_params: &ctx.type_def.params,
+        };
+        let result_ty = self.infer_match_result_type(expected, &classified, &match_type_ctx)?;
 
         // Phase 6: Build case analysis
         // Route based on representation policy (ADR 2.2.26)
+        let codegen_ctx = context::AdtCodegenCtx {
+            ctor_arms: &classified.ctor_arms,
+            catch_all_arm: classified.catch_all,
+            constructors: &ctx.constructors,
+            adt_type: &scrutinee_ty,
+            type_params: &ctx.type_def.params,
+            adt_name: &ctx.type_def.name,
+        };
+
         let term = if num_ctors >= 3 {
             // Flat ADT: use Term::adt_match with O(1) switch
-            self.build_flat_adt_match(
-                match_scrutinee,
-                &classified.ctor_arms,
-                classified.catch_all,
-                &ctx.constructors,
-                &result_ty,
-                &scrutinee_ty,
-                &ctx.type_def.params,
-                &ctx.type_def.name,
-            )?
+            self.build_flat_adt_match(match_scrutinee, &codegen_ctx, &result_ty)?
         } else {
             // Binary sum: use nested Term::case (existing code)
-            self.build_adt_match(
-                match_scrutinee,
-                &inner_type,
-                &classified.ctor_arms,
-                classified.catch_all,
-                &ctx.constructors,
-                0,
-                &result_ty,
-                &scrutinee_ty,
-                &ctx.type_def.params,
-                &ctx.type_def.name,
-            )?
+            self.build_adt_match(match_scrutinee, &inner_type, &codegen_ctx, 0, &result_ty)?
         };
 
         Ok((term, result_ty))

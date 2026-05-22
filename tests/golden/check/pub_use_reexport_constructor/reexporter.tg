@@ -1,0 +1,3 @@
+// Re-exporter: pub use re-exports constructors from source.
+
+pub use source::{Color, Red, Green, Blue, color_name};

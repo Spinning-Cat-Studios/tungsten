@@ -1,0 +1,9 @@
+// Golden test: expect_type in check mode validates args but skips comparison.
+// In check mode, expect_type always succeeds (returns Unit).
+
+pub fn main() -> Nat {
+    expect_type(42, "Nat");
+    expect_type("hello", "String");
+    expect_type(true, "Bool");
+    0
+}

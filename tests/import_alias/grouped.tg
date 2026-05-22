@@ -1,0 +1,9 @@
+// Test: grouped import aliasing with `as` keyword (AC2)
+mod math;
+
+use math::{add as plus, Point as Pt};
+
+fn main() -> Nat {
+    let p: Pt = { x: 10, y: 20 }
+    plus(p.x, p.y)
+}

@@ -1,0 +1,5 @@
+// Source module with a public function.
+
+pub fn shared_fn(x: Nat) -> Nat {
+    x
+}

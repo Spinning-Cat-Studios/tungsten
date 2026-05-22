@@ -1,0 +1,91 @@
+// Benchmark: Collatz sequence length (Peano ADT)
+//
+// Tests: Conditional branching, Peano division, recursion
+// Computes length of Collatz sequence starting from N.
+// Default: 100 iterations of collatz(27) for ~500ms runtime.
+// Usage: ./collatz [iterations]  (default: 100)
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+pub type PNat = PZero | PSucc(PNat)
+pub type PBool = PTrue | PFalse
+
+fn padd(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => b,
+    PSucc(p) => PSucc(padd(p, b)),
+  }
+}
+
+fn pmul(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => PZero,
+    PSucc(p) => padd(b, pmul(p, b)),
+  }
+}
+
+fn to_nat(n: PNat) -> Nat {
+  match n {
+    PZero() => 0,
+    PSucc(p) => 1 + to_nat(p),
+  }
+}
+
+fn p1() -> PNat { PSucc(PZero) }
+fn p3() -> PNat { PSucc(PSucc(PSucc(PZero))) }
+
+fn is_even(n: PNat) -> PBool {
+  match n {
+    PZero() => PTrue,
+    PSucc(PZero()) => PFalse,
+    PSucc(PSucc(p)) => is_even(p),
+  }
+}
+
+fn div2(n: PNat) -> PNat {
+  match n {
+    PZero() => PZero,
+    PSucc(PZero()) => PZero,
+    PSucc(PSucc(p)) => PSucc(div2(p)),
+  }
+}
+
+fn collatz_length(n: PNat) -> PNat {
+  match n {
+    PZero() => PZero,
+    PSucc(PZero()) => PZero,
+    PSucc(_) => match is_even(n) {
+      PTrue() => PSucc(collatz_length(div2(n))),
+      PFalse() => PSucc(collatz_length(PSucc(pmul(p3(), n)))),
+    },
+  }
+}
+
+fn mk_27() -> PNat { pmul(p3(), pmul(p3(), p3())) }
+
+fn run_once() -> Nat {
+  to_nat(collatz_length(mk_27()))
+}
+
+fn repeat_bench(n: PNat, acc: Nat) -> Nat {
+  match n {
+    PZero() => acc,
+    PSucc(p) => repeat_bench(p, acc + run_once()),
+  }
+}
+
+fn from_nat(n: Nat) -> PNat {
+  if n == 0 { PZero } else { PSucc(from_nat(n - 1)) }
+}
+
+fn get_iterations() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 100 }
+}
+
+fn main() -> Nat {
+  // Default: 100 iterations of collatz(27), each = 111 steps
+  // Total: 100 * 111 = 11100
+  repeat_bench(from_nat(get_iterations()), 0)
+}

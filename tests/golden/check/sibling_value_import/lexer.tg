@@ -1,0 +1,4 @@
+// Lexer module — exports a function used by sibling 'driver'.
+pub fn lex(input: Nat) -> Nat {
+    input + 1
+}

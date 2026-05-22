@@ -1,0 +1,7 @@
+fn helper() -> Nat {
+    42
+}
+
+fn main() -> Unit {
+    ()
+}

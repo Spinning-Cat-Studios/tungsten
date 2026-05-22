@@ -1,0 +1,89 @@
+// Test: Inner forall resolution in constructor arguments (ADR 20.5.26b)
+//
+// When Ok((Nil, x)) is checked against Result<(List<T>, X), Error>,
+// the Nil synthesizes as `forall T. List<T>` inside a tuple.
+// The outer forall from Result must be instantiated, AND the inner
+// forall from Nil must be resolved against the expected type.
+
+pub type List<T> = | Nil | Cons(T, List<T>)
+
+pub type Option<T> = | None | Some(T)
+
+pub type Result<T, E> =
+    | Ok(T)
+    | Err(E)
+
+pub type MyError = { msg: String }
+
+pub type Cursor = { pos: Nat }
+
+pub type Item = { name: String }
+
+// ---------------------------------------------------------------------------
+// Helpers (produce values without parameters in test functions)
+// ---------------------------------------------------------------------------
+
+fn make_cursor() -> Cursor {
+    { pos: 0 }
+}
+
+// ---------------------------------------------------------------------------
+// Case 1: Ok with Nil in tuple — the original failing pattern
+// ---------------------------------------------------------------------------
+
+fn test_ok_nil_tuple() -> Unit {
+    let cur = make_cursor();
+    let x: Result<(List<Item>, Cursor), MyError> = Ok((Nil, cur));
+    expect_type(x, "((List<...> × Cursor) + MyError)");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 2: Err with nested forall — E param is phantom in the constructor
+// ---------------------------------------------------------------------------
+
+fn test_err_basic() -> Unit {
+    let x: Result<Nat, MyError> = Err({ msg: "oops" });
+    expect_type(x, "(Nat + MyError)");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 3: Ok with Nil as sole argument (simpler variant)
+// ---------------------------------------------------------------------------
+
+fn test_ok_nil_list() -> Unit {
+    let x: Result<List<Item>, MyError> = Ok(Nil);
+    expect_type(x, "(List<...> + MyError)");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 4: Multi-param inner forall — both tuple elements have inner foralls
+// Ok((Nil, None)) checked against Result<(List<Item>, Option<Nat>), MyError>
+// ---------------------------------------------------------------------------
+
+fn test_multi_inner_forall() -> Unit {
+    let x: Result<(List<Item>, Option<Nat>), MyError> = Ok((Nil, None));
+    expect_type(x, "((List<...> × (... + ...)) + MyError)");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 5: Negative test — incompatible types should produce E0001
+// ---------------------------------------------------------------------------
+
+fn test_type_mismatch_error() -> Unit {
+    expect_error(
+        {
+            let x: Result<(List<Item>, Cursor), MyError> = Ok((42, make_cursor()));
+            x
+        },
+        "E0010"
+    );
+    ()
+}
+
+fn main() -> Nat {
+    0
+}

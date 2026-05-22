@@ -1,0 +1,276 @@
+// Generic type application, instantiation, and pointer/reference type forms.
+
+pub mod eq;
+pub use elab::types::generics::eq::*;
+
+use lexer::span::Span;
+use parser::ast::{
+    TypeExpr, TyPath, TyArrow, TyProduct, TySum, TyApp, TyForall,
+    TyProp, TyUnit, TyVoid, TyPtr, TyRef, TyEq, TyParen, TyError,
+    Path, MkPath,
+    Ident, ident_name,
+    ident_list_len,
+    type_expr_span
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
+use elab::ffi::{
+    TypeHandle, TermHandle, INVALID_HANDLE,
+    tg_type_nat, tg_type_bool, tg_type_string, tg_type_unit,
+    tg_type_void, tg_type_prop, tg_type_arrow, tg_type_product,
+    tg_type_sum, tg_type_forall, tg_type_var, tg_type_mu,
+    tg_type_ptr, tg_type_ref, tg_type_eq,
+    tg_string_to_cstr,
+    tg_types_equal,
+    tg_type_substitute,
+    tg_type_debug,
+    tg_type_is_tyvar, tg_type_get_tyvar_name,
+    tg_cstr_eq
+};
+use elab::env::{
+    Env, env_resolve_type_path, env_bind_type_var, env_unbind_type_var,
+    env_is_type_var,
+    TypePathResult, TypePathOk, TypePathErr,
+    ResolvedType, ResolvedTypeVar, ResolvedTypeDef,
+    TypeDefInfo,
+    EnvError, env_error_new,
+    MaybeTypeHandle, NoTypeHandle, SomeTypeHandle,
+    MaybeRecordFields, NoRecordFields, SomeRecordFields,
+    ident_list_head_name
+};
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CTNat, CTBool, CTString, CTUnit, CTVoid, CTProp,
+    CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq,
+    ct_nat, ct_bool, ct_string, ct_unit, ct_void, ct_prop,
+    ct_arrow, ct_pair, ct_sum, ct_ref, ct_ptr, ct_var, ct_forall, ct_mu, ct_eq
+};
+use elab::adt::string_to_ptr;
+use driver::util::{Char, list_reverse, list_len, list_get, nat_to_string, Option, Some, None, string_concat};
+use elab::types::result_types::{ElabTypeResult, ElabTypeOk, ElabTypeErr, ElabTypeError, elab_type_error, elab_type_error_coded};
+use elab::types::{elab_type};
+
+// ===========================================================================
+// TYPE APPLICATION
+// ===========================================================================
+
+/// Elaborate type application: F<A, B, ...>
+pub fn elab_type_app(env: Env, base: TypeExpr, args: List<TypeExpr>, span: Span) -> ElabTypeResult {
+    match base {
+        TyPath(path) =>
+            elab_type_app_path(env, path, args, span),
+        _ =>
+            ElabTypeErr(elab_type_error(
+                "type application requires a type name",
+                span
+            ))
+    }
+}
+
+fn elab_type_app_path(env: Env, path: Path, args: List<TypeExpr>, span: Span) -> ElabTypeResult {
+    match env_resolve_type_path(env, path) {
+        TypePathErr(err) =>
+            ElabTypeErr(elab_type_error_coded(err.message, span, err.code)),
+        TypePathOk(resolved) =>
+            elab_type_app_resolved(env, resolved, args, span)
+    }
+}
+
+fn elab_type_app_resolved(
+    env: Env,
+    resolved: ResolvedType,
+    args: List<TypeExpr>,
+    span: Span
+) -> ElabTypeResult {
+    match resolved {
+        ResolvedTypeVar(_) =>
+            ElabTypeErr(elab_type_error(
+                "type variable cannot have type arguments",
+                span
+            )),
+        ResolvedTypeDef(info) =>
+            elab_type_app_def(env, info, args, span)
+    }
+}
+
+fn elab_type_app_def(env: Env, info: TypeDefInfo, args: List<TypeExpr>, span: Span) -> ElabTypeResult {
+    let expected = info.arity;
+    let actual = list_len(args);
+    if expected == 0 {
+        ElabTypeErr(elab_type_error(
+            "type " ++ info.name ++ " is not generic",
+            span
+        ))
+    } else if actual != expected {
+        ElabTypeErr(elab_type_error(
+            info.name ++ " expects " ++ nat_to_string(expected) ++ 
+            " type argument" ++ (if expected == 1 { "" } else { "s" }) ++
+            ", got " ++ nat_to_string(actual),
+            span
+        ))
+    } else {
+        match elab_type_args(env, args) {
+            ElabTypeArgsErr(errors) =>
+                first_error_or_default(errors, span),
+            ElabTypeArgsOk(arg_handles, arg_ctypes) =>
+                build_instantiated_type(info, arg_handles, arg_ctypes, span)
+        }
+    }
+}
+
+fn first_error_or_default(errors: List<ElabTypeError>, span: Span) -> ElabTypeResult {
+    match errors {
+        Nil() => ElabTypeErr(elab_type_error("type argument error", span)),
+        Cons(err, _) => ElabTypeErr(err)
+    }
+}
+
+/// Result of elaborating type arguments for generic type application.
+pub type ElabTypeArgsResult =
+    | ElabTypeArgsOk(List<TypeHandle>, List<CodegenType>)
+    | ElabTypeArgsErr(List<ElabTypeError>)
+
+/// Accumulator for type argument elaboration.
+type TypeArgAcc = {
+    handles: List<TypeHandle>,
+    ctypes: List<CodegenType>,
+    errors: List<ElabTypeError>
+}
+
+pub fn elab_type_args(env: Env, args: List<TypeExpr>) -> ElabTypeArgsResult {
+    let acc: TypeArgAcc = { handles: Nil(), ctypes: Nil(), errors: Nil() };
+    elab_type_args_acc(env, args, acc)
+}
+
+fn elab_type_args_acc(
+    env: Env,
+    args: List<TypeExpr>,
+    acc: TypeArgAcc
+) -> ElabTypeArgsResult {
+    match args {
+        Nil() =>
+            if list_is_empty(acc.errors) {
+                ElabTypeArgsOk(list_reverse(acc.handles), list_reverse(acc.ctypes))
+            } else {
+                ElabTypeArgsErr(list_reverse(acc.errors))
+            },
+        Cons(arg, rest) =>
+            elab_type_arg_one(env, arg, rest, acc)
+    }
+}
+
+fn elab_type_arg_one(
+    env: Env,
+    arg: TypeExpr,
+    rest: List<TypeExpr>,
+    acc: TypeArgAcc
+) -> ElabTypeArgsResult {
+    match elab_type(env, arg) {
+        ElabTypeOk(handle, ctype) =>
+            let next: TypeArgAcc = {
+                handles: Cons(handle, acc.handles),
+                ctypes: Cons(ctype, acc.ctypes),
+                errors: acc.errors
+            };
+            elab_type_args_acc(env, rest, next),
+        ElabTypeErr(err) =>
+            let next: TypeArgAcc = {
+                handles: acc.handles,
+                ctypes: acc.ctypes,
+                errors: Cons(err, acc.errors)
+            };
+            elab_type_args_acc(env, rest, next)
+    }
+}
+
+// ===========================================================================
+// TYPE INSTANTIATION
+// ===========================================================================
+
+fn build_instantiated_type(
+    info: TypeDefInfo,
+    arg_handles: List<TypeHandle>,
+    arg_ctypes: List<CodegenType>,
+    span: Span
+) -> ElabTypeResult {
+    if info.encoded_type == INVALID_HANDLE {
+        ElabTypeErr(elab_type_error(
+            "type not yet elaborated: " ++ info.name,
+            span
+        ))
+    } else if is_placeholder_encoding(info.encoded_type, info.name) {
+        let ctype = ct_var(info.name);
+        ElabTypeOk(info.encoded_type, ctype)
+    } else {
+        let instantiated = substitute_all_params(info.encoded_type, info.params, arg_handles);
+        let ctype = ct_var(info.name);
+        ElabTypeOk(instantiated, ctype)
+    }
+}
+
+pub fn is_placeholder_encoding(encoded: TypeHandle, type_name: String) -> Bool {
+    if tg_type_is_tyvar(encoded) {
+        let var_name = tg_type_get_tyvar_name(encoded);
+        let expected_name = tg_string_to_cstr(type_name);
+        tg_cstr_eq(var_name, expected_name)
+    } else {
+        false
+    }
+}
+
+fn substitute_all_params(
+    base_type: TypeHandle,
+    params: List<String>,
+    args: List<TypeHandle>
+) -> TypeHandle {
+    substitute_params_loop(base_type, params, args, 0)
+}
+
+fn substitute_params_loop(
+    ty: TypeHandle,
+    params: List<String>,
+    args: List<TypeHandle>,
+    index: Nat
+) -> TypeHandle {
+    match list_get(params, index) {
+        None() => ty,
+        Some(param_name) =>
+            substitute_one_param(ty, param_name, params, args, index)
+    }
+}
+
+fn substitute_one_param(
+    ty: TypeHandle,
+    param_name: String,
+    params: List<String>,
+    args: List<TypeHandle>,
+    index: Nat
+) -> TypeHandle {
+    match list_get(args, index) {
+        None() => ty,
+        Some(arg_type) =>
+            let var_ptr = string_to_ptr(param_name);
+            let substituted = tg_type_substitute(ty, var_ptr, arg_type);
+            substitute_params_loop(substituted, params, args, index + 1)
+    }
+}
+
+// ===========================================================================
+// POINTER AND REFERENCE TYPES
+// ===========================================================================
+
+pub fn elab_type_ptr(env: Env, inner: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, inner) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(inner_h, inner_ct) =>
+            ElabTypeOk(tg_type_ptr(inner_h), ct_ptr(inner_ct))
+    }
+}
+
+pub fn elab_type_ref(env: Env, inner: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, inner) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(inner_h, inner_ct) =>
+            ElabTypeOk(tg_type_ref(inner_h), ct_ref(inner_ct))
+    }
+}

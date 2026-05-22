@@ -1,0 +1,12 @@
+// Test: glob-importing two modules that each define `collide`
+// should produce E0018 (glob conflict).
+
+pub mod mod_a;
+pub mod mod_b;
+
+use mod_a::*;
+use mod_b::*;
+
+fn main() -> Nat {
+    collide(1)
+}

@@ -1,0 +1,277 @@
+// src/compiler/elab/exprs/forms/compare/mod.tg
+// Type comparison and polymorphic instantiation.
+//
+// synth_and_compare: synthesize a type, then check it matches expected.
+// Handles auto-instantiation of forall types (e.g., None : forall T. Option<T>
+// checked against Option<Nat>).
+
+pub mod inner_forall;
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_types_equal, tg_cstr_eq,
+    tg_type_is_forall, tg_type_get_forall_var, tg_type_get_forall_body,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_is_arrow, tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_is_tyvar, tg_type_get_tyvar_name,
+    tg_type_is_mu, tg_type_get_mu_body,
+    tg_type_substitute, tg_term_type_app,
+    is_type_error
+};
+use elab::env::{Env};
+use elab::cir::{CodegenIR, CIRTypeApp, CTUnit};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error, elab_expr_error_coded, TermInfo};
+use elab::exprs::records::{get_structural_type, deep_types_equal};
+use elab::exprs::forms::compare::inner_forall::{resolve_inner_foralls};
+
+// Import synth from parent module for mutual recursion
+use elab::exprs::{synth};
+
+// ===========================================================================
+// EXTRACT RESULT ADT (ADR 20.5.26c)
+// ===========================================================================
+
+/// Three-outcome result for type argument extraction.
+/// Replaces the old TypeHandle return where INVALID_HANDLE conflated
+/// "compatible but no variable found" with "structurally incompatible".
+pub type ExtractResult =
+    | ExtractFound(TypeHandle)
+    | ExtractCompatible
+    | ExtractMismatch
+
+// ===========================================================================
+// SYNTH AND COMPARE
+// ===========================================================================
+
+/// Synthesize type then compare with expected.
+/// Handles polymorphic instantiation when synthesized type is forall but expected is not.
+pub fn synth_and_compare(env: Env, expr: Expr, expected: TypeHandle) -> ElabExprResult {
+    // TypeError (poison) on expected: skip comparison to prevent cascade.
+    // Still synthesize — the expression may have its own independent errors.
+    if is_type_error(expected) {
+        synth(env, expr)
+    } else {
+
+    let span = expr_span(expr);
+    match synth(env, expr) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, actual, cir) =>
+            let sr: TermInfo = { term: term, ty: actual, cir: cir };
+            compare_synthesized(env2, sr, expected, span)
+    }
+    }
+}
+
+/// Compare a synthesized type against an expected type, handling poison types,
+/// structural resolution, forall instantiation, and deep equality.
+fn compare_synthesized(
+    env: Env,
+    sr: TermInfo,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    let term = sr.term;
+    let actual = sr.ty;
+    let cir = sr.cir;
+    // TypeError (poison) on synthesized type: propagate without
+    // generating a new "type mismatch" error.
+    if is_type_error(actual) {
+        ElabExprOk(env, term, actual, cir)
+    } else {
+
+    // First try direct comparison with top-level structural resolution
+    let struct_actual = get_structural_type(env, actual);
+    let struct_expected = get_structural_type(env, expected);
+    if tg_types_equal(struct_actual, struct_expected) {
+        // Return the expected type (nominal) for consistency
+        ElabExprOk(env, term, expected, cir)
+    } else if tg_type_is_forall(actual) {
+        // Actual is forall, expected is not - try to instantiate
+        let state: ForallState = { term: term, forall_ty: actual, cir: cir };
+        try_instantiate_forall(env, state, expected, span)
+    } else {
+        // Try deep type equality as fallback.
+        if deep_types_equal(env, struct_actual, struct_expected) {
+            ElabExprOk(env, term, expected, cir)
+        } else {
+            ElabExprErr(elab_expr_error_coded("type mismatch", span, "E0001"))
+        }
+    }
+    }
+}
+
+// ===========================================================================
+// FORALL INSTANTIATION
+// ===========================================================================
+
+/// Get the innermost non-forall body of a (possibly nested) forall type.
+/// For Forall("T", Forall("E", body)), returns body.
+pub fn get_innermost_forall_body(ty: TypeHandle) -> TypeHandle {
+    if tg_type_is_forall(ty) {
+        get_innermost_forall_body(tg_type_get_forall_body(ty))
+    } else {
+        ty
+    }
+}
+
+/// Bundled state for forall instantiation.
+pub type ForallState = {
+    term: TermHandle,
+    forall_ty: TypeHandle,
+    cir: CodegenIR
+}
+
+/// Try to instantiate a forall type to match an expected type.
+/// For example: forall T. Option<T> instantiated with T = Nat to get Option<Nat>
+/// Handles multi-parameter foralls like forall T. forall E. Result<T, E> by
+/// recursively peeling and instantiating one forall at a time.
+fn try_instantiate_forall(
+    env: Env,
+    state: ForallState,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    if tg_type_is_forall(state.forall_ty) {
+        let var = tg_type_get_forall_var(state.forall_ty);
+        let body = tg_type_get_forall_body(state.forall_ty);
+        
+        // Use innermost body (past all nested foralls) for extraction.
+        // This lets us find the type variable even in multi-parameter foralls
+        // like forall T. forall E. Sum(T, E).
+        let inner_body = get_innermost_forall_body(state.forall_ty);
+        
+        // Resolve any inner foralls BEFORE extraction. The inner_body may
+        // contain embedded foralls from polymorphic subexpressions (e.g.,
+        // Nil : forall T. List<T> inside a tuple), which would cause
+        // extract_type_arg_from_match to return ExtractMismatch because
+        // it has no Forall case. Resolving them first produces a concrete
+        // structural type that extraction can walk. (ADR 21.5.26b)
+        let resolved_inner = resolve_inner_foralls(inner_body, expected);
+        
+        // Extract type argument by matching resolved body structure against expected
+        let extract_result = extract_type_arg_from_match(resolved_inner, expected, var);
+        
+        match extract_result {
+        ExtractMismatch =>
+            ElabExprErr(elab_expr_error("cannot instantiate polymorphic type to match expected type", span)),
+        ExtractCompatible =>
+            // Body doesn't contain this variable — can't determine type argument
+            ElabExprErr(elab_expr_error("cannot instantiate polymorphic type to match expected type", span)),
+        ExtractFound(type_arg) =>
+            // Substitute in the immediate body (not innermost)
+            let instantiated = tg_type_substitute(body, var, type_arg);
+            let type_app_term = tg_term_type_app(state.term, type_arg);
+            let type_app_cir = CIRTypeApp(state.cir, CTUnit());
+            
+            if tg_type_is_forall(instantiated) {
+                // Still a forall (multi-parameter generic) — recurse
+                let new_state: ForallState = { term: type_app_term, forall_ty: instantiated, cir: type_app_cir };
+                try_instantiate_forall(env, new_state, expected, span)
+            } else {
+                // Fully instantiated — verify the result matches expected.
+                // First, resolve any inner foralls left from nested polymorphic
+                // subexpressions (e.g., Nil : forall T. List<T> inside a tuple).
+                let resolved = resolve_inner_foralls(instantiated, expected);
+                let struct_instantiated = get_structural_type(env, resolved);
+                let struct_expected = get_structural_type(env, expected);
+                
+                if tg_types_equal(struct_instantiated, struct_expected) {
+                    ElabExprOk(env, type_app_term, expected, type_app_cir)
+                } else if deep_types_equal(env, struct_instantiated, struct_expected) {
+                    ElabExprOk(env, type_app_term, expected, type_app_cir)
+                } else {
+                    ElabExprErr(elab_expr_error("cannot instantiate polymorphic type to match expected type", span))
+                }
+            }
+        }
+    } else {
+        ElabExprErr(elab_expr_error("expected forall type", span))
+    }
+}
+
+// ===========================================================================
+// TYPE ARGUMENT EXTRACTION
+// ===========================================================================
+
+/// Extract a type argument by matching a forall body against an expected type.
+/// For example, matching `Sum(Unit, TyVar("T"))` against `Sum(Unit, Nat)` with var_name "T"
+/// returns `ExtractFound(Nat)`.
+///
+/// Combination rules for binary types (Sum, Arrow, Product):
+///   Found(t) + (any)       → Found(t)
+///   Mismatch + (any)       → Mismatch
+///   Compatible + right     → right  (keep searching)
+fn try_extract_from_binary(
+    pat_left: TypeHandle,
+    pat_right: TypeHandle,
+    act_left: TypeHandle,
+    act_right: TypeHandle,
+    var_name: Nat
+) -> ExtractResult {
+    let left_result = extract_type_arg_from_match(pat_left, act_left, var_name);
+    match left_result {
+        ExtractFound(t) => ExtractFound(t),
+        ExtractMismatch => ExtractMismatch,
+        ExtractCompatible => extract_type_arg_from_match(pat_right, act_right, var_name)
+    }
+}
+
+/// Walk pattern and actual in parallel, extracting the type argument for var_name.
+///
+/// Handles: TyVar, Sum, Arrow, Product, Mu.
+/// Does NOT handle: Forall — callers must call resolve_inner_foralls() first
+/// to eliminate embedded foralls before invoking this function. (ADR 21.5.26b)
+pub fn extract_type_arg_from_match(
+    pattern: TypeHandle,
+    actual: TypeHandle,
+    var_name: Nat  // The forall variable name as a CStr pointer
+) -> ExtractResult {
+    // If pattern is the type variable we're looking for, return actual
+    if tg_type_is_tyvar(pattern) {
+        let pat_var = tg_type_get_tyvar_name(pattern);
+        if tg_cstr_eq(pat_var, var_name) {
+            ExtractFound(actual)
+        } else {
+            // Non-target TyVar — this extractor only solves var_name;
+            // unrelated type variables are non-participating (Compatible).
+            ExtractCompatible
+        }
+    // Recurse into structural types
+    } else if tg_type_is_sum(pattern) && tg_type_is_sum(actual) {
+        try_extract_from_binary(
+            tg_type_get_sum_left(pattern), tg_type_get_sum_right(pattern),
+            tg_type_get_sum_left(actual), tg_type_get_sum_right(actual),
+            var_name
+        )
+    } else if tg_type_is_arrow(pattern) && tg_type_is_arrow(actual) {
+        try_extract_from_binary(
+            tg_type_get_arrow_domain(pattern), tg_type_get_arrow_codomain(pattern),
+            tg_type_get_arrow_domain(actual), tg_type_get_arrow_codomain(actual),
+            var_name
+        )
+    } else if tg_type_is_product(pattern) && tg_type_is_product(actual) {
+        try_extract_from_binary(
+            tg_type_get_product_left(pattern), tg_type_get_product_right(pattern),
+            tg_type_get_product_left(actual), tg_type_get_product_right(actual),
+            var_name
+        )
+    } else if tg_type_is_mu(pattern) && tg_type_is_mu(actual) {
+        extract_type_arg_from_match(
+            tg_type_get_mu_body(pattern),
+            tg_type_get_mu_body(actual),
+            var_name
+        )
+    } else if tg_types_equal(pattern, actual) {
+        // Ground types or structurally equal — compatible, no variable found
+        ExtractCompatible
+    } else {
+        // No matching structural form (e.g., Forall, Unit, Record, or
+        // mismatched constructors). If this fires on a Forall, the caller
+        // forgot to call resolve_inner_foralls() first — see ADR 21.5.26b.
+        ExtractMismatch
+    }
+}

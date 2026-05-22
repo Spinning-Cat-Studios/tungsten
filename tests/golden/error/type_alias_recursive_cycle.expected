@@ -1,0 +1,12 @@
+warning: Phase A.5 global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0060]: recursive type alias `Foo` references itself (at 49..63)
+  hint: run `tungsten doctor check phase-a5 <file>` for details
+[E0060] Error: recursive type alias `Foo` references itself
+   ╭─[tests/golden/error/type_alias_recursive_cycle.tg:2:1]
+   │
+ 2 │ type Foo = Foo
+   │ ───────┬──────  
+   │        ╰──────── 
+───╯
+
+error: aborting due to 1 error

@@ -1,0 +1,183 @@
+// src/compiler/elab/exprs/apply/app/type_inference.tg
+// Type parameter inference for polymorphic function application.
+
+use elab::ffi::{
+    TypeHandle, INVALID_HANDLE,
+    tg_type_is_arrow, tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
+    tg_type_is_forall, tg_type_get_forall_body, tg_type_get_forall_var,
+    tg_type_is_mu, tg_type_get_mu_body,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_is_tyvar, tg_type_get_tyvar_name,
+    tg_type_substitute,
+    tg_cstr_eq
+};
+
+// ===========================================================================
+// TYPE PARAMETER INFERENCE
+// ===========================================================================
+
+/// Infer the value of a type parameter by matching a parameter type pattern
+/// against an argument type.
+///
+/// For example, matching `List(T)` against `List(String)` yields T = String.
+/// Matching `T` against `Nat` yields T = Nat.
+///
+/// The `var_name` is a C string pointer for the forall-bound variable name.
+pub fn infer_type_param(param_ty: TypeHandle, arg_ty: TypeHandle, var_name: Nat) -> TypeHandle {
+    // If the parameter type IS the type variable, return arg_ty directly
+    if tg_type_is_tyvar(param_ty) {
+        let pname = tg_type_get_tyvar_name(param_ty);
+        if tg_cstr_eq(pname, var_name) {
+            arg_ty
+        } else {
+            // Different variable — can't extract from this position
+            arg_ty
+        }
+    // If both are Mu types, look inside the bodies to find the type variable
+    } else if tg_type_is_mu(param_ty) {
+        if tg_type_is_mu(arg_ty) {
+            let param_body = tg_type_get_mu_body(param_ty);
+            let arg_body = tg_type_get_mu_body(arg_ty);
+            search_tyvar_in_type(param_body, arg_body, var_name, arg_ty)
+        } else {
+            // Param is Mu but arg isn't — fall back to arg_ty
+            arg_ty
+        }
+    } else {
+        // For Sum, Product, Arrow, etc.: recursively search for the type variable
+        // in the parameter type structure and extract the corresponding part of arg_ty.
+        // E.g., Sum(Unit, T) matched against Sum(Unit, Nat) → T = Nat
+        search_tyvar_in_type(param_ty, arg_ty, var_name, arg_ty)
+    }
+}
+
+/// Peel through nested foralls to find the eventual arrow domain.
+/// Returns the domain type of the innermost arrow, or INVALID_HANDLE if
+/// no arrow is found inside the nested foralls.
+/// Used to check if an outer forall variable appears in the value parameter
+/// position of a multi-param generic constructor.
+pub fn get_nested_arrow_domain(ty: TypeHandle) -> TypeHandle {
+    if tg_type_is_arrow(ty) {
+        tg_type_get_arrow_domain(ty)
+    } else if tg_type_is_forall(ty) {
+        get_nested_arrow_domain(tg_type_get_forall_body(ty))
+    } else {
+        INVALID_HANDLE
+    }
+}
+
+/// Check whether a type variable (identified by var_name CStr) occurs anywhere
+/// in the given type. Used to determine if forall type inference from arguments
+/// is possible (T must appear in the domain).
+pub fn tyvar_occurs_in_type(ty: TypeHandle, var_name: Nat) -> Bool {
+    if tg_type_is_tyvar(ty) {
+        let pname = tg_type_get_tyvar_name(ty);
+        tg_cstr_eq(pname, var_name)
+    } else if tg_type_is_sum(ty) {
+        tyvar_occurs_in_type(tg_type_get_sum_left(ty), var_name)
+        || tyvar_occurs_in_type(tg_type_get_sum_right(ty), var_name)
+    } else if tg_type_is_product(ty) {
+        tyvar_occurs_in_type(tg_type_get_product_left(ty), var_name)
+        || tyvar_occurs_in_type(tg_type_get_product_right(ty), var_name)
+    } else if tg_type_is_arrow(ty) {
+        tyvar_occurs_in_type(tg_type_get_arrow_domain(ty), var_name)
+        || tyvar_occurs_in_type(tg_type_get_arrow_codomain(ty), var_name)
+    } else if tg_type_is_mu(ty) {
+        tyvar_occurs_in_type(tg_type_get_mu_body(ty), var_name)
+    } else if tg_type_is_forall(ty) {
+        tyvar_occurs_in_type(tg_type_get_forall_body(ty), var_name)
+    } else {
+        false
+    }
+}
+
+/// Strip leading forall wrappers from a type.
+/// Nullary constructors like Nil() synthesize as forall T. List<T>.
+/// When used as a value argument, we strip the forall to get the body
+/// for correct type parameter inference.
+pub fn strip_foralls(ty: TypeHandle) -> TypeHandle {
+    if tg_type_is_forall(ty) {
+        strip_foralls(tg_type_get_forall_body(ty))
+    } else {
+        ty
+    }
+}
+
+/// Search for TyVar(var_name) in `pattern` and extract the corresponding
+/// type from `target`. Returns the extracted type, or `fallback` if not found.
+fn search_tyvar_in_type(
+    pattern: TypeHandle,
+    target: TypeHandle,
+    var_name: Nat,
+    fallback: TypeHandle
+) -> TypeHandle {
+    if tg_type_is_tyvar(pattern) {
+        let pname = tg_type_get_tyvar_name(pattern);
+        if tg_cstr_eq(pname, var_name) {
+            target
+        } else {
+            fallback
+        }
+    } else if tg_type_is_product(pattern) {
+        if tg_type_is_product(target) {
+            // Try left side first
+            let left_result = search_tyvar_in_type(
+                tg_type_get_product_left(pattern),
+                tg_type_get_product_left(target),
+                var_name, fallback
+            );
+            if left_result != fallback {
+                left_result
+            } else {
+                search_tyvar_in_type(
+                    tg_type_get_product_right(pattern),
+                    tg_type_get_product_right(target),
+                    var_name, fallback
+                )
+            }
+        } else {
+            fallback
+        }
+    } else if tg_type_is_sum(pattern) {
+        if tg_type_is_sum(target) {
+            let left_result = search_tyvar_in_type(
+                tg_type_get_sum_left(pattern),
+                tg_type_get_sum_left(target),
+                var_name, fallback
+            );
+            if left_result != fallback {
+                left_result
+            } else {
+                search_tyvar_in_type(
+                    tg_type_get_sum_right(pattern),
+                    tg_type_get_sum_right(target),
+                    var_name, fallback
+                )
+            }
+        } else {
+            fallback
+        }
+    } else if tg_type_is_arrow(pattern) {
+        if tg_type_is_arrow(target) {
+            let domain_result = search_tyvar_in_type(
+                tg_type_get_arrow_domain(pattern),
+                tg_type_get_arrow_domain(target),
+                var_name, fallback
+            );
+            if domain_result != fallback {
+                domain_result
+            } else {
+                search_tyvar_in_type(
+                    tg_type_get_arrow_codomain(pattern),
+                    tg_type_get_arrow_codomain(target),
+                    var_name, fallback
+                )
+            }
+        } else {
+            fallback
+        }
+    } else {
+        fallback
+    }
+}

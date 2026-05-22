@@ -1,0 +1,108 @@
+// src/compiler/elab/ffi/mod.tg
+// FFI Bindings for Tungsten Core
+//
+// This module provides Tungsten bindings for the tungsten_core FFI functions.
+// These functions allow the self-hosted elaborator to construct Core terms
+// and types, and to invoke the type checker.
+//
+// ## Architecture
+//
+// The FFI uses handle-based allocation:
+//   - TermHandle: u64 index into arena's term storage
+//   - TypeHandle: u64 index into arena's type storage  
+//   - CtxHandle:  u64 index into arena's context storage
+
+pub mod terms;
+pub mod types;
+
+pub use elab::ffi::terms::*;
+pub use elab::ffi::types::*;
+
+// ============================================================================
+// Handle Types (aliases for clarity)
+// ============================================================================
+
+// These are all Nat (u64) under the hood, but we document the intent
+pub type TermHandle = Nat
+pub type TypeHandle = Nat
+pub type CtxHandle = Nat
+
+// Invalid handle sentinel (u64::MAX)
+pub fn INVALID_HANDLE() -> Nat { 18446744073709551615 }
+
+/// Sentinel value for type stubs created by populate_type_stubs.
+/// Indicates the type body has not been elaborated yet.
+pub fn STUB_KIND_UNSET() -> Nat { 0 }
+
+// ============================================================================
+// Initialization
+// ============================================================================
+
+// Initialize/reset the FFI arena. Call before elaboration.
+pub extern "C" fn tg_init() -> Unit
+
+// ============================================================================
+// String Conversion
+// ============================================================================
+
+// Convert a Tungsten String to a C string pointer.
+pub extern "C" fn tg_string_to_cstr(s: String) -> Nat
+
+// Compare two C strings for equality.
+pub extern "C" fn tg_cstr_eq(a: Nat, b: Nat) -> Bool
+
+// ============================================================================
+// Error/Poison Type (W3 — Error Cascade Prevention)
+// ============================================================================
+
+// Construct a TypeError (poison type) for error cascade prevention.
+// TypeError unifies silently with any type to suppress secondary diagnostics.
+pub extern "C" fn tg_type_error() -> TypeHandle
+
+// Check whether a type handle represents a TypeError (poison type).
+pub extern "C" fn tg_is_type_error(ty: TypeHandle) -> Bool
+
+/// Convenience wrapper: get a TypeError handle.
+pub fn type_error_handle() -> TypeHandle {
+    tg_type_error()
+}
+
+/// Convenience wrapper: check if a type is TypeError.
+pub fn is_type_error(ty: TypeHandle) -> Bool {
+    tg_is_type_error(ty)
+}
+
+// ============================================================================
+// Context Operations
+// ============================================================================
+
+// Create an empty context
+pub extern "C" fn tg_ctx_empty() -> CtxHandle
+
+// Extend context with term binding
+pub extern "C" fn tg_ctx_extend(ctx: CtxHandle, name: Nat, ty: TypeHandle) -> CtxHandle
+
+// Look up variable type in context
+pub extern "C" fn tg_ctx_lookup(ctx: CtxHandle, name: Nat) -> TypeHandle
+
+// ============================================================================
+// Type Checking
+// ============================================================================
+
+// Type-check a term
+pub extern "C" fn tg_typecheck(ctx: CtxHandle, term: TermHandle, out_ty: Nat) -> Bool
+
+// Check if two types are equal
+pub extern "C" fn tg_types_equal(ty1: TypeHandle, ty2: TypeHandle) -> Bool
+
+// Format a type as a display string (returns CString pointer, caller frees)
+pub extern "C" fn tg_type_format_display(ty: TypeHandle) -> Nat
+
+// Get length of last error message
+pub extern "C" fn tg_get_last_error_len() -> Nat
+
+// Get last error message
+pub extern "C" fn tg_get_last_error(buf: Nat, len: Nat) -> Nat
+
+// Check if two terms are equal
+pub extern "C" fn tg_terms_equal(t1: TermHandle, t2: TermHandle) -> Bool

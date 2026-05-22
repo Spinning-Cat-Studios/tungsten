@@ -1,0 +1,9 @@
+[E0012] Error: expected 1 arguments, found 2
+   ╭─[tests/golden/error/type_alias_arity_mismatch.tg:9:12]
+   │
+ 9 │     let x: Alias<Nat, Bool> = Ok(42);
+   │            ────────┬───────  
+   │                    ╰───────── expected 1 argument
+───╯
+
+error: aborting due to 1 error

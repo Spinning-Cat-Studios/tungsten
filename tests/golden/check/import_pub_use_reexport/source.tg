@@ -1,0 +1,5 @@
+// Original module defining the type and function.
+
+pub type ReType = Nat
+
+pub fn re_fn(x: ReType) -> Nat { x + 1 }

@@ -3,10 +3,10 @@
 //! This module handles normalizing fields within ADT constructors and
 //! canonicalizing type arguments for consistent representation.
 
-use std::collections::{HashMap, HashSet};
-
 use crate::elaborate::Elaborator;
 use tungsten_core::Type;
+
+use super::NormFieldCtx;
 
 impl<'a> Elaborator<'a> {
     /// Canonicalize a type argument without expanding ADTs.
@@ -49,119 +49,48 @@ impl<'a> Elaborator<'a> {
     /// IMPORTANT: We do NOT expand other ADTs inside this ADT's encoding.
     /// This ensures consistency with cached encodings which also keep cross-references
     /// as `App("TypeName", [])` rather than expanding them.
-    pub(super) fn normalize_field_for_adt(
-        &self,
-        field_ty: &Type,
-        adt_name: &str,
-        subst: &HashMap<&str, &Type>,
-        is_recursive: bool,
-        mu_var: &str,
-        in_progress: &mut HashSet<String>,
-    ) -> Type {
+    pub(super) fn normalize_field_for_adt(&self, field_ty: &Type, ctx: &mut NormFieldCtx) -> Type {
         match field_ty {
-            Type::TyVar(v) => self.normalize_field_tyvar(
-                v,
-                field_ty,
-                adt_name,
-                subst,
-                is_recursive,
-                mu_var,
-                in_progress,
-            ),
-            Type::App(name, args) => self.normalize_field_app(
-                name,
-                args,
-                field_ty,
-                adt_name,
-                subst,
-                is_recursive,
-                mu_var,
-                in_progress,
-            ),
+            Type::TyVar(v) => self.normalize_field_tyvar(v, field_ty, ctx),
+            Type::App(name, args) => self.normalize_field_app(name, args, field_ty, ctx),
             Type::Product(l, r) => Type::product(
-                self.normalize_field_for_adt(l, adt_name, subst, is_recursive, mu_var, in_progress),
-                self.normalize_field_for_adt(r, adt_name, subst, is_recursive, mu_var, in_progress),
+                self.normalize_field_for_adt(l, ctx),
+                self.normalize_field_for_adt(r, ctx),
             ),
             Type::Sum(l, r) => Type::sum(
-                self.normalize_field_for_adt(l, adt_name, subst, is_recursive, mu_var, in_progress),
-                self.normalize_field_for_adt(r, adt_name, subst, is_recursive, mu_var, in_progress),
+                self.normalize_field_for_adt(l, ctx),
+                self.normalize_field_for_adt(r, ctx),
             ),
             Type::Arrow(p, r) => Type::arrow(
-                self.normalize_field_for_adt(p, adt_name, subst, is_recursive, mu_var, in_progress),
-                self.normalize_field_for_adt(r, adt_name, subst, is_recursive, mu_var, in_progress),
+                self.normalize_field_for_adt(p, ctx),
+                self.normalize_field_for_adt(r, ctx),
             ),
-            Type::Mu(v, body) => Type::mu(
-                v,
-                self.normalize_field_for_adt(
-                    body,
-                    adt_name,
-                    subst,
-                    is_recursive,
-                    mu_var,
-                    in_progress,
-                ),
-            ),
-            Type::Forall(v, body) => Type::forall(
-                v,
-                self.normalize_field_for_adt(
-                    body,
-                    adt_name,
-                    subst,
-                    is_recursive,
-                    mu_var,
-                    in_progress,
-                ),
-            ),
-            Type::Ptr(inner) => Type::ptr(self.normalize_field_for_adt(
-                inner,
-                adt_name,
-                subst,
-                is_recursive,
-                mu_var,
-                in_progress,
-            )),
-            Type::Ref(inner) => Type::ref_ty(self.normalize_field_for_adt(
-                inner,
-                adt_name,
-                subst,
-                is_recursive,
-                mu_var,
-                in_progress,
-            )),
+            Type::Mu(v, body) => Type::mu(v, self.normalize_field_for_adt(body, ctx)),
+            Type::Forall(v, body) => Type::forall(v, self.normalize_field_for_adt(body, ctx)),
+            Type::Ptr(inner) => Type::ptr(self.normalize_field_for_adt(inner, ctx)),
+            Type::Ref(inner) => Type::ref_ty(self.normalize_field_for_adt(inner, ctx)),
             Type::Eq(t, a, b) => Type::eq(
-                self.normalize_field_for_adt(t, adt_name, subst, is_recursive, mu_var, in_progress),
+                self.normalize_field_for_adt(t, ctx),
                 (**a).clone(),
                 (**b).clone(),
             ),
-            // Flat ADT (ADR 2.2.26) - recursively normalize variants
+            // Flat ADT (ADR 2.2.26) - normalize variant fields independently.
+            // Use normalize_for_comparison_impl rather than normalize_field_for_adt
+            // to avoid incorrect self-reference detection: App("List", [α_TypeExpr])
+            // inside TypeExpr's Adt body is NOT a self-reference to the outer List
+            // being encoded.
             Type::Adt(name, type_args, variants) => Type::Adt(
                 name.clone(),
                 type_args
                     .iter()
-                    .map(|t| {
-                        self.normalize_field_for_adt(
-                            t,
-                            adt_name,
-                            subst,
-                            is_recursive,
-                            mu_var,
-                            in_progress,
-                        )
-                    })
+                    .map(|t| self.normalize_field_for_adt(t, ctx))
                     .collect(),
                 variants
                     .iter()
                     .map(|(ctor, payload)| {
                         (
                             ctor.clone(),
-                            self.normalize_field_for_adt(
-                                payload,
-                                adt_name,
-                                subst,
-                                is_recursive,
-                                mu_var,
-                                in_progress,
-                            ),
+                            self.normalize_for_comparison_impl(payload, ctx.in_progress),
                         )
                     })
                     .collect(),
@@ -170,38 +99,23 @@ impl<'a> Elaborator<'a> {
             Type::Unit | Type::Void | Type::Bool | Type::Nat | Type::String | Type::Prop => {
                 field_ty.clone()
             }
+            Type::Error => Type::Error,
         }
     }
 
     /// Normalize a TyVar field - substitute if we have a binding, or normalize if external.
-    fn normalize_field_tyvar(
-        &self,
-        v: &str,
-        field_ty: &Type,
-        adt_name: &str,
-        subst: &HashMap<&str, &Type>,
-        is_recursive: bool,
-        mu_var: &str,
-        in_progress: &mut HashSet<String>,
-    ) -> Type {
-        if let Some(&replacement) = subst.get(v) {
+    fn normalize_field_tyvar(&self, v: &str, field_ty: &Type, ctx: &mut NormFieldCtx) -> Type {
+        if let Some(&replacement) = ctx.subst.get(v) {
             // Recursively process the substituted type (but don't expand ADTs)
-            self.normalize_field_for_adt(
-                replacement,
-                adt_name,
-                subst,
-                is_recursive,
-                mu_var,
-                in_progress,
-            )
-        } else if is_recursive && v == adt_name {
+            self.normalize_field_for_adt(replacement, ctx)
+        } else if ctx.is_recursive && v == ctx.adt_name {
             // Self-reference in non-App form (rare but possible)
-            Type::TyVar(mu_var.to_string())
+            Type::TyVar(ctx.mu_var.to_string())
         } else {
             // Type variable referring to another type - normalize it!
             // This ensures that nested type references like TypeExpr inside List<TypeExpr>
             // get the same Mu expansion as the "found" type from inference.
-            self.normalize_for_comparison_impl(field_ty, in_progress)
+            self.normalize_for_comparison_impl(field_ty, ctx.in_progress)
         }
     }
 
@@ -211,32 +125,19 @@ impl<'a> Elaborator<'a> {
         name: &str,
         args: &[Type],
         field_ty: &Type,
-        adt_name: &str,
-        subst: &HashMap<&str, &Type>,
-        is_recursive: bool,
-        mu_var: &str,
-        in_progress: &mut HashSet<String>,
+        ctx: &mut NormFieldCtx,
     ) -> Type {
-        if is_recursive && name == adt_name {
+        if ctx.is_recursive && name == ctx.adt_name {
             // Self-reference: replace with μ-variable
-            Type::TyVar(mu_var.to_string())
+            Type::TyVar(ctx.mu_var.to_string())
         } else if args.is_empty() {
             // 0-arity App referring to another type - normalize it!
-            self.normalize_for_comparison_impl(field_ty, in_progress)
+            self.normalize_for_comparison_impl(field_ty, ctx.in_progress)
         } else {
             // Not a self-reference with args - normalize the args
             let normalized_args: Vec<Type> = args
                 .iter()
-                .map(|a| {
-                    self.normalize_field_for_adt(
-                        a,
-                        adt_name,
-                        subst,
-                        is_recursive,
-                        mu_var,
-                        in_progress,
-                    )
-                })
+                .map(|a| self.normalize_field_for_adt(a, ctx))
                 .collect();
             Type::app(name, normalized_args)
         }

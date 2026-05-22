@@ -7,6 +7,9 @@
       "configureZshAsDefaultShell": true
     }
   },
+  "mounts": [
+    "type=bind,source=${localWorkspaceFolder}/.devcontainer/logs,target=/var/log/tungsten"
+  ],
   "postCreateCommand": ".devcontainer/post-create.sh",
   "customizations": {
     "vscode": {
@@ -24,7 +27,8 @@
     }
   },
   "containerEnv": {
-    "LLVM_SYS_180_PREFIX": "/usr/lib/llvm-18"
+    "LLVM_SYS_180_PREFIX": "/usr/lib/llvm-18",
+    "RUST_MIN_STACK": "67108864"
   },
   "remoteUser": "vscode"
 }

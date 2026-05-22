@@ -1,0 +1,8 @@
+// Regression test: multi-statement let blocks produce Core Let terms
+// Bug #2: block elaboration was discarding Core Let terms, only building CIR chains
+
+pub fn main() -> Nat {
+    let a = 3;
+    let b = a + 2;
+    b
+}

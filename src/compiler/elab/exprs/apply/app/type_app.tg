@@ -1,0 +1,78 @@
+// src/compiler/elab/exprs/apply/app/type_app.tg
+// Type application elaboration: expr[T1, T2, ...]
+
+use lexer::span::Span;
+use parser::ast::{Expr, TypeExpr};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_type_app,
+    tg_type_is_forall, tg_type_get_forall_body
+};
+use elab::env::Env;
+use elab::types::{ElabTypeResult, ElabTypeOk, ElabTypeErr, elab_type};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, 
+    elab_expr_error, TermInfo
+};
+use elab::cir::{CIRTypeApp};
+
+// Import synth from parent module for mutual recursion
+use elab::exprs::synth;
+
+// ===========================================================================
+// TYPE APPLICATION
+// ===========================================================================
+
+/// Synthesize type application: expr[T1, T2, ...]
+pub fn synth_type_app(
+    env: Env,
+    expr: Expr,
+    type_args: List<TypeExpr>,
+    span: Span
+) -> ElabExprResult {
+    // Synthesize the expression to get a forall type
+    match synth(env, expr) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, ty, cir) =>
+            let ti: TermInfo = { term: term, ty: ty, cir: cir };
+            // Apply type arguments one at a time
+            apply_type_args(env2, ti, type_args, span)
+    }
+}
+
+/// Apply a list of type arguments to a term.
+fn apply_type_args(
+    env: Env,
+    ti: TermInfo,
+    type_args: List<TypeExpr>,
+    span: Span
+) -> ElabExprResult {
+    match type_args {
+        Nil() =>
+            // No more type arguments
+            ElabExprOk(env, ti.term, ti.ty, ti.cir),
+        Cons(type_arg, rest) =>
+            // Check if ty is a forall type
+            if tg_type_is_forall(ti.ty) {
+                // Elaborate the type argument
+                match elab_type(env, type_arg) {
+                    ElabTypeErr(e) => ElabExprErr(elab_expr_error(e.message, e.span)),
+                    ElabTypeOk(arg_ty, arg_ct) =>
+                        // Apply type argument
+                        let next: TermInfo = {
+                            term: tg_term_type_app(ti.term, arg_ty),
+                            ty: tg_type_get_forall_body(ti.ty),
+                            cir: CIRTypeApp(ti.cir, arg_ct)
+                        };
+                        // TODO: Substitute type variable in result_ty
+                        apply_type_args(env, next, rest, span)
+                }
+            } else {
+                ElabExprErr(elab_expr_error(
+                    "cannot apply type argument to non-polymorphic type",
+                    span
+                ))
+            }
+    }
+}

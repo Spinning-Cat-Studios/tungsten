@@ -1,0 +1,5 @@
+// Middle module: uses source item privately (no pub).
+
+use source::secret_fn;
+
+pub fn wrapper() -> Nat { secret_fn() }

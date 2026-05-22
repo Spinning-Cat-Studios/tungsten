@@ -1,0 +1,136 @@
+// src/compiler/elab/exprs/bind/synth_let.tg
+// Let binding elaboration (synth mode).
+// Produces both Core terms (TermHandle) and CodegenIR in lockstep.
+//
+// Split from bindings.tg for code-health compliance (300-line limit).
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr,
+    Pattern, PatTuple,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    type_expr_span,
+    Ident, ident_name
+};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_let,
+    tg_string_to_cstr
+};
+use elab::env::{Env, env_bind_local};
+use elab::types::{elab_type, ElabTypeResult, ElabTypeOk, ElabTypeErr};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, elab_expr_let_annot_error, type_error_to_expr_error,
+    pattern_to_name, add_expected_because
+};
+use elab::error::{ExpLetAnnotation};
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CIRLet,
+    ct_unit
+};
+use elab::exprs::{synth, check};
+use elab::exprs::bind::tuple_let::synth_let_tuple;
+use elab::exprs::bind::{LetBindingInfo, ElabRhsInfo, SynthLetCont, AnnotInfo};
+
+// ===========================================================================
+// LET BINDING ELABORATION
+// ===========================================================================
+
+/// Synthesize a let binding.
+pub fn synth_let(
+    env: Env,
+    pat: Pattern,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    match pat {
+        PatTuple(sub_pats, pat_span) =>
+            synth_let_tuple(env, sub_pats, ty_annot, rhs, cont),
+        _ =>
+            synth_let_simple(env, pat, ty_annot, rhs, cont)
+    }
+}
+
+/// Synthesize a simple (non-tuple) let binding.
+fn synth_let_simple(
+    env: Env,
+    pat: Pattern,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    let bi: LetBindingInfo = { name: pattern_to_name(pat), name_ptr: tg_string_to_cstr(pattern_to_name(pat)) };
+    match ty_annot {
+        SomeTypeExpr(ty_expr) =>
+            synth_let_simple_annotated(env, bi, ty_expr, rhs, cont),
+        NoTypeExpr() =>
+            synth_let_simple_inferred(env, bi, rhs, cont)
+    }
+}
+
+/// Synthesize let binding with type annotation.
+fn synth_let_simple_annotated(
+    env: Env,
+    bi: LetBindingInfo,
+    ty_expr: TypeExpr,
+    rhs: Expr,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    let annot_span = type_expr_span(ty_expr);
+    match elab_type(env, ty_expr) {
+        ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+        ElabTypeOk(expected_ty, expected_ct) =>
+            let ai: AnnotInfo = { ty: expected_ty, ct: expected_ct, span: annot_span };
+            synth_let_annotated_rhs(env, bi, ai, rhs, cont)
+    }
+}
+
+fn synth_let_annotated_rhs(
+    env: Env,
+    bi: LetBindingInfo,
+    ai: AnnotInfo,
+    rhs: Expr,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    match check(env, rhs, ai.ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpLetAnnotation(ai.span))),
+        ElabExprOk(env1, term, ty, cir) =>
+            let ri: ElabRhsInfo = { term: term, ty: ty, cir: cir, ct: ai.ct };
+            synth_let_simple_body(env1, bi, ri, cont)
+    }
+}
+
+/// Synthesize let binding without type annotation.
+fn synth_let_simple_inferred(
+    env: Env,
+    bi: LetBindingInfo,
+    rhs: Expr,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    match synth(env, rhs) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env1, term, ty, cir) =>
+            let ri: ElabRhsInfo = { term: term, ty: ty, cir: cir, ct: ct_unit() };
+            synth_let_simple_body(env1, bi, ri, cont)
+    }
+}
+
+/// Elaborate the body of a let binding.
+fn synth_let_simple_body(
+    env: Env,
+    bi: LetBindingInfo,
+    ri: ElabRhsInfo,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    let env2 = env_bind_local(env, bi.name, ri.ty);
+    match synth(env2, cont.body) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env3, body_term, body_ty, body_cir) =>
+            let let_term = tg_term_let(bi.name_ptr, ri.ty, ri.term, body_term);
+            let let_cir = CIRLet(bi.name, ri.ct, ri.cir, body_cir);
+            ElabExprOk(env3, let_term, body_ty, let_cir)
+    }
+}

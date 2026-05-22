@@ -1,3 +1,4 @@
+use driver::util::{Result, Ok, Err};
 // src/compiler/parser/exprs/mod.tg
 // Expression parsing module for the Tungsten self-hosted compiler.
 //
@@ -6,33 +7,20 @@
 // - pratt.tg: Core Pratt parsing (precedence climbing)
 // - postfix.tg: Postfix operators (calls, fields, type app)
 // - atoms.tg: Atomic expressions (literals, paths, parens, tuples)
-// - blocks.tg: Block expressions and statements
 // - records.tg: Record literal parsing
-// - control.tg: Control flow (if, match, let)
-// - lambdas.tg: Lambda expressions
+// - compound/: Block expressions, control flow, and lambdas
 // - proof.tg: Proof constructs (have, show, assume)
 
 pub mod result;
 pub mod pratt;
 pub mod postfix;
 pub mod atoms;
-pub mod blocks;
+pub mod compound;
 pub mod records;
-pub mod control;
-pub mod lambdas;
 pub mod proof;
 
 // Re-export all public types and functions
-pub use result::{ParseResultExpr, ParseOkExpr, ParseErrExpr,
-    ParseResultStmt, ParseOkStmt, ParseErrStmt,
-    ParseResultExprList, ParseOkExprList, ParseErrExprList,
-    ParseResultMatchArm, ParseOkMatchArm, ParseErrMatchArm,
-    ParseResultMatchArmList, ParseOkMatchArmList, ParseErrMatchArmList,
-    ParseResultLambdaParams, ParseOkLambdaParams, ParseErrLambdaParams,
-    ParseResultFieldInits, ParseOkFieldInits, ParseErrFieldInits,
-    ParseResultBlock, ParseOkBlock, ParseErrBlock,
-    MaybeBinOp, NoBinOp, SomeBinOp,
-    cursor_peek_span};
+pub use parser::exprs::result::{MaybeBinOp, NoBinOp, SomeBinOp, cursor_peek_span};
 
-pub use pratt::{parse_expr, parse_expr_prec};
-pub use blocks::{parse_block, parse_block_or_record};
+pub use parser::exprs::pratt::{parse_expr, parse_expr_prec};
+pub use parser::exprs::compound::blocks::{parse_block, parse_block_or_record};

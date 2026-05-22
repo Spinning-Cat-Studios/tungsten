@@ -1,0 +1,20 @@
+// Control test: same pattern but without nested polymorphism (ADR 21.5.26b).
+// If this passes but minimal.tg fails, the bug is in inner forall resolution.
+//
+// Run: tungsten test tests/l3_repro/control.tg --check-only
+
+type Result<T, E> = Ok(T) | Err(E)
+type Cursor = MkCursor(Nat)
+type ParseError = MkParseError(String)
+
+fn test_simple_ok() -> Unit {
+    let cur = MkCursor(0);
+    let _r: Result<Cursor, ParseError> = Ok(cur);
+    ()
+}
+
+fn test_tuple_ok() -> Unit {
+    let cur = MkCursor(0);
+    let _r: Result<(Nat, Cursor), ParseError> = Ok((42, cur));
+    ()
+}

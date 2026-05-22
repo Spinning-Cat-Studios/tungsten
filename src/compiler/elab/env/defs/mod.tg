@@ -1,0 +1,10 @@
+// src/compiler/elab/env/defs/mod.tg
+// Type, value, and constructor definitions for the environment.
+
+pub mod types;
+pub mod constructors;
+pub mod resolved;
+
+pub use elab::env::defs::types::*;
+pub use elab::env::defs::constructors::*;
+pub use elab::env::defs::resolved::*;

@@ -62,18 +62,52 @@ pub unsafe extern "C" fn tg_typecheck(
 /// Check if two types are equal (α-equivalent).
 ///
 /// Returns `true` if the types are equal, `false` otherwise.
+/// TypeError (poison) unifies with any type to prevent error cascades.
 #[no_mangle]
 pub extern "C" fn tg_types_equal(t1: TypeHandle, t2: TypeHandle) -> bool {
+    use crate::types::Type;
     with_arena_ref!(|arena| {
-        let t1 = match arena.get_type(t1) {
+        let ty1 = match arena.get_type(t1) {
             Some(t) => t,
-            None => return false,
+            None => {
+                return false;
+            }
         };
-        let t2 = match arena.get_type(t2) {
+        let ty2 = match arena.get_type(t2) {
             Some(t) => t,
-            None => return false,
+            None => {
+                return false;
+            }
         };
-        types_equal(t1, t2)
+        // TypeError unifies with anything — suppress secondary mismatches
+        if matches!(ty1, Type::Error) || matches!(ty2, Type::Error) {
+            return true;
+        }
+        types_equal(ty1, ty2)
+    })
+}
+
+// ============================================================================
+// Type Display
+// ============================================================================
+
+/// Format a type as a human-readable display string.
+///
+/// Returns a CString pointer (caller owns the memory).
+/// Returns null pointer if the handle is invalid.
+#[no_mangle]
+pub extern "C" fn tg_type_format_display(ty: TypeHandle) -> *const c_char {
+    with_arena_ref!(|arena| {
+        match arena.get_type(ty) {
+            Some(t) => {
+                let display = format!("{t}");
+                match CString::new(display) {
+                    Ok(cstr) => cstr.into_raw().cast_const(),
+                    Err(_) => std::ptr::null(),
+                }
+            }
+            None => std::ptr::null(),
+        }
     })
 }
 

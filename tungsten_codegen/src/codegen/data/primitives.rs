@@ -3,10 +3,10 @@
 //! Handles compilation of basic type constructors:
 //! - Booleans (True, False)
 //! - Unit
-//! - Naturals (Zero, Succ, NatLit)
+//! - Naturals (Zero, Succ, `NatLit`)
 //! - Void (Absurd)
 
-use crate::codegen::error::CodeGenError;
+use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
 use inkwell::values::BasicValueEnum;
 use tungsten_core::types::Type;
@@ -76,6 +76,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Create a new "dead" basic block for any subsequent code.
         let function = self
+            .compilation
             .current_fn
             .ok_or_else(|| CodeGenError::LlvmError("no current function for sorry".to_string()))?;
         let dead_bb = self.context.append_basic_block(function, "dead");

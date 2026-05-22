@@ -1,0 +1,158 @@
+// src/compiler/elab/items/collect/types/mod.tg
+// Phase 1c type body elaboration — dispatch and pre-registration.
+//
+// Elaborates ADT bodies (sum types, records) and type aliases.
+// Handles self-referential types via μ-variable placeholders,
+// multi-pass fixups for ordering issues, and constructor registration.
+//
+// ## Module Structure
+//
+// - helpers.tg: Shared helpers (type params, encoding updates, self-ref checks)
+// - adt.tg: ADT body elaboration (sum types, records, constructors)
+
+pub mod helpers;
+pub mod adt;
+
+use lexer::span::Span;
+use parser::ast::{
+    Item, ItemFn, ItemType, ItemTypeAlias, ItemTheorem, ItemLemma,
+    ItemAxiom, ItemExtern, ItemMod, ItemUse, ItemError,
+    TypeDef, TypeAliasDef,
+    TypeDefBody, TypeDefAlias, TypeDefAdt, TypeDefRecord,
+    TypeParam,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle, INVALID_HANDLE,
+    tg_type_var, tg_string_to_cstr
+};
+use elab::env::{
+    Env, env_push_type_var, env_pop_type_var,
+    env_register_type, env_lookup_type_def,
+    TypeDefInfo, type_def_info_new, TypeDefCore, TypeDefMeta,
+    MaybeTypeDef, NoTypeDef, SomeTypeDef
+};
+use elab::types::{
+    ElabTypeResult, ElabTypeOk, ElabTypeErr, elab_type
+};
+use elab::items::result::{
+    ElabContext, elab_context_with_env, elab_context_add_error
+};
+use elab::error::{elab_error_simple};
+use elab::items::collect::types::helpers::{
+    push_type_params, pop_type_params, update_type_encoding
+};
+use elab::items::collect::types::adt::{elaborate_adt_body, elaborate_alias_body};
+
+// ===========================================================================
+// PHASE 1c PRE-PASS: PRE-REGISTER μ-VARIABLE PLACEHOLDERS
+// ===========================================================================
+
+/// Pre-register μ-variable placeholders for all types before body elaboration.
+/// This ensures that forward references and self-references resolve during
+/// elab_type by finding a valid (non-INVALID) encoded_type.
+pub fn preregister_type_vars(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = preregister_type_var(ctx, item);
+            preregister_type_vars(ctx2, rest)
+    }
+}
+
+/// Pre-register a single type's μ-variable placeholder.
+fn preregister_type_var(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemType(def) =>
+            preregister_mu_handle(ctx, ident_name(def.name)),
+        ItemTypeAlias(def) =>
+            preregister_mu_handle(ctx, ident_name(def.name)),
+        _ => ctx
+    }
+}
+
+fn preregister_mu_handle(ctx: ElabContext, type_name: String) -> ElabContext {
+    let mu_handle = tg_type_var(tg_string_to_cstr(type_name));
+    match env_lookup_type_def(ctx.env, type_name) {
+        NoTypeDef() => ctx,
+        SomeTypeDef(info) => {
+            let core: TypeDefCore = { name: type_name, arity: info.arity, params: info.params };
+            let meta: TypeDefMeta = { kind: mu_handle, vis: info.visibility, span: info.span, encoded_type: mu_handle };
+            let updated = type_def_info_new(
+                core,
+                meta
+            );
+            let env2 = env_register_type(ctx.env, updated);
+            elab_context_with_env(ctx, env2)
+        }
+    }
+}
+
+// ===========================================================================
+// PHASE 1c: ELABORATE TYPE BODIES
+// ===========================================================================
+
+/// Elaborate the bodies of all type definitions.
+/// Imports are now resolved, so type bodies can reference imported types.
+pub fn collect_phase_1c(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = elaborate_type_body(ctx, item);
+            collect_phase_1c(ctx2, rest)
+    }
+}
+
+/// Phase 1c fixup: Only re-elaborate record type bodies.
+/// This fixes record fields that got placeholder type handles because
+/// the referenced type wasn't yet encoded during the first pass.
+pub fn collect_phase_1c_records_only(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = maybe_elaborate_record(ctx, item);
+            collect_phase_1c_records_only(ctx2, rest)
+    }
+}
+
+fn maybe_elaborate_record(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemType(def) =>
+            maybe_elaborate_record_body(ctx, def),
+        _ => ctx
+    }
+}
+
+fn maybe_elaborate_record_body(ctx: ElabContext, def: TypeDef) -> ElabContext {
+    match def.body {
+        TypeDefRecord(_) => elaborate_adt_body(ctx, def),
+        _ => ctx
+    }
+}
+
+/// Phase 1c fixup 2: Re-elaborate all type alias bodies.
+/// On the first pass, a type alias like VisibilityEntry = (A, B, Option<C>) may
+/// elaborate with a partial encoding because Option hadn't been fully elaborated yet.
+/// Re-elaborating all aliases after all ADTs are done fixes these ordering issues.
+pub fn collect_phase_1c_aliases_only(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = match item {
+                ItemTypeAlias(def) =>
+                    elaborate_alias_body(ctx, def),
+                _ => ctx
+            };
+            collect_phase_1c_aliases_only(ctx2, rest)
+    }
+}
+
+/// Elaborate the body of a type definition.
+fn elaborate_type_body(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemType(def) => elaborate_adt_body(ctx, def),
+        ItemTypeAlias(def) => elaborate_alias_body(ctx, def),
+        _ => ctx  // Not a type definition
+    }
+}

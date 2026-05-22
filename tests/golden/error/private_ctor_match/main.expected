@@ -1,0 +1,9 @@
+[E0016] Error: constructor `Secret` is private (defined in `helper`) and cannot be accessed from `<root>`
+   ╭─[tests/golden/error/private_ctor_match/main.tg:8:9]
+   │
+ 8 │         helper::Secret => 1,
+   │         ───────┬──────  
+   │                ╰──────── 
+───╯
+
+error: aborting due to 1 error

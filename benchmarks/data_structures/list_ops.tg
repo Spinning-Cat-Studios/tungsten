@@ -1,0 +1,118 @@
+// Benchmark: List operations (sum, map, reverse)
+//
+// Tests: ADT allocation, pattern matching, structural recursion
+// Builds a list of N elements, then performs operations on it.
+// Default: 200 iterations for ~200ms runtime.
+// Usage: ./list_ops [iterations]  (default: 200)
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+pub type PNat = PZero | PSucc(PNat)
+pub type PList = PNil | PCons(PNat, PList)
+
+fn padd(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => b,
+    PSucc(p) => PSucc(padd(p, b)),
+  }
+}
+
+fn to_nat(n: PNat) -> Nat {
+  match n {
+    PZero() => 0,
+    PSucc(p) => 1 + to_nat(p),
+  }
+}
+
+fn psub(a: PNat, b: PNat) -> PNat {
+  match b {
+    PZero() => a,
+    PSucc(bp) => match a {
+      PZero() => PZero,
+      PSucc(ap) => psub(ap, bp),
+    },
+  }
+}
+
+fn range(n: PNat) -> PList {
+  match n {
+    PZero() => PNil,
+    PSucc(p) => PCons(n, range(p)),
+  }
+}
+
+fn sum(xs: PList) -> PNat {
+  match xs {
+    PNil() => PZero,
+    PCons(h, t) => padd(h, sum(t)),
+  }
+}
+
+fn map(f: PNat -> PNat, xs: PList) -> PList {
+  match xs {
+    PNil() => PNil,
+    PCons(h, t) => PCons(f(h), map(f, t)),
+  }
+}
+
+fn reverse_acc(xs: PList, acc: PList) -> PList {
+  match xs {
+    PNil() => acc,
+    PCons(h, t) => reverse_acc(t, PCons(h, acc)),
+  }
+}
+
+fn reverse(xs: PList) -> PList {
+  reverse_acc(xs, PNil)
+}
+
+fn p10() -> PNat {
+  PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PZero))))))))))
+}
+
+fn pmul(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => PZero,
+    PSucc(p) => padd(b, pmul(p, b)),
+  }
+}
+
+fn pdouble(x: PNat) -> PNat { padd(x, x) }
+
+fn mk_200() -> PNat {
+  let p10 = PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PZero))))))))));
+  let p20 = PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(
+            PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(
+            PZero))))))))))))))))))));
+  pmul(p10, p20)
+}
+
+fn run_once() -> Nat {
+  let hundred = pmul(p10(), p10());
+  let xs = range(hundred);
+  let doubled = map(pdouble, xs);
+  let rev = reverse(doubled);
+  to_nat(sum(rev))
+}
+
+fn repeat_bench(n: PNat, acc: Nat) -> Nat {
+  match n {
+    PZero() => acc,
+    PSucc(p) => repeat_bench(p, acc + run_once()),
+  }
+}
+
+fn from_nat(n: Nat) -> PNat {
+  if n == 0 { PZero } else { PSucc(from_nat(n - 1)) }
+}
+
+fn get_iterations() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 200 }
+}
+
+fn main() -> Nat {
+  // Default: 200 iterations, each = 10100. Total = 2020000
+  repeat_bench(from_nat(get_iterations()), 0)
+}

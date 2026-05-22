@@ -1,0 +1,119 @@
+// src/compiler/elab/items/collect/types/adt/record.tg
+// Record body elaboration.
+
+use lexer::span::Span;
+use parser::ast::{
+    RecordField, TypeExpr,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use elab::ffi::{TypeHandle, tg_type_var, tg_string_to_cstr, type_error_handle};
+use elab::adt::AdtVariant;
+use elab::env::{RecordFieldInfo, record_field_info_new};
+use elab::types::{ElabTypeResult, ElabTypeOk, ElabTypeErr, elab_type};
+use elab::items::result::{ElabContext, elab_context_add_error};
+use elab::error::elab_error_simple;
+use elab::items::collect::types::helpers::{type_is_self_ref, type_references_self};
+
+// ===========================================================================
+// INTERNAL RECORD TYPES
+// ===========================================================================
+
+/// Accumulator for record field elaboration.
+type FieldElabAcc = {
+    type_acc: List<TypeHandle>,
+    info_acc: List<RecordFieldInfo>,
+    index: Nat,
+    has_self_ref: Bool
+}
+
+/// Result of record field type elaboration.
+type RecordFieldsResult = {
+    field_types: List<TypeHandle>,
+    field_info: List<RecordFieldInfo>,
+    is_recursive: Bool
+}
+
+/// Result of record body elaboration.
+pub type RecordBodyResult = {
+    variants: List<AdtVariant>,
+    field_info: List<RecordFieldInfo>,
+    is_recursive: Bool
+}
+
+// ===========================================================================
+// RECORD BODY ELABORATION
+// ===========================================================================
+
+/// Elaborate a record body (single-variant ADT).
+pub fn elaborate_record_body(
+    ctx: ElabContext,
+    fields: List<RecordField>,
+    type_name: String
+) -> (ElabContext, RecordBodyResult) {
+    let (ctx2, fr) = elaborate_record_field_types(ctx, fields, type_name);
+    let ordered_field_types = list_reverse(fr.field_types);
+    let variant: AdtVariant = { name: type_name, fields: ordered_field_types };
+    let result: RecordBodyResult = { variants: Cons(variant, Nil()), field_info: fr.field_info, is_recursive: fr.is_recursive };
+    (ctx2, result)
+}
+
+/// Elaborate record field types and collect field info for named access.
+fn elaborate_record_field_types(
+    ctx: ElabContext,
+    fields: List<RecordField>,
+    type_name: String
+) -> (ElabContext, RecordFieldsResult) {
+    let acc: FieldElabAcc = { type_acc: Nil(), info_acc: Nil(), index: 0, has_self_ref: false };
+    elaborate_record_fields_rec(ctx, fields, type_name, acc)
+}
+
+/// Recursive record field type elaboration.
+fn elaborate_record_fields_rec(
+    ctx: ElabContext,
+    fields: List<RecordField>,
+    type_name: String,
+    acc: FieldElabAcc
+) -> (ElabContext, RecordFieldsResult) {
+    match fields {
+        Nil() => {
+            let result: RecordFieldsResult = { field_types: acc.type_acc, field_info: acc.info_acc, is_recursive: acc.has_self_ref };
+            (ctx, result)
+        },
+        Cons(field, rest) =>
+            let field_name = ident_name(field.name);
+            if type_is_self_ref(field.ty, type_name) {
+                let mu_var = tg_type_var(tg_string_to_cstr(type_name));
+                let finfo = record_field_info_new(field_name, mu_var, acc.index);
+                let next: FieldElabAcc = { type_acc: Cons(mu_var, acc.type_acc), info_acc: Cons(finfo, acc.info_acc), index: acc.index + 1, has_self_ref: true };
+                elaborate_record_fields_rec(ctx, rest, type_name, next)
+            } else {
+                elaborate_record_field_type_one(ctx, field, rest, type_name, acc)
+            }
+    }
+}
+
+fn elaborate_record_field_type_one(
+    ctx: ElabContext,
+    field: RecordField,
+    rest: List<RecordField>,
+    type_name: String,
+    acc: FieldElabAcc
+) -> (ElabContext, RecordFieldsResult) {
+    let field_name = ident_name(field.name);
+    match elab_type(ctx.env, field.ty) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx2 = elab_context_add_error(ctx, elab_err);
+            let err_ty = type_error_handle();
+            let finfo = record_field_info_new(field_name, err_ty, acc.index);
+            let next: FieldElabAcc = { type_acc: Cons(err_ty, acc.type_acc), info_acc: Cons(finfo, acc.info_acc), index: acc.index + 1, has_self_ref: acc.has_self_ref };
+            elaborate_record_fields_rec(ctx2, rest, type_name, next),
+        ElabTypeOk(ty_handle, _) =>
+            let self_ref = acc.has_self_ref || type_references_self(field.ty, type_name);
+            let finfo = record_field_info_new(field_name, ty_handle, acc.index);
+            let next: FieldElabAcc = { type_acc: Cons(ty_handle, acc.type_acc), info_acc: Cons(finfo, acc.info_acc), index: acc.index + 1, has_self_ref: self_ref };
+            elaborate_record_fields_rec(ctx, rest, type_name, next)
+    }
+}

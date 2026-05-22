@@ -1,0 +1,22 @@
+// Consumer module: imports Option through middle (re-export chain)
+// and takes an Opts argument.
+// This mirrors explain.tg importing Option through driver::util
+// while Opts was defined in types.tg using core::Option.
+//
+// For this to type-check, the parent module must re-export Opts
+// so that the type identity is unified.
+
+use middle::{Option, Some, None};
+use types::{Opts};
+
+pub fn handle_opts(opts: Opts) -> Nat {
+    match opts {
+        Alpha(_name) => 1,
+        Beta(code) => {
+            match code {
+                Some(_s) => 2,
+                None() => 3
+            }
+        }
+    }
+}

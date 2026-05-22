@@ -1,0 +1,29 @@
+// Test: tail-recursive multi-arg function uses direct call with musttail.
+// This function would overflow the stack with the closure calling convention
+// because musttail can't apply to indirect calls through closures.
+// With direct calls, musttail should work and prevent stack overflow.
+
+pub type List<T> = Nil | Cons(T, List<T>)
+
+// Build a list of n elements (counting down)
+pub fn build_list(n: Nat, acc: List<Nat>) -> List<Nat> {
+    if n == 0 {
+        acc
+    } else {
+        build_list(n - 1, Cons(n, acc))
+    }
+}
+
+// Sum all elements in the list using a tail-recursive accumulator
+pub fn sum_list(xs: List<Nat>, acc: Nat) -> Nat {
+    match xs {
+        Nil() => acc,
+        Cons(x, rest) => sum_list(rest, acc + x),
+    }
+}
+
+fn main() -> Nat {
+    // Build a list and sum it — exercises direct calls with tail recursion
+    let xs = build_list(100, Nil);
+    sum_list(xs, 0)
+}

@@ -1,0 +1,13 @@
+// Test: two files that both glob-import the same module should NOT
+// produce E0106 (duplicate import) for the shared items.
+// This validates the dedup logic in the self-hosted compiler where
+// imports from different files share a single flat import list.
+
+pub mod source;
+pub mod user_a;
+
+use source::*;
+
+fn main() -> Nat {
+    shared_fn(1)
+}

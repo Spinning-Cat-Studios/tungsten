@@ -1,0 +1,9 @@
+// Test: public items from a child module are accessible (no false positive).
+// Note: submodule → ancestor private access (the other direction) requires
+// `super::` support which is not yet in the parser.
+
+pub mod child;
+
+use child::PublicType;
+
+fn main() -> PublicType { 42 }

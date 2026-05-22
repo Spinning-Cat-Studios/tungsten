@@ -1,0 +1,102 @@
+// src/compiler/elab/adt/mod.tg
+// Algebraic Data Type encoding for the self-hosted elaborator.
+//
+// This module implements the encoding of ADTs into Core types using:
+//   - Sum types for variant choices: A + B + C + ...
+//   - Product types for constructor payloads: A * B * C * ...
+//   - Recursive types (μ) for self-referential ADTs
+
+pub mod injection;
+pub mod projection;
+
+pub use elab::adt::injection::*;
+pub use elab::adt::projection::*;
+
+use elab::ffi::{
+    TypeHandle,
+    tg_type_unit, tg_type_void, tg_type_product, tg_type_sum, tg_type_mu,
+    tg_string_to_cstr
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
+
+// ===========================================================================
+// ADT ENCODING TYPES
+// ===========================================================================
+
+/// A variant of an ADT (one constructor).
+pub type AdtVariant = {
+    name: String,        // Constructor name
+    fields: List<TypeHandle>  // Field types (already elaborated)
+}
+
+/// ADT encoding information.
+pub type AdtEncoding = {
+    name: String,         // Type name
+    type_handle: TypeHandle,  // The encoded Core type
+    variants: List<AdtVariant>  // For constructor injection indices
+}
+
+// ===========================================================================
+// ADT ENCODING
+// ===========================================================================
+
+/// Encode an ADT definition into a Core type.
+pub fn encode_adt(
+    name: String,
+    variants: List<AdtVariant>,
+    is_recursive: Bool
+) -> AdtEncoding {
+    let encoded = encode_variants(variants);
+    let final_type = if is_recursive {
+        tg_type_mu(string_to_ptr(name), encoded)
+    } else {
+        encoded
+    };
+    {
+        name: name,
+        type_handle: final_type,
+        variants: variants
+    }
+}
+
+/// Encode a list of variants into a sum type.
+fn encode_variants(variants: List<AdtVariant>) -> TypeHandle {
+    match variants {
+        Nil() =>
+            tg_type_void(),
+        Cons(v, rest) =>
+            if list_is_empty(rest) {
+                encode_variant_payload(v.fields)
+            } else {
+                let left = encode_variant_payload(v.fields);
+                let right = encode_variants(rest);
+                tg_type_sum(left, right)
+            }
+    }
+}
+
+/// Encode a variant's payload (constructor fields) into a product type.
+fn encode_variant_payload(fields: List<TypeHandle>) -> TypeHandle {
+    match fields {
+        Nil() =>
+            tg_type_unit(),
+        Cons(h, rest) =>
+            if list_is_empty(rest) {
+                h
+            } else {
+                let right = encode_variant_payload(rest);
+                tg_type_product(h, right)
+            }
+    }
+}
+
+/// Maybe Nat type.
+pub type MaybeNat =
+    | NoNat
+    | SomeNat(Nat)
+
+/// Helper to convert string to C string pointer for FFI.
+pub fn string_to_ptr(s: String) -> Nat {
+    tg_string_to_cstr(s)
+}

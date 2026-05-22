@@ -1,0 +1,9 @@
+// W1 regression test: Record field projection
+// Verifies that record field access evaluates correctly
+
+pub type Point = { x: Nat, y: Nat }
+
+pub fn main() -> Nat {
+    let p = Point { x: 7, y: 3 };
+    p.x
+}

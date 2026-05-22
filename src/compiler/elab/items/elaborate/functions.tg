@@ -1,0 +1,102 @@
+// src/compiler/elab/items/elaborate/functions.tg
+// Function body elaboration.
+
+use lexer::span::Span;
+use parser::ast::{
+    FunctionDef,
+    Param, TypeParam,
+    Ident, ident_name,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{TermHandle, TypeHandle};
+use elab::env::{
+    Env, env_push_scope, env_pop_scope
+};
+use elab::types::{ElabTypeResult, ElabTypeOk, ElabTypeErr};
+use elab::exprs::{check, ElabExprResult, ElabExprOk, ElabExprErr};
+use elab::items::result::{
+    ElabContext, elab_context_with_env,
+    elab_context_set_return_type, elab_context_clear_return_type,
+    elab_context_add_error,
+    ElabItemResult, ElabItemOk, ElabItemErr,
+    ElabDef, elab_def_new_with_cir
+};
+use elab::items::collect::values::{build_fn_type, wrap_foralls};
+use elab::error::{elab_error_simple};
+use elab::items::elaborate::helpers::{
+    push_type_params_elab, pop_type_params_elab,
+    bind_params_and_get_return,
+    build_lambda, build_lambda_cir,
+    wrap_type_abs, wrap_type_abs_cir
+};
+
+// ===========================================================================
+// FUNCTION BODY ELABORATION
+// ===========================================================================
+
+/// Elaborate a function body.
+/// NOTE: We rebuild the function type here instead of looking it up by name.
+/// This avoids O(n) lookup per function, which previously caused O(n²) total.
+pub fn elaborate_fn_body(ctx: ElabContext, def: FunctionDef) -> ElabItemResult {
+    let fn_name = ident_name(def.name);
+    
+    // Push type parameters FIRST (needed for type elaboration in build_fn_type)
+    let ctx2 = push_type_params_elab(ctx, def.type_params);
+    
+    // Rebuild the function type instead of looking it up (O(1) vs O(n))
+    match build_fn_type(ctx2, def.params, def.return_type, def.span) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            let ctx4 = pop_type_params_elab(ctx3, def.type_params);
+            ElabItemErr(ctx4),
+        ElabTypeOk(fn_type_inner, _) =>
+            elaborate_fn_body_checked(ctx2, def, fn_name, fn_type_inner)
+    }
+}
+
+fn elaborate_fn_body_checked(ctx: ElabContext, def: FunctionDef, fn_name: String, fn_type_inner: TypeHandle) -> ElabItemResult {
+    let fn_type = wrap_foralls(fn_type_inner, def.type_params);
+    
+    // Create scope for parameters
+    let ctx2 = elab_context_with_env(ctx, env_push_scope(ctx.env));
+    
+    // Bind parameters and get return type
+    let (ctx3, ret_type) = bind_params_and_get_return(ctx2, def.params, fn_type_inner);
+    
+    // Set return type for ExprReturn
+    let ctx4 = elab_context_set_return_type(ctx3, ret_type);
+    
+    // Elaborate the body, checking against return type
+    match check(ctx4.env, def.body, ret_type) {
+        ElabExprErr(err) => {
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx5 = elab_context_add_error(ctx4, elab_err);
+            let ctx6 = elab_context_clear_return_type(ctx5);
+            let ctx7 = elab_context_with_env(ctx6, env_pop_scope(ctx6.env));
+            let ctx8 = pop_type_params_elab(ctx7, def.type_params);
+            ElabItemErr(ctx8)
+        },
+        ElabExprOk(env2, body_term, _, body_cir) =>
+            let ctx5 = elab_context_with_env(ctx4, env2);
+            
+            // Build the lambda term from parameters
+            let lambda_term = build_lambda(def.params, body_term, fn_type_inner);
+            
+            // Build CIR lambda
+            let lambda_cir = build_lambda_cir(def.params, body_cir, fn_type_inner);
+            
+            // Wrap in type abstractions if polymorphic
+            let final_term = wrap_type_abs(lambda_term, def.type_params);
+            let final_cir = wrap_type_abs_cir(lambda_cir, def.type_params);
+            
+            // Clean up context
+            let ctx6 = elab_context_clear_return_type(ctx5);
+            let ctx7 = elab_context_with_env(ctx6, env_pop_scope(ctx6.env));
+            let ctx8 = pop_type_params_elab(ctx7, def.type_params);
+            
+            let elab_def = elab_def_new_with_cir(fn_name, final_term, fn_type, final_cir, def.vis);
+            ElabItemOk(ctx8, elab_def)
+    }
+}

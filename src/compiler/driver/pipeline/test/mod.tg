@@ -1,0 +1,200 @@
+// src/compiler/driver/pipeline/test/mod.tg
+// Test pipeline: discover test_* functions, generate harness, compile and run.
+//
+// Uses compile-and-run execution model:
+// 1. Parse + elaborate to discover test_* functions
+// 2. Generate source-text harness (synthetic main)
+// 3. Compile via bootstrap
+// 4. Execute binary and report results
+
+pub mod harness;
+
+use driver::ffi::{
+    eprintln, println, stderr_is_tty,
+    List, Nil, Cons,
+    exec_process, read_file, write_file,
+    string_len, FfiResult, FfiOk, FfiErr
+};
+use driver::util::{
+    Result, Ok, Err, Option, Some, None,
+    string_eq, string_is_empty, string_contains,
+    starts_with, nat_to_string, not,
+    list_len
+};
+use driver::cli::{TestOpts};
+use driver::modules::{
+    ParsedModule,
+    parse_module_tree, build_module_info,
+    parsed_module_parse_errors, parsed_module_lex_errors
+};
+use parser::error::{parse_has_errors, parse_error_count};
+use lexer::error::{has_errors, error_count};
+use elab::env::types::{ElabTest};
+use elab::items::{ElabResult, elab_result_ok, elab_result_error_count};
+use elab::items::result::ElabDef;
+use elab::items::per_module::{elaborate_module_tree};
+use elab::error::{
+    errors_deduplicate,
+    SourceInfo, source_info_new,
+    render_diagnostics_limited
+};
+use elab::error::render::colors::{colorize_bold, ColorRed, ColorGreen, ColorCyan};
+use driver::pipeline::{PipelineResult, PipelineOk, PipelineErr};
+use driver::pipeline::errors::{render_lex_parse_errors, get_module_source};
+use driver::pipeline::compile::find_bootstrap_binary;
+use driver::modules::build::strip_tg_extension;
+use driver::pipeline::test::harness::generate_harness_source;
+
+// ===========================================================================
+// TEST PIPELINE
+// ===========================================================================
+
+/// Run the test pipeline: discover tests, generate harness, compile and run.
+pub fn run_test(opts: TestOpts) -> PipelineResult {
+    let use_color = stderr_is_tty();
+    let max_errors = opts.max_errors;
+
+    match parse_module_tree(opts.file, Nil) {
+        Err(err_msg) => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++ ": " ++ err_msg);
+            PipelineErr(1)
+        },
+        Ok(result) => {
+            let (module, _visited) = result;
+            test_parsed_module(module, opts, use_color, max_errors)
+        }
+    }
+}
+
+/// Check for lex/parse errors, then elaborate and discover tests.
+fn test_parsed_module(module: ParsedModule, opts: TestOpts,
+                      use_color: Bool, max_errors: Nat) -> PipelineResult {
+    let lex_errs = parsed_module_lex_errors(module);
+    let parse_errs = parsed_module_parse_errors(module);
+
+    if has_errors(lex_errs) || parse_has_errors(parse_errs) {
+        let total_errs = error_count(lex_errs) + parse_error_count(parse_errs);
+        render_lex_parse_errors(module, max_errors, use_color);
+        PipelineErr(total_errs)
+    } else {
+        elaborate_and_test(module, opts, use_color, max_errors)
+    }
+}
+
+/// Elaborate and discover test functions.
+fn elaborate_and_test(module: ParsedModule, opts: TestOpts,
+                      use_color: Bool, max_errors: Nat) -> PipelineResult {
+    let module_info = build_module_info(module);
+    // Per-module elaboration (W6.3a)
+    let elab_result = elaborate_module_tree(module, module_info, ElabTest);
+
+    if not(elab_result_ok(elab_result)) {
+        let source = get_module_source(module);
+        let src_info = source_info_new(opts.file, source);
+        let deduped = errors_deduplicate(elab_result.errors);
+        let rendered = render_diagnostics_limited(deduped, src_info, max_errors, use_color);
+        eprintln(rendered);
+        PipelineErr(elab_result_error_count(elab_result))
+    } else {
+        let test_defs = find_test_defs(elab_result.defs, opts.filter);
+        let test_count = list_len(test_defs);
+        if test_count == 0 {
+            eprintln(colorize_bold("warning", ColorCyan, use_color) ++
+                    ": no test functions found (functions must be named test_*)");
+            PipelineOk(0)
+        } else {
+            let test_names = extract_test_names(test_defs);
+            compile_and_run_tests(opts, test_names, test_count, use_color)
+        }
+    }
+}
+
+// ===========================================================================
+// TEST DISCOVERY
+// ===========================================================================
+
+/// Find all test_* definitions, optionally filtered by substring.
+fn find_test_defs(defs: List<ElabDef>, filter: String) -> List<ElabDef> {
+    match defs {
+        Nil() => Nil,
+        Cons(def, rest) =>
+            if starts_with(def.name, "test_") {
+                if string_is_empty(filter) {
+                    Cons(def, find_test_defs(rest, filter))
+                } else {
+                    if string_contains(def.name, filter) {
+                        Cons(def, find_test_defs(rest, filter))
+                    } else {
+                        find_test_defs(rest, filter)
+                    }
+                }
+            } else {
+                find_test_defs(rest, filter)
+            }
+    }
+}
+
+/// Extract just the names from a list of ElabDefs.
+fn extract_test_names(defs: List<ElabDef>) -> List<String> {
+    match defs {
+        Nil() => Nil,
+        Cons(def, rest) => Cons(def.name, extract_test_names(rest))
+    }
+}
+
+// ===========================================================================
+// COMPILE + RUN
+// ===========================================================================
+
+/// Generate harness source, compile, execute, and report.
+fn compile_and_run_tests(opts: TestOpts, test_names: List<String>,
+                         test_count: Nat, use_color: Bool) -> PipelineResult {
+    match read_file(opts.file) {
+        FfiErr(err) => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++
+                    ": could not read test file: " ++ err);
+            PipelineErr(1)
+        },
+        FfiOk(source) => {
+            let harness_source = generate_harness_source(source, test_names, test_count);
+            let base = strip_tg_extension(opts.file);
+            let harness_file = base ++ ".tungsten_test.tg";
+            let harness_binary = base ++ ".tungsten_test";
+
+            match write_file(harness_file, harness_source) {
+                FfiErr(err) => {
+                    eprintln(colorize_bold("error", ColorRed, use_color) ++
+                            ": could not write harness file: " ++ err);
+                    PipelineErr(1)
+                },
+                FfiOk(_) => {
+                    let bootstrap = find_bootstrap_binary();
+                    let compile_args = Cons("compile", Cons(harness_file, Cons("-o", Cons(harness_binary, Nil))));
+
+                    if opts.verbose {
+                        eprintln(colorize_bold("info", ColorCyan, use_color) ++
+                                ": compiling test harness (" ++ nat_to_string(test_count) ++ " tests)")
+                    };
+
+                    let compile_exit = exec_process(bootstrap, compile_args);
+                    if compile_exit != 0 {
+                        eprintln(colorize_bold("error", ColorRed, use_color) ++
+                                ": test compilation failed");
+                        PipelineErr(1)
+                    } else {
+                        if opts.verbose {
+                            eprintln(colorize_bold("info", ColorCyan, use_color) ++
+                                    ": running tests...")
+                        };
+                        let run_exit = exec_process(harness_binary, Nil);
+                        if run_exit == 0 {
+                            PipelineOk(test_count)
+                        } else {
+                            PipelineErr(1)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,80 @@
+// Lexer state type and operations.
+
+use lexer::span::{Span, span_new};
+use lexer::token::*;
+use lexer::error::*;
+use driver::ffi::{string_char_at_internal, string_len};
+
+// ---------------------------------------------------------------------------
+// LEXER STATE
+// ---------------------------------------------------------------------------
+pub type LexerState = { source: String, pos: Nat, file: String, errors: LexErrors }
+
+pub fn lexer_new(source: String, file: String) -> LexerState {
+    { source: source, pos: 0, file: file, errors: errors_empty() }
+}
+
+pub fn lex_source(lex: LexerState) -> String {
+    lex.source
+}
+
+pub fn lex_pos(lex: LexerState) -> Nat {
+    lex.pos
+}
+
+pub fn lex_file(lex: LexerState) -> String {
+    lex.file
+}
+
+pub fn lex_errors(lex: LexerState) -> LexErrors {
+    lex.errors
+}
+
+// ---------------------------------------------------------------------------
+// LEXER STATE OPERATIONS
+// ---------------------------------------------------------------------------
+pub fn lex_at_end(lex: LexerState) -> Bool {
+    lex_pos(lex) >= string_len(lex_source(lex))
+}
+
+pub fn lex_peek(lex: LexerState) -> Nat {
+    if lex_at_end(lex) { 0 } else { string_char_at_internal(lex_source(lex), lex_pos(lex)) }
+}
+
+pub fn lex_peek_next(lex: LexerState) -> Nat {
+    if lex_pos(lex) + 1 >= string_len(lex_source(lex)) { 0 }
+    else { string_char_at_internal(lex_source(lex), lex_pos(lex) + 1) }
+}
+
+pub fn lex_advance(lex: LexerState) -> LexerState {
+    { source: lex.source, pos: lex.pos + 1, file: lex.file, errors: lex.errors }
+}
+
+pub fn lex_advance_n(lex: LexerState, n: Nat) -> LexerState {
+    { source: lex.source, pos: lex.pos + n, file: lex.file, errors: lex.errors }
+}
+
+pub fn lex_add_error(lex: LexerState, err: LexError) -> LexerState {
+    { source: lex.source, pos: lex.pos, file: lex.file, errors: errors_push(err, lex.errors) }
+}
+
+pub fn lex_slice(lex: LexerState, start: Nat, len: Nat) -> String {
+    substring(lex_source(lex), start, len)
+}
+
+pub fn lex_span(lex: LexerState, start: Nat) -> Span {
+    span_new(start, lex_pos(lex), lex_file(lex))
+}
+
+// ---------------------------------------------------------------------------
+// SCAN RESULT
+// ---------------------------------------------------------------------------
+pub type ScanResult = { token: Token, state: LexerState }
+
+pub fn scan_result_token(r: ScanResult) -> Token {
+    r.token
+}
+
+pub fn scan_result_state(r: ScanResult) -> LexerState {
+    r.state
+}

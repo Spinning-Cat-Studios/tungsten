@@ -1,0 +1,110 @@
+// src/compiler/elab/items/imports/dedup.tg
+// Import deduplication logic for handling duplicate imports
+// from multiple files and re-export paths.
+
+use lexer::span::Span;
+use parser::ast::Visibility;
+use driver::ffi::{List, Nil, Cons};
+use elab::env::{
+    Env, env_add_import, env_current_module_contents,
+    ElabModulePath, elab_module_path_to_string,
+    Import, import_new, import_list_lookup, MaybeImport, NoImport, SomeImport
+};
+use elab::items::result::{
+    ElabContext, elab_context_with_env, elab_context_add_error
+};
+use elab::error::{
+    ElabError, elab_error_duplicate_import
+};
+use elab::items::imports::{UseScope, ImportNames};
+
+// ===========================================================================
+// NAMED IMPORT DEDUP
+// ===========================================================================
+
+/// Check for duplicate import by local_name; add import if none found.
+///
+/// Same-definition dedup: if the existing import has the same local name
+/// and same source item name, skip silently. This handles both:
+/// 1. Multiple files importing the same item (flattened into one scope)
+/// 2. Same item available via parent re-export and child module
+///
+/// The bootstrap scopes imports per-file so these never collide.
+/// The self-hosted compiler shares one import list, so we dedup by
+/// matching on the imported item name rather than the full module path.
+pub fn check_duplicate_and_add(
+    ctx: ElabContext,
+    full_path: ElabModulePath,
+    names: ImportNames,
+    scope: UseScope
+) -> ElabContext {
+    let contents = env_current_module_contents(ctx.env);
+    match import_list_lookup(contents.imports, names.local) {
+        SomeImport(existing) =>
+            if existing.source_name == names.source {
+                // Same item imported again (possibly from a different path) — skip
+                ctx
+            } else {
+                let first_module = elab_module_path_to_string(existing.source_path);
+                let second_module = elab_module_path_to_string(full_path);
+                let err = elab_error_duplicate_import(
+                    names.local, names.source, existing.import_span, scope.span,
+                    first_module, second_module
+                );
+                elab_context_add_error(ctx, err)
+            },
+        NoImport() =>
+            let imp = import_new(full_path, names.source, names.local, scope.vis, scope.span);
+            let env2 = env_add_import(ctx.env, imp);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+// ===========================================================================
+// GLOB IMPORT DEDUP
+// ===========================================================================
+
+/// Add imports for all items from a glob, with same-definition dedup.
+///
+/// If a name is already imported (from any source — named or glob),
+/// skip the duplicate. This matches bootstrap behaviour where glob
+/// imports use separate tables and don't conflict with named imports.
+pub fn add_glob_imports(
+    ctx: ElabContext,
+    source_path: ElabModulePath,
+    items: List<String>,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(name, rest) =>
+            let ctx2 = try_add_glob_import(ctx, source_path, name, vis, span);
+            add_glob_imports(ctx2, source_path, rest, vis, span)
+    }
+}
+
+/// Try to add a single glob import, checking for duplicates.
+///
+/// If the name already exists from any import (named or glob),
+/// skip silently. The existing import takes priority.
+fn try_add_glob_import(
+    ctx: ElabContext,
+    source_path: ElabModulePath,
+    name: String,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    let contents = env_current_module_contents(ctx.env);
+    match import_list_lookup(contents.imports, name) {
+        SomeImport(existing) =>
+            // Name already imported — skip silently.
+            // In the bootstrap, glob imports skip if the name is already
+            // in scope (from named import or earlier glob). We match that.
+            ctx,
+        NoImport() =>
+            let imp = import_new(source_path, name, name, vis, span);
+            let env2 = env_add_import(ctx.env, imp);
+            elab_context_with_env(ctx, env2)
+    }
+}

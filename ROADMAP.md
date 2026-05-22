@@ -2,9 +2,9 @@
 
 This roadmap outlines the planned evolution of Tungsten across major versions. Dates are not committed — Tungsten is a personal research project and features ship when they're ready.
 
-## v1.0 — Self-Hosted Compiler (current)
+## v1.0 — Self-Hosted Compiler
 
-Tungsten 1.0 establishes the language as a working, self-hosted dependently-typed proof language.
+Tungsten 1.0 established the language as a working, self-hosted dependently-typed proof language.
 
 **Completed:**
 
@@ -20,63 +20,104 @@ Tungsten 1.0 establishes the language as a working, self-hosted dependently-type
 - Standard library with `Nat`, `Bool`, `Option`, `List`, `Result`, string operations
 - Proof examples demonstrating boolean algebra and natural number properties
 
-**Known limitations in v1.0:**
+---
 
-- Module resolution uses flattening (all modules merged before elaboration)
-- Self-hosted native compiler currently supported on macOS (ARM64) — Linux/x86_64 self-hosting requires target-aware alignment and ABI work (bootstrap compiler runs on both platforms)
-- Interpreter (`tungsten run`) does not reduce eliminators — `if`/`else`, `match`, and record field access return `()` instead of correct values. Type-checking and native compilation are unaffected
-- Self-hosted binary's `tungsten run` prints `()` for all programs due to a codegen bug with record field projection. Use `tungsten compile` instead, which works correctly
-- `return` keyword does not interrupt control flow — it type-checks the value but execution continues (effectively a no-op)
-- Two diagnostic gaps: E0007 (duplicate import) and E0016 (private item access) not emitted by self-hosted compiler
-- `pub` keyword rejected in standalone files — files using `pub fn` (needed for module imports) cannot be type-checked standalone with `tungsten check`; a consequence of module flattening
-- Pattern matching limited to one level of destructuring (no nested patterns)
+## v1.5 — Language Completeness (current)
+
+v1.5 focused on compiler architecture, performance, and language ergonomics. All v1.0 known limitations have been resolved.
+
+**Completed:**
+
+- **Linux/x86_64 self-host support** — target-aware alignment and ABI for self-compiled native compiler on both ARM64 macOS and x86_64 Linux
+- **Interpreter and codegen fixes** — `tungsten run` produces correct results; self-hosted binary works correctly
+- **Per-module compilation** — module flattening removed; three-phase per-module elaboration pipeline (Phase A / A.5 / B)
+- **Elaboration caching** — three-tier content-addressed cache; warm-cache self-compile under 500ms
+- **Parallel codegen** — per-function codegen units with in-process parallel compilation
+- **Static linking** — single binary output, no `LD_LIBRARY_PATH` required
+- **Early return** — `return expr` with bottom type semantics
+- **`?` operator** — early return on error for `Result`/`Option`
+- **`let`-`else` syntax** — refutable pattern binding with diverging else branch
+- **`if let` expressions** — with chain support
+- **`try` blocks** — create `Result` values without function boundaries
+- **Nested pattern matching** — `Cons(Pair(a, b), rest)` and nested tuples in constructors
+- **Record spread syntax** — `{ ...base, field: new_value }`
+- **Named record constructors** — `TypeName { field: value, ... }`
+- **Generic type aliases** — `type Alias<T> = ConcreteType<T>`
+- **Visibility enforcement** — per-constructor, per-field, and `pub use` re-export capping
+- **Diagnostic improvements** — error cascade prevention, multi-file spans, contextual hints, 50+ diagnostic commands
+- **Test framework** — `tungsten test` with discovery, filtering, and compile-time assertions
+- **Self-hosted LLVM IR emitter** — `.tg`-based codegen (M4–M9 complete)
+- **ABI-safe sum types** — SROA-safe tagged union representation
+- **Deterministic IR emission** — byte-identical `.ll` from tungsten2/tungsten3
+- **Musttail TCO** — proper tail-call optimization, removes stack trampoline
+- **Escape analysis** — non-escaping closures and ADT values stack-allocated
+- **Propositional equality** — `Eq<A, x, y>` type with `Refl` constructor and motive-driven dependent elimination
+- **Natural number induction** — `natind` eliminator for primitive recursion with compile-time motive checking
+- **Benchmarking suite** — 7 benchmarks comparing Tungsten vs Rust
 
 ---
 
-## v1.5 — Language Completeness
+## v2.0 — Production-Ready
 
-v1.5 focuses on filling in features that were deliberately simplified during bootstrap. With the compiler written in Tungsten itself, iteration is faster.
+v2.0 focuses on making Tungsten a production-ready platform: allocation performance, proof automation foundations, developer tooling, and ecosystem scaffolding.
 
 **Planned features:**
 
-- **Linux/x86_64 self-host support** — add target-aware alignment and ABI support for the self-compiled native compiler on x86_64 Linux (reference platform: ARM64 macOS)
-- **Interpreter eliminator fix** — reduce `if`/`else`, `match`, and record field access in the evaluator so `tungsten run` produces correct results
-- **Self-hosted `tungsten run` codegen fix** — fix record field projection codegen bug that causes the self-hosted binary to print `()` for all interpreted programs
-- **Remove module flattening** — proper per-module compilation, prerequisite for incremental builds
-- **Incremental build cache** — content-addressed caching for the self-hosted compiler
-- **Early return** — true control flow interruption (currently `return` is a no-op)
-- **Nested pattern matching** — `Cons(x, Nil())` instead of manual nested `match`
-- **Record spread syntax** — `{ ...record, field: new_value }`
+- **Allocation optimizations** — unbox small ADTs as tagged machine words, arena allocation for compiler phases, string interning
+- **Tactic language foundations** — `simp`, `induction`, `rewrite`, `cases`, and arithmetic decision procedures
+- **DWARF debug info** — source-level debugging in GDB/LLDB for `.tg` programs
+- **Diagnostic infrastructure** — structured JSON error output, fix-it suggestions, runtime `.tg` stack traces
+- **LSP design + minimal implementation** — go-to-definition, hover, inline diagnostics
+- **Documentation tooling** — generated module/function docs for humans and agents
+- **Package manifest** — `tungsten.toml` with local path dependencies and workspace support
+- **Native core library** — rewrite `tungsten_core` runtime in Tungsten itself
+- **Parallel elaboration** — multi-threaded per-module type-checking
 - **`let mut` syntax** — sugar over reference cells
-- **`?` operator** — early return on error for `Result`/`Option` (requires early return)
-- **Diagnostic improvements** — error cascade prevention (reduce 30x amplification), missing E0007/E0016 emissions, multi-file span rendering for cross-file errors, import chain tracing, "did you mean?" suggestions for typos
 - **Or-patterns** — `Null | False | Zero => ...`
-- **Visibility enhancements** — per-constructor and per-field visibility, re-exports
-- **Test framework** — `#[test]` annotations, `tungsten test` CLI command
-- **Self-hosted LLVM IR emitter** — replace bootstrap codegen dependency
-- **Typed union codegen** — fix SROA-safe sum type representation (SROA = Scalar Replacement of Aggregates)
-- **Deterministic LLVM IR emission** — achieve byte-identical `.ll` files from `tungsten2` and `tungsten3`, proving the entire compiler pipeline is deterministic (full binary equivalence deferred to v2.0)
+- **Standard library expansion** — collections, string builder, proof library foundations
+- **Termination checking** — structural recursion verification for proof soundness
+- **Universe hierarchy** — stratified `Type 0 : Type 1 : ...` to prevent Girard's paradox
+- **Cross-platform release builds** — CI release matrix for macOS, Linux, and Windows with distributable binaries
 
 ---
 
-## v2.0 — Production-Ready (long-term vision)
+## v2.1 — Ecosystem & Adoption (long-term vision)
 
-v2.0 aims to make Tungsten a production-ready proof assistant and systems language. This is a vision document — features may be promoted to v1.5 or deferred further based on research.
+v2.1 focuses on ecosystem maturity and enabling others to use Tungsten productively. This is a vision document — features require significant design work and real-world usage feedback from v2.0.
 
 **Planned features:**
 
+- **Community contributions** — structured PR workflow, contributor guidelines, commit-preserving release pipeline
 - **Borrow checker** — Rust-style ownership and borrowing for memory safety
-- **Tactic language** — `simp`, `induction`, `rewrite`, `ring`, `omega`, `auto`
+- **Type classes / traits** — overloading, abstraction, and method syntax
 - **Algebraic effects** — first-class effects for controlled side effects
-- **LSP server** — go-to-definition, hover, diagnostics, code actions
+- **Crypto primitives** — type-safe hashing, encryption, signatures with linear key management
+- **Networking (sockets, TCP/IP)** — socket lifecycle as a type-level state machine; TCP, UDP, DNS
+- **Provable network models** — session types and effect-typed failure reasoning for distributed protocols
+- **Full LSP** — completions, rename, code actions, error recovery, incremental re-elaboration
 - **REPL** — interactive evaluation and proof exploration
-- **Package manager** — Cargo-like dependency management
-- **Binary-reproducible triple compile** — upgrade from IR equivalence (v1.5) to byte-identical binaries via linker/environment determinism
 - **Lean4 transpiler** — transpile proofs to Lean4 for independent verification
-- **Type classes / traits** — overloading and abstraction
+- **Binary-reproducible triple compile** — byte-identical binaries via linker/environment determinism
 - **Refinement types** — types with predicates
+- **Inductive families** — indexed types (length-indexed vectors, well-typed ASTs)
+- **Proof irrelevance** — Prop universe with compile-time proof erasure
 - **Row types** — extensible records
-- **Standard library expansion** — collections, IO, concurrency, proof library
+- **Per-definition incremental elaboration** — Salsa-style query-based re-checking
+- **Full package registry** — version resolution, publishing, git dependencies
+
+---
+
+## v2.2 — Proof Language Maturity (long-term vision)
+
+v2.2 closes the gap with mature proof assistants like Lean4, focusing on extensible proof automation and mathematical foundations.
+
+**Planned features:**
+
+- **Metaprogramming framework** — custom tactics, elaboration extensions, and linters written in Tungsten itself
+- **Notation extensions** — user-defined operators, notation macros, and syntax categories
+- **Quotient types** — equivalence classes as types (integers, rationals, modular arithmetic)
+- **Coercions** — automatic type coercions via `Coe<A, B>` typeclass
+- **Proof library foundations** — algebraic hierarchy, order theory, common lemmas
 
 ---
 

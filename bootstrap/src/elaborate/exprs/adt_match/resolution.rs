@@ -57,7 +57,7 @@ impl<'a> Elaborator<'a> {
             }
         };
 
-        // Check if it's recursive
+        // Check if it's recursive (self-recursive or in a mutual recursion group)
         let is_recursive = self.adt_is_recursive(&ctor_info.type_name, &constructors);
 
         Ok(AdtMatchContext {
@@ -114,7 +114,25 @@ impl<'a> Elaborator<'a> {
             .env
             .resolve_constructor_path(path, &self.current_module)
         {
-            Ok(Some(info)) => Ok(info.clone()),
+            Ok(Some(info)) => {
+                let info = info.clone();
+                // Check constructor visibility (ADR 14.5.26c AC3)
+                if !self
+                    .env
+                    .is_constructor_accessible(&info, &self.current_module, true)
+                {
+                    if let Some(item_module) = self.env.get_item_module(&info.type_name) {
+                        return Err(ElabError::private_item(
+                            path.span,
+                            &name.name,
+                            "constructor",
+                            item_module.to_string(),
+                            self.current_module.to_string(),
+                        ));
+                    }
+                }
+                Ok(info)
+            }
             Ok(None) => Err(self.undefined_constructor_error(name.span, &name.name)),
             Err(PathResolutionError::ModuleNotFound(module)) => {
                 Err(ElabError::module_not_found(path.span, module.to_string()))

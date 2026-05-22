@@ -1,0 +1,100 @@
+// src/compiler/elab/cir/capture.tg
+// Capture list construction helpers for CIRLambda/CIRFix.
+//
+// Pure list operations only — no codegen dependencies.
+// For LLVM-dependent env layout helpers, see capture_layout.tg.
+
+use elab::cir::types::{
+    CIRCapture, CIRCaptureList, CIRCaptureNil, CIRCaptureCons,
+    CodegenType
+};
+use driver::util::strings::{string_eq, string_lt};
+
+// ===========================================================================
+// CONSTRUCTORS
+// ===========================================================================
+
+/// Empty capture list — used for non-capturing lambdas and as initial value.
+pub fn cir_captures_empty() -> CIRCaptureList {
+    CIRCaptureNil
+}
+
+/// Add a capture to the front of a capture list.
+pub fn cir_captures_add(
+    name: String, ty: CodegenType, rest: CIRCaptureList
+) -> CIRCaptureList {
+    CIRCaptureCons({ name: name, ty: ty } : CIRCapture, rest)
+}
+
+// ===========================================================================
+// QUERIES
+// ===========================================================================
+
+/// Number of captures in a list.
+pub fn cir_captures_len(list: CIRCaptureList) -> Nat {
+    match list {
+        CIRCaptureNil() => 0,
+        CIRCaptureCons(_, rest) => 1 + cir_captures_len(rest)
+    }
+}
+
+/// Check if a capture list is empty.
+pub fn cir_captures_is_empty(list: CIRCaptureList) -> Bool {
+    match list {
+        CIRCaptureNil() => true,
+        CIRCaptureCons(_, _) => false
+    }
+}
+
+/// Check if a name is already present in a capture list.
+pub fn cir_captures_contains(name: String, list: CIRCaptureList) -> Bool {
+    match list {
+        CIRCaptureNil() => false,
+        CIRCaptureCons(cap, rest) =>
+            if string_eq(cap.name, name) { true }
+            else { cir_captures_contains(name, rest) }
+    }
+}
+
+/// Remove duplicate captures (by name). Keeps first occurrence.
+pub fn cir_captures_dedupe(list: CIRCaptureList) -> CIRCaptureList {
+    cir_captures_dedupe_acc(list, CIRCaptureNil)
+}
+
+fn cir_captures_dedupe_acc(list: CIRCaptureList, seen: CIRCaptureList) -> CIRCaptureList {
+    match list {
+        CIRCaptureNil() => seen,
+        CIRCaptureCons(cap, rest) =>
+            if cir_captures_contains(cap.name, seen) {
+                cir_captures_dedupe_acc(rest, seen)
+            } else {
+                cir_captures_dedupe_acc(rest, cir_captures_add(cap.name, cap.ty, seen))
+            }
+    }
+}
+
+/// Sort captures lexicographically by name (insertion sort).
+pub fn cir_captures_sort(list: CIRCaptureList) -> CIRCaptureList {
+    cir_captures_sort_acc(list, CIRCaptureNil)
+}
+
+fn cir_captures_sort_acc(list: CIRCaptureList, sorted: CIRCaptureList) -> CIRCaptureList {
+    match list {
+        CIRCaptureNil() => sorted,
+        CIRCaptureCons(cap, rest) =>
+            cir_captures_sort_acc(rest, cir_captures_insert(cap, sorted))
+    }
+}
+
+/// Insert a capture into a sorted list in lexicographic order.
+fn cir_captures_insert(cap: CIRCapture, list: CIRCaptureList) -> CIRCaptureList {
+    match list {
+        CIRCaptureNil() => CIRCaptureCons(cap, CIRCaptureNil),
+        CIRCaptureCons(head, rest) =>
+            if string_lt(cap.name, head.name) {
+                CIRCaptureCons(cap, list)
+            } else {
+                CIRCaptureCons(head, cir_captures_insert(cap, rest))
+            }
+    }
+}

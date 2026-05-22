@@ -1,0 +1,48 @@
+// Unit tests for string concatenation (ADR 18.5.26f).
+// Verifies aliased strings remain valid after concat (AC7).
+
+mod driver;
+
+use driver::ffi::test::{assert_eq_string, assert_eq_nat};
+
+// ---------------------------------------------------------------------------
+// AC7: Aliased string values remain valid after concat
+// ---------------------------------------------------------------------------
+
+/// Verifies that `x` remains usable after `x ++ suffix`.
+/// This guards against the owned-left path incorrectly consuming a bound value.
+pub fn test_concat_alias_safety() -> Unit {
+    let x = "hello" ++ " world";
+    let y = x ++ "!";
+    assert_eq_string(x, "hello world");
+    assert_eq_string(y, "hello world!")
+}
+
+/// Verifies nested concat where the inner result is a temporary.
+/// (a ++ b) ++ c — inner is dead, outer should still produce correct result.
+pub fn test_concat_nested_temporary() -> Unit {
+    let result = ("foo" ++ "bar") ++ "baz";
+    assert_eq_string(result, "foobarbaz")
+}
+
+/// Verifies deeply nested concat: ((a ++ b) ++ c) ++ d.
+pub fn test_concat_deeply_nested() -> Unit {
+    let result = (("a" ++ "b") ++ "c") ++ "d";
+    assert_eq_string(result, "abcd")
+}
+
+/// Verifies multiple uses of same bound concat result.
+pub fn test_concat_reuse_bound_value() -> Unit {
+    let base = "hello" ++ " ";
+    let greeting1 = base ++ "Alice";
+    let greeting2 = base ++ "Bob";
+    assert_eq_string(base, "hello ");
+    assert_eq_string(greeting1, "hello Alice");
+    assert_eq_string(greeting2, "hello Bob")
+}
+
+/// Verifies right-recursive pattern (benchmark style).
+pub fn test_concat_right_recursive() -> Unit {
+    let a = "x" ++ ("y" ++ "z");
+    assert_eq_string(a, "xyz")
+}

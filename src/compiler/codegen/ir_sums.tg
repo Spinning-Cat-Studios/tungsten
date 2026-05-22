@@ -1,0 +1,197 @@
+// src/compiler/codegen/ir_sums.tg
+// Sum type (coproduct) emission — inl, inr, case analysis.
+//
+// Sum layout: { i32, [N x i8] } where N = max(type_size(left), type_size(right))
+// - tag 0 = inl (left variant)
+// - tag 1 = inr (right variant)
+// - Payload stored/loaded through opaque ptr at field offset 1
+//
+// Uses alloca-result pattern for case merge (consistent with CIRLet).
+
+use driver::util::nat_to_string;
+use elab::cir::types::{
+    CodegenIR, CodegenType, CTSum
+};
+use codegen::ir_builder::{
+    IRState, fresh_name, fresh_label, emit_line
+};
+use codegen::ir_types::{llvm_type, type_size};
+use codegen::ir_expr::{emit_expr};
+
+// ===========================================================================
+// SUM INJECTION
+// ===========================================================================
+
+/// Emit left injection: inl(value) into sum type { i32, [N x i8] }.
+///
+/// Allocates the sum struct on stack, stores tag 0, stores the payload
+/// value through an opaque pointer, then loads the complete struct.
+pub fn emit_sum_inl(
+    st: IRState, value_val: String, sum_ty: CodegenType
+) -> (String, IRState) {
+    emit_sum_injection(st, value_val, sum_ty, 0)
+}
+
+/// Emit right injection: inr(value) into sum type { i32, [N x i8] }.
+pub fn emit_sum_inr(
+    st: IRState, value_val: String, sum_ty: CodegenType
+) -> (String, IRState) {
+    emit_sum_injection(st, value_val, sum_ty, 1)
+}
+
+/// Shared injection logic for inl (tag=0) and inr (tag=1).
+fn emit_sum_injection(
+    st: IRState, value_val: String, sum_ty: CodegenType, tag: Nat
+) -> (String, IRState) {
+    let sum_ty_str = llvm_type(sum_ty);
+    let payload_ty_str = get_payload_type_str(sum_ty, tag);
+
+    // %mem = alloca { i32, [N x i8] }
+    let (mem, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ mem ++ " = alloca " ++ sum_ty_str);
+
+    // %tag_ptr = getelementptr ..., ptr %mem, i32 0, i32 0
+    let (tag_ptr, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ tag_ptr ++ " = getelementptr " ++ sum_ty_str ++ ", ptr " ++ mem ++ ", i32 0, i32 0");
+
+    // store i32 <tag>, ptr %tag_ptr
+    let st = emit_line(st,
+        "  store i32 " ++ nat_to_string(tag) ++ ", ptr " ++ tag_ptr);
+
+    // %payload_ptr = getelementptr ..., ptr %mem, i32 0, i32 1
+    let (payload_ptr, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ payload_ptr ++ " = getelementptr " ++ sum_ty_str ++ ", ptr " ++ mem ++ ", i32 0, i32 1");
+
+    // store <payload_type> <value>, ptr %payload_ptr
+    let st = emit_line(st,
+        "  store " ++ payload_ty_str ++ " " ++ value_val ++ ", ptr " ++ payload_ptr);
+
+    // %result = load { i32, [N x i8] }, ptr %mem
+    let (result, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ result ++ " = load " ++ sum_ty_str ++ ", ptr " ++ mem);
+
+    (result, st)
+}
+
+// ===========================================================================
+// CASE ANALYSIS
+// ===========================================================================
+
+/// Emit case analysis on a sum type value.
+///
+/// Uses alloca-result pattern:
+///   %result.addr = alloca <result_type>
+///   switch on tag → case.inl / case.inr
+///   each branch: load payload, bind var, emit body, store result
+///   case.merge: load %result.addr
+pub fn emit_sum_case(
+    st: IRState,
+    scrut: CodegenIR,
+    sum_ty: CodegenType,
+    left_name: String,
+    left_body: CodegenIR,
+    right_name: String,
+    right_body: CodegenIR,
+    result_ty: CodegenType
+) -> (String, IRState) {
+    let sum_ty_str = llvm_type(sum_ty);
+    let result_ty_str = llvm_type(result_ty);
+    let left_payload_ty = get_payload_type_str(sum_ty, 0);
+    let right_payload_ty = get_payload_type_str(sum_ty, 1);
+
+    // Emit scrutinee
+    let (scrut_val, st) = emit_expr(st, scrut);
+
+    // %result.addr = alloca <result_type>
+    let (result_addr, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ result_addr ++ " = alloca " ++ result_ty_str);
+
+    // Store scrutinee on stack for GEP access
+    let (scrut_ptr, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ scrut_ptr ++ " = alloca " ++ sum_ty_str);
+    let st = emit_line(st, "  store " ++ sum_ty_str ++ " " ++ scrut_val ++ ", ptr " ++ scrut_ptr);
+
+    // Extract tag
+    let (tag_ptr, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ tag_ptr ++ " = getelementptr " ++ sum_ty_str ++ ", ptr " ++ scrut_ptr ++ ", i32 0, i32 0");
+    let (tag, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ tag ++ " = load i32, ptr " ++ tag_ptr);
+
+    // Get payload pointer
+    let (payload_ptr, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ payload_ptr ++ " = getelementptr " ++ sum_ty_str ++ ", ptr " ++ scrut_ptr ++ ", i32 0, i32 1");
+
+    // Generate labels
+    let (inl_label, st) = fresh_label(st);
+    let (inr_label, st) = fresh_label(st);
+    let (default_label, st) = fresh_label(st);
+    let (merge_label, st) = fresh_label(st);
+
+    // switch i32 %tag, label %default [ i32 0, label %inl  i32 1, label %inr ]
+    let st = emit_line(st,
+        "  switch i32 " ++ tag ++ ", label %" ++ default_label ++ " [\n"
+        ++ "    i32 0, label %" ++ inl_label ++ "\n"
+        ++ "    i32 1, label %" ++ inr_label ++ "\n"
+        ++ "  ]");
+
+    // --- inl branch ---
+    let st = emit_line(st, inl_label ++ ":");
+    // Load payload as left type
+    let (left_val, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ left_val ++ " = load " ++ left_payload_ty ++ ", ptr " ++ payload_ptr);
+    // Bind: alloca + store + load for the variable name
+    let (left_addr, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ left_addr ++ " = alloca " ++ left_payload_ty);
+    let st = emit_line(st, "  store " ++ left_payload_ty ++ " " ++ left_val ++ ", ptr " ++ left_addr);
+    let st = emit_line(st, "  %" ++ left_name ++ " = load " ++ left_payload_ty ++ ", ptr " ++ left_addr);
+    // Emit left body
+    let (left_result, st) = emit_expr(st, left_body);
+    let st = emit_line(st, "  store " ++ result_ty_str ++ " " ++ left_result ++ ", ptr " ++ result_addr);
+    let st = emit_line(st, "  br label %" ++ merge_label);
+
+    // --- inr branch ---
+    let st = emit_line(st, inr_label ++ ":");
+    let (right_val, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ right_val ++ " = load " ++ right_payload_ty ++ ", ptr " ++ payload_ptr);
+    let (right_addr, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ right_addr ++ " = alloca " ++ right_payload_ty);
+    let st = emit_line(st, "  store " ++ right_payload_ty ++ " " ++ right_val ++ ", ptr " ++ right_addr);
+    let st = emit_line(st, "  %" ++ right_name ++ " = load " ++ right_payload_ty ++ ", ptr " ++ right_addr);
+    let (right_result, st) = emit_expr(st, right_body);
+    let st = emit_line(st, "  store " ++ result_ty_str ++ " " ++ right_result ++ ", ptr " ++ result_addr);
+    let st = emit_line(st, "  br label %" ++ merge_label);
+
+    // --- default (unreachable) ---
+    let st = emit_line(st, default_label ++ ":");
+    let st = emit_line(st, "  unreachable");
+
+    // --- merge ---
+    let st = emit_line(st, merge_label ++ ":");
+    let (result, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ result ++ " = load " ++ result_ty_str ++ ", ptr " ++ result_addr);
+
+    (result, st)
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Get the LLVM type string for a sum variant's payload.
+/// tag 0 = left, tag 1 = right.
+fn get_payload_type_str(sum_ty: CodegenType, tag: Nat) -> String {
+    match sum_ty {
+        CTSum(left, right) =>
+            if tag == 0 { llvm_type(left) }
+            else { llvm_type(right) },
+        _ => "i64"  // fallback
+    }
+}

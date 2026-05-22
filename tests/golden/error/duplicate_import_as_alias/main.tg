@@ -1,0 +1,9 @@
+// Test: aliased import clashes with an existing import (AC2 of 14.5.26b).
+// `use mod_b::Bar as Foo` should clash with `use mod_a::Foo`.
+pub mod mod_a;
+pub mod mod_b;
+
+use mod_a::Foo;
+use mod_b::Bar as Foo;
+
+fn main() -> Nat { 0 }

@@ -1,0 +1,247 @@
+// List operations for the driver.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::strings::string_eq;
+use parser::option::{Option, Some, None};
+
+// ===========================================================================
+// LIST OPERATIONS
+// ===========================================================================
+
+/// Get length of a list.
+pub fn list_len<T>(list: List<T>) -> Nat {
+    list_len_acc(list, 0)
+}
+
+fn list_len_acc<T>(list: List<T>, acc: Nat) -> Nat {
+    match list {
+        Nil() => acc,
+        Cons(_, rest) => list_len_acc(rest, acc + 1)
+    }
+}
+
+/// Check if a list is empty.
+pub fn list_is_empty<T>(list: List<T>) -> Bool {
+    match list {
+        Nil() => true,
+        Cons(_, _) => false
+    }
+}
+
+/// Reverse a list.
+pub fn list_reverse<T>(list: List<T>) -> List<T> {
+    list_reverse_acc(list, Nil)
+}
+
+fn list_reverse_acc<T>(list: List<T>, acc: List<T>) -> List<T> {
+    match list {
+        Nil() => acc,
+        Cons(x, rest) => list_reverse_acc(rest, Cons(x, acc))
+    }
+}
+
+/// Map a function over a list.
+pub fn list_map<A, B>(list: List<A>, f: A -> B) -> List<B> {
+    list_reverse(list_map_acc(list, f, Nil))
+}
+
+fn list_map_acc<A, B>(list: List<A>, f: A -> B, acc: List<B>) -> List<B> {
+    match list {
+        Nil() => acc,
+        Cons(x, rest) => list_map_acc(rest, f, Cons(f(x), acc))
+    }
+}
+
+/// Filter a list by predicate.
+pub fn list_filter<T>(list: List<T>, pred: T -> Bool) -> List<T> {
+    list_reverse(list_filter_acc(list, pred, Nil))
+}
+
+fn list_filter_acc<T>(list: List<T>, pred: T -> Bool, acc: List<T>) -> List<T> {
+    match list {
+        Nil() => acc,
+        Cons(x, rest) =>
+            if pred(x) {
+                list_filter_acc(rest, pred, Cons(x, acc))
+            } else {
+                list_filter_acc(rest, pred, acc)
+            }
+    }
+}
+
+/// Get element at index (0-based). Returns None if out of bounds.
+pub fn list_get<T>(list: List<T>, index: Nat) -> Option<T> {
+    match list {
+        Nil() => None,
+        Cons(x, rest) =>
+            if index == 0 {
+                Some(x)
+            } else {
+                list_get(rest, index - 1)
+            }
+    }
+}
+
+/// Drop first n elements from list.
+pub fn list_drop<T>(list: List<T>, n: Nat) -> List<T> {
+    if n == 0 {
+        list
+    } else {
+        match list {
+            Nil() => Nil,
+            Cons(_, rest) => list_drop(rest, n - 1)
+        }
+    }
+}
+
+/// Take first n elements from list.
+pub fn list_take<T>(list: List<T>, n: Nat) -> List<T> {
+    list_reverse(list_take_acc(list, n, Nil))
+}
+
+fn list_take_acc<T>(list: List<T>, n: Nat, acc: List<T>) -> List<T> {
+    if n == 0 {
+        acc
+    } else {
+        match list {
+            Nil() => acc,
+            Cons(x, rest) => list_take_acc(rest, n - 1, Cons(x, acc))
+        }
+    }
+}
+
+/// Append two lists.
+pub fn list_append<T>(a: List<T>, b: List<T>) -> List<T> {
+    list_append_acc(list_reverse(a), b)
+}
+
+fn list_append_acc<T>(reversed_a: List<T>, b: List<T>) -> List<T> {
+    match reversed_a {
+        Nil() => b,
+        Cons(x, rest) => list_append_acc(rest, Cons(x, b))
+    }
+}
+
+/// Check if list contains element (using string equality for String lists).
+pub fn list_contains_string(list: List<String>, elem: String) -> Bool {
+    match list {
+        Nil() => false,
+        Cons(x, rest) =>
+            if string_eq(x, elem) {
+                true
+            } else {
+                list_contains_string(rest, elem)
+            }
+    }
+}
+
+/// Check if two string lists are equal.
+pub fn list_eq_string(a: List<String>, b: List<String>) -> Bool {
+    match a {
+        Nil() => match b {
+            Nil() => true,
+            Cons(_, _) => false
+        },
+        Cons(head_a, rest_a) => match b {
+            Nil() => false,
+            Cons(head_b, rest_b) =>
+                if string_eq(head_a, head_b) {
+                    list_eq_string(rest_a, rest_b)
+                } else {
+                    false
+                }
+        }
+    }
+}
+
+/// Check if string list A is a prefix of or equal to string list B.
+pub fn list_is_prefix_or_eq_string(a: List<String>, b: List<String>) -> Bool {
+    match a {
+        Nil() => true,  // Empty is prefix of everything
+        Cons(head_a, rest_a) =>
+            list_is_prefix_check_b(head_a, rest_a, b)
+    }
+}
+
+fn list_is_prefix_check_b(head_a: String, rest_a: List<String>, b: List<String>) -> Bool {
+    match b {
+        Nil() => false,  // Non-empty can't be prefix of empty
+        Cons(head_b, rest_b) =>
+            if string_eq(head_a, head_b) {
+                list_is_prefix_or_eq_string(rest_a, rest_b)
+            } else {
+                false
+            }
+    }
+}
+
+/// Append a string to the end of a string list.
+/// Delegates to list_append (tail-recursive via accumulator).
+pub fn list_append_string(list: List<String>, s: String) -> List<String> {
+    list_append(list, Cons(s, Nil))
+}
+
+/// Get head of string list (empty string if empty list).
+pub fn list_head_string(list: List<String>) -> String {
+    match list {
+        Nil() => "",
+        Cons(s, _) => s
+    }
+}
+
+/// Get all elements except the last one for a string list.
+pub fn list_init_string(list: List<String>) -> List<String> {
+    list_init_string_acc(list, Nil)
+}
+
+fn list_init_string_acc(list: List<String>, acc: List<String>) -> List<String> {
+    match list {
+        Nil() => list_reverse(acc),
+        Cons(x, rest) =>
+            if list_is_empty(rest) {
+                list_reverse(acc)
+            } else {
+                list_init_string_acc(rest, Cons(x, acc))
+            }
+    }
+}
+
+/// Get all elements except the last one.
+pub fn list_init<T>(list: List<T>) -> Option<List<T>> {
+    match list {
+        Nil() => None,
+        Cons(x, rest) =>
+            if list_is_empty(rest) {
+                let empty: List<T> = Nil;
+                Some(empty)
+            } else {
+                list_init_cons(x, rest)
+            }
+    }
+}
+
+fn list_init_cons<T>(head: T, rest: List<T>) -> Option<List<T>> {
+    match list_init(rest) {
+        None() => None,
+        Some(init_rest) => Some(Cons(head, init_rest))
+    }
+}
+
+/// Get the last element of a list.
+pub fn list_last<T>(list: List<T>) -> Option<T> {
+    match list {
+        Nil() => None,
+        Cons(x, rest) => match rest {
+            Nil() => Some(x),
+            Cons(_, _) => list_last(rest)
+        }
+    }
+}
+
+/// Fold left over a list.
+pub fn list_foldl<A, B>(list: List<A>, init: B, f: B -> A -> B) -> B {
+    match list {
+        Nil() => init,
+        Cons(x, rest) => list_foldl(rest, f(init, x), f)
+    }
+}

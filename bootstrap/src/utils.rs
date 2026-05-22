@@ -41,11 +41,7 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
         curr_row[0] = i;
 
         for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] {
-                0
-            } else {
-                1
-            };
+            let cost = usize::from(a_chars[i - 1] != b_chars[j - 1]);
 
             curr_row[j] = (prev_row[j] + 1) // deletion
                 .min(curr_row[j - 1] + 1) // insertion

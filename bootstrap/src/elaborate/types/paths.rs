@@ -19,14 +19,8 @@ impl<'a> Elaborator<'a> {
 
         // Check for built-in types first (only for simple paths)
         if path.is_simple() {
-            match name.as_str() {
-                "Nat" => return Ok(Type::Nat),
-                "Bool" => return Ok(Type::Bool),
-                "Unit" => return Ok(Type::Unit),
-                "Void" => return Ok(Type::Void),
-                "Prop" => return Ok(Type::Prop),
-                "String" => return Ok(Type::String),
-                _ => {}
+            if let Some(ty) = Self::builtin_type(name) {
+                return Ok(ty);
             }
 
             // Check if it's a type variable in scope (only for simple paths)
@@ -35,10 +29,54 @@ impl<'a> Elaborator<'a> {
             }
         }
 
-        // Try path resolution (handles both simple and qualified paths)
-        // Clone the data we need to avoid borrowing issues
+        // Resolve path to type definition
+        let (type_name, params_len, kind, visibility) = self.resolve_type_path_checked(path)?;
+
+        // Check item visibility
+        self.check_type_item_visibility(&type_name, visibility, span)?;
+
+        // If it has no parameters, we can use it directly
+        if params_len == 0 {
+            self.type_def_to_type(name, &type_name, &kind, span)
+        } else {
+            // Type requires parameters
+            Err(ElabError::new(
+                span,
+                ElabErrorKind::ArityMismatch {
+                    expected: params_len,
+                    found: 0,
+                },
+            )
+            .with_note(format!(
+                "`{}` requires {} type parameter(s)",
+                name, params_len
+            )))
+        }
+    }
+
+    /// Map a builtin type name to its Type, if any.
+    fn builtin_type(name: &str) -> Option<Type> {
+        match name {
+            "Nat" => Some(Type::Nat),
+            "Bool" => Some(Type::Bool),
+            "Unit" => Some(Type::Unit),
+            "Void" => Some(Type::Void),
+            "Prop" => Some(Type::Prop),
+            "String" => Some(Type::String),
+            _ => None,
+        }
+    }
+
+    /// Resolve a type path to its definition info, checking module visibility.
+    fn resolve_type_path_checked(
+        &self,
+        path: &crate::ast::Path,
+    ) -> ElabResult<(String, usize, TypeDefKind, crate::ast::Visibility)> {
+        let span = path.span;
+        let name = &path.item_name().name;
+
         let resolution_result = self.env.resolve_type_path(path, &self.current_module);
-        let (type_name, params_len, kind, visibility) = match resolution_result {
+        match resolution_result {
             Ok(Some(type_def)) => {
                 // For qualified paths, check module visibility
                 if !path.is_simple() {
@@ -59,17 +97,16 @@ impl<'a> Elaborator<'a> {
                         ));
                     }
                 }
-                (
+                Ok((
                     type_def.name.clone(),
                     type_def.params.len(),
                     type_def.kind.clone(),
                     type_def.visibility,
-                )
+                ))
             }
             Ok(None) => {
-                // Not found
                 if path.is_simple() {
-                    return Err(self.undefined_type_error(span, name));
+                    Err(self.undefined_type_error(span, name))
                 } else {
                     let module_str = path
                         .module_segments()
@@ -77,92 +114,87 @@ impl<'a> Elaborator<'a> {
                         .map(|s| s.name.as_str())
                         .collect::<Vec<_>>()
                         .join("::");
-                    return Err(ElabError::item_not_in_module(span, module_str, name));
+                    Err(ElabError::item_not_in_module(span, module_str, name))
                 }
             }
             Err(PathResolutionError::ModuleNotFound(module)) => {
-                return Err(ElabError::module_not_found(span, module.to_string()));
+                Err(ElabError::module_not_found(span, module.to_string()))
             }
-            Err(PathResolutionError::ItemNotFound { module, item }) => {
-                return Err(ElabError::item_not_in_module(
-                    span,
-                    module.to_string(),
-                    item,
-                ));
-            }
-        };
+            Err(PathResolutionError::ItemNotFound { module, item }) => Err(
+                ElabError::item_not_in_module(span, module.to_string(), item),
+            ),
+        }
+    }
 
-        // Check item visibility (for both simple and qualified paths)
-        if let Some(item_module) = self.env.get_item_module(&type_name) {
+    /// Check type item visibility, returning an error if private.
+    fn check_type_item_visibility(
+        &self,
+        type_name: &str,
+        visibility: crate::ast::Visibility,
+        span: crate::span::Span,
+    ) -> ElabResult<()> {
+        if let Some(item_module) = self.env.get_item_module(type_name) {
+            // Re-export visibility capping (ADR 14.5.26c §2.3)
+            let vis =
+                self.env
+                    .effective_type_visibility(type_name, visibility, &self.current_module);
             if !self
                 .env
-                .is_item_accessible(visibility, item_module, &self.current_module, true)
+                .is_item_accessible(vis, item_module, &self.current_module, true)
             {
                 return Err(ElabError::private_item(
                     span,
-                    &type_name,
+                    type_name,
                     "type",
                     item_module.to_string(),
                     self.current_module.to_string(),
                 ));
             }
         }
+        Ok(())
+    }
 
-        // If it has no parameters, we can use it directly
-        if params_len == 0 {
-            match &kind {
-                TypeDefKind::Alias(ty) => Ok(ty.clone()),
-                TypeDefKind::ADT(_) => {
-                    // For ADTs, we encode them as sum types
-                    self.encode_adt_type(&type_name, &[])
-                }
-                TypeDefKind::Record(_) => {
-                    // For records, return the nominal type (TyVar)
-                    // The encoding to Product happens at codegen time
-                    // This preserves record identity for field access resolution
-                    Ok(Type::TyVar(type_name))
-                }
-                TypeDefKind::Stub => {
-                    // Stub type - this happens during cross-module type elaboration
-                    // when types are defined after the type that references them.
-                    //
-                    // IMPORTANT (ADR 30.1.26.1): Stubs may have incorrect params (Vec::new())
-                    // if created during module discovery before actual type was elaborated.
-                    // We must re-resolve through imports to find the actual param count.
-                    if let Some(actual_params) = self.resolve_stub_actual_params(&type_name) {
-                        if !actual_params.is_empty() {
-                            // Actual type has params but none provided - arity error
-                            return Err(ElabError::new(
-                                span,
-                                ElabErrorKind::ArityMismatch {
-                                    expected: actual_params.len(),
-                                    found: 0,
-                                },
-                            )
-                            .with_note(format!(
-                                "`{}` requires {} type parameter(s)",
-                                name,
-                                actual_params.len()
-                            )));
-                        }
-                    }
-                    // Either no actual def found, or it truly has 0 params
-                    Ok(Type::TyVar(type_name))
+    /// Convert a resolved zero-param type def to a Type.
+    fn type_def_to_type(
+        &mut self,
+        display_name: &str,
+        type_name: &str,
+        kind: &TypeDefKind,
+        span: crate::span::Span,
+    ) -> ElabResult<Type> {
+        match kind {
+            TypeDefKind::Alias(ty) => Ok(ty.clone()),
+            TypeDefKind::ADT(_) => {
+                // During Phase 1c (collection), defer ADT encoding as TyVar("@Name")
+                // so mutual recursion groups can be computed first (ADR 18.4.26i §5).
+                // Phase 1d will resolve these to proper encodings.
+                if self.collection_phase {
+                    Ok(Type::TyVar(format!("@{}", type_name)))
+                } else {
+                    self.encode_adt_type(type_name, &[])
                 }
             }
-        } else {
-            // Type requires parameters
-            Err(ElabError::new(
-                span,
-                ElabErrorKind::ArityMismatch {
-                    expected: params_len,
-                    found: 0,
-                },
-            )
-            .with_note(format!(
-                "`{}` requires {} type parameter(s)",
-                name, params_len
-            )))
+            TypeDefKind::Record(_) => Ok(Type::TyVar(format!("@{}", type_name))),
+            TypeDefKind::Stub => {
+                // IMPORTANT (ADR 30.1.26.1): Stubs may have incorrect params
+                if let Some(actual_params) = self.resolve_stub_actual_params(type_name) {
+                    if !actual_params.is_empty() {
+                        return Err(ElabError::new(
+                            span,
+                            ElabErrorKind::ArityMismatch {
+                                expected: actual_params.len(),
+                                found: 0,
+                            },
+                        )
+                        .with_note(format!(
+                            "`{}` requires {} type parameter(s)",
+                            display_name,
+                            actual_params.len()
+                        )));
+                    }
+                }
+                Ok(Type::TyVar(format!("@{}", type_name)))
+            }
         }
     }
 
@@ -195,34 +227,37 @@ impl<'a> Elaborator<'a> {
                 return match &type_def.kind {
                     TypeDefKind::Alias(ty) => Ok(ty.clone()),
                     TypeDefKind::ADT(_) => {
-                        // For ADTs, we encode them as sum types
-                        self.encode_adt_type(name, &[])
+                        // During Phase 1c, defer ADT encoding (ADR 18.4.26i §5)
+                        if self.collection_phase {
+                            Ok(Type::TyVar(format!("@{}", name)))
+                        } else {
+                            self.encode_adt_type(name, &[])
+                        }
                     }
                     TypeDefKind::Record(_) => {
-                        // For records, return the nominal type (TyVar)
-                        // The encoding to Product happens at codegen time
-                        Ok(Type::TyVar(name.to_string()))
+                        // For records, return the nominal type (TyVar) with @-prefix
+                        // to distinguish from genuine type variables (ADR 13.4.26c §2)
+                        Ok(Type::TyVar(format!("@{}", name)))
                     }
                     TypeDefKind::Stub => {
-                        // Stub type - return a type variable that will be resolved later
-                        Ok(Type::TyVar(name.to_string()))
+                        // Stub type with @-prefix (ADR 13.4.26c §2)
+                        Ok(Type::TyVar(format!("@{}", name)))
                     }
                 };
-            } else {
-                // Type requires parameters
-                return Err(ElabError::new(
-                    span,
-                    ElabErrorKind::ArityMismatch {
-                        expected: type_def.params.len(),
-                        found: 0,
-                    },
-                )
-                .with_note(format!(
-                    "`{}` requires {} type parameter(s)",
-                    name,
-                    type_def.params.len()
-                )));
             }
+            // Type requires parameters
+            return Err(ElabError::new(
+                span,
+                ElabErrorKind::ArityMismatch {
+                    expected: type_def.params.len(),
+                    found: 0,
+                },
+            )
+            .with_note(format!(
+                "`{}` requires {} type parameter(s)",
+                name,
+                type_def.params.len()
+            )));
         }
 
         // Check if it's a type variable in scope
@@ -264,97 +299,30 @@ impl<'a> Elaborator<'a> {
             return Ok(Type::TyVar(name.to_string()));
         }
 
-        // Look up the type definition using path resolution
-        let (params, kind, expected_arity, type_name, visibility) = {
-            let type_def = match self.env.resolve_type_path(base_path, &self.current_module) {
-                Ok(Some(td)) => {
-                    // For qualified paths, check module visibility
-                    if !base_path.is_simple() {
-                        let module_path = ModulePath::new(
-                            base_path
-                                .module_segments()
-                                .iter()
-                                .map(|s| s.name.clone())
-                                .collect(),
-                        );
-                        if !self
-                            .env
-                            .is_module_accessible(&module_path, &self.current_module, true)
-                        {
-                            return Err(ElabError::private_module(
-                                base_path.span,
-                                module_path.to_string(),
-                                self.current_module.to_string(),
-                            ));
-                        }
-                    }
-                    td
-                }
-                Ok(None) => {
-                    if base_path.is_simple() {
-                        return Err(self.undefined_type_error(base_path.span, name));
-                    } else {
-                        let module_str = base_path
-                            .module_segments()
-                            .iter()
-                            .map(|s| s.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join("::");
-                        return Err(ElabError::item_not_in_module(
-                            base_path.span,
-                            module_str,
-                            name,
-                        ));
-                    }
-                }
-                Err(PathResolutionError::ModuleNotFound(module)) => {
-                    return Err(ElabError::module_not_found(
-                        base_path.span,
-                        module.to_string(),
-                    ));
-                }
-                Err(PathResolutionError::ItemNotFound { module, item }) => {
-                    return Err(ElabError::item_not_in_module(
-                        base_path.span,
-                        module.to_string(),
-                        item,
-                    ));
-                }
+        // Look up the type definition using shared path resolution
+        let (type_name, params_len, kind, visibility) =
+            self.resolve_type_path_checked(base_path)?;
+
+        // Get the params for alias substitution
+        let params =
+            if let Ok(Some(td)) = self.env.resolve_type_path(base_path, &self.current_module) {
+                td.params.clone()
+            } else {
+                Vec::new()
             };
-            (
-                type_def.params.clone(),
-                type_def.kind.clone(),
-                type_def.params.len(),
-                type_def.name.clone(),
-                type_def.visibility,
-            )
-        };
 
         // IMPORTANT (ADR 30.1.26.1): For stubs, the params may be incorrect (Vec::new())
         // if created during module discovery. Re-resolve to find actual arity.
         let expected_arity = if matches!(&kind, TypeDefKind::Stub) {
             self.resolve_stub_actual_params(&type_name)
                 .map(|params| params.len())
-                .unwrap_or(expected_arity)
+                .unwrap_or(params_len)
         } else {
-            expected_arity
+            params_len
         };
 
         // Check item visibility
-        if let Some(item_module) = self.env.get_item_module(&type_name) {
-            if !self
-                .env
-                .is_item_accessible(visibility, item_module, &self.current_module, true)
-            {
-                return Err(ElabError::private_item(
-                    span,
-                    &type_name,
-                    "type",
-                    item_module.to_string(),
-                    self.current_module.to_string(),
-                ));
-            }
-        }
+        self.check_type_item_visibility(&type_name, visibility, span)?;
 
         // Check arity
         if expected_arity != args.len() {
@@ -378,8 +346,12 @@ impl<'a> Elaborator<'a> {
                 Ok(result)
             }
             TypeDefKind::ADT(_) => {
-                // Encode ADT with type arguments
-                self.encode_adt_type(name, &arg_types)
+                // During Phase 1c, defer ADT encoding (ADR 18.4.26i §5)
+                if self.collection_phase {
+                    Ok(Type::app(name.to_string(), arg_types))
+                } else {
+                    self.encode_adt_type(name, &arg_types)
+                }
             }
             TypeDefKind::Record(_) => {
                 // For records, return the nominal type as Type::App

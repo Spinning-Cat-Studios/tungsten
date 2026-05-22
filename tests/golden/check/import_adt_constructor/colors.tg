@@ -1,0 +1,14 @@
+// Module defining an ADT with constructors.
+
+pub type Color =
+    | Red
+    | Green
+    | Blue
+
+pub fn color_name(c: Color) -> Nat {
+    match c {
+        Red() => 0,
+        Green() => 1,
+        Blue() => 2
+    }
+}

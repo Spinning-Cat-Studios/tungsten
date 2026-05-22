@@ -1,0 +1,9 @@
+// Golden test: import aliasing resolves correctly.
+// Tests AC7 (ADR 16.5.26b): `use X as Y` parses and the alias resolves.
+mod math;
+
+use math::{add as plus, sub as minus};
+
+fn test_alias() -> Nat {
+    plus(1, minus(5, 2))
+}

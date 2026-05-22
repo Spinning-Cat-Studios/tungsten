@@ -1,0 +1,110 @@
+// src/compiler/elab/items/imports/paths.tg
+// Path manipulation helpers for import resolution.
+
+use parser::ast::{
+    Path, MkPath,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use elab::env::{ElabModulePath, MkElabModulePath, elab_module_path_new};
+
+/// Convert a Path AST to module path and final item name.
+pub fn path_to_module_and_name(path: Path) -> (ElabModulePath, String) {
+    match path {
+        MkPath(segments, _) =>
+            let (module_segs, name) = split_last(segments);
+            (elab_module_path_new(module_segs), name)
+    }
+}
+
+/// Split a list into all-but-last and last.
+fn split_last(list: List<Ident>) -> (List<String>, String) {
+    match list {
+        Nil() => (Nil, ""),
+        Cons(id, rest) =>
+            if list_is_empty_ident(rest) {
+                let result: (List<String>, String) = (Nil, ident_name(id));
+                result
+            } else {
+                let (prefix, last) = split_last(rest);
+                (Cons(ident_name(id), prefix), last)
+            }
+    }
+}
+
+fn list_is_empty_ident(list: List<Ident>) -> Bool {
+    match list {
+        Nil() => true,
+        Cons(_, _) => false
+    }
+}
+
+/// Extend a prefix with a path.
+pub fn extend_prefix_with_path(prefix: ElabModulePath, path: Path) -> ElabModulePath {
+    match path {
+        MkPath(segments, _) => extend_prefix_with_idents(prefix, segments)
+    }
+}
+
+/// Extend a prefix with ident segments.
+/// Uses cons-then-reverse pattern for O(n) total instead of O(n²).
+fn extend_prefix_with_idents(prefix: ElabModulePath, segments: List<Ident>) -> ElabModulePath {
+    match prefix {
+        MkElabModulePath(prefix_segs) =>
+            let reversed_prefix = list_reverse(prefix_segs);
+            let extended_reversed = extend_prefix_acc(reversed_prefix, segments);
+            MkElabModulePath(list_reverse(extended_reversed))
+    }
+}
+
+/// Accumulate ident names onto a reversed list.
+fn extend_prefix_acc(acc: List<String>, segments: List<Ident>) -> List<String> {
+    match segments {
+        Nil() => acc,
+        Cons(id, rest) => extend_prefix_acc(Cons(ident_name(id), acc), rest)
+    }
+}
+
+/// Combine two module paths.
+pub fn combine_paths(base: ElabModulePath, ext: ElabModulePath) -> ElabModulePath {
+    match ext {
+        MkElabModulePath(segments) => combine_paths_helper(base, segments)
+    }
+}
+
+/// Helper to combine paths.
+fn combine_paths_helper(base: ElabModulePath, segments: List<String>) -> ElabModulePath {
+    match base {
+        MkElabModulePath(base_segs) =>
+            let reversed_base = list_reverse(base_segs);
+            let extended_reversed = combine_paths_acc(reversed_base, segments);
+            MkElabModulePath(list_reverse(extended_reversed))
+    }
+}
+
+/// Accumulate string segments onto a reversed list.
+fn combine_paths_acc(acc: List<String>, segments: List<String>) -> List<String> {
+    match segments {
+        Nil() => acc,
+        Cons(seg, rest) => combine_paths_acc(Cons(seg, acc), rest)
+    }
+}
+
+/// Convert a path to a string for error messages.
+pub fn path_to_string(path: Path) -> String {
+    match path {
+        MkPath(segments, _) => idents_to_string(segments, "")
+    }
+}
+
+/// Convert idents to a joined string.
+fn idents_to_string(segments: List<Ident>, acc: String) -> String {
+    match segments {
+        Nil() => acc,
+        Cons(id, rest) =>
+            let name = ident_name(id);
+            let new_acc = if acc == "" { name } else { acc ++ "::" ++ name };
+            idents_to_string(rest, new_acc)
+    }
+}

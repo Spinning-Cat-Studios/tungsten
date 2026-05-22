@@ -1,0 +1,86 @@
+// src/compiler/elab/exprs/forms/compare/inner_forall.tg
+// Inner forall resolution for polymorphic sub-expressions.
+//
+// When a synthesized type contains embedded foralls from polymorphic
+// sub-expressions (e.g., Nil : forall T. List<T> inside a tuple),
+// these functions resolve them against the expected type structure.
+// See ADR 20.5.26b for the full root cause analysis.
+
+use elab::ffi::{
+    TypeHandle,
+    tg_type_is_forall, tg_type_get_forall_var, tg_type_get_forall_body,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_is_arrow, tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_is_mu, tg_type_get_mu_var, tg_type_get_mu_body,
+    tg_type_sum, tg_type_product, tg_type_arrow, tg_type_mu,
+    tg_type_substitute
+};
+use elab::exprs::forms::compare::{
+    get_innermost_forall_body, extract_type_arg_from_match,
+    ExtractResult, ExtractFound, ExtractCompatible, ExtractMismatch
+};
+
+// ===========================================================================
+// INNER FORALL RESOLUTION
+// ===========================================================================
+
+/// Resolve forall types nested inside a structural type by matching against
+/// the corresponding expected type. This handles cases like:
+///   actual:   Sum(Product(forall T. Mu(α, T), Cursor), Error)
+///   expected: Sum(Product(Mu(α, Nat), Cursor), Error)
+/// The inner `forall T. Mu(α, T)` is resolved to `Mu(α, Nat)` by extracting
+/// T from the expected's corresponding position.
+pub fn resolve_inner_foralls(actual: TypeHandle, expected: TypeHandle) -> TypeHandle {
+    if tg_type_is_forall(actual) && !tg_type_is_forall(expected) {
+        // actual is forall, expected is concrete — try to instantiate
+        instantiate_forall_from_expected(actual, expected)
+    } else if tg_type_is_sum(actual) && tg_type_is_sum(expected) {
+        let left = resolve_inner_foralls(tg_type_get_sum_left(actual), tg_type_get_sum_left(expected));
+        let right = resolve_inner_foralls(tg_type_get_sum_right(actual), tg_type_get_sum_right(expected));
+        tg_type_sum(left, right)
+    } else if tg_type_is_product(actual) && tg_type_is_product(expected) {
+        let left = resolve_inner_foralls(tg_type_get_product_left(actual), tg_type_get_product_left(expected));
+        let right = resolve_inner_foralls(tg_type_get_product_right(actual), tg_type_get_product_right(expected));
+        tg_type_product(left, right)
+    } else if tg_type_is_arrow(actual) && tg_type_is_arrow(expected) {
+        let dom = resolve_inner_foralls(tg_type_get_arrow_domain(actual), tg_type_get_arrow_domain(expected));
+        let cod = resolve_inner_foralls(tg_type_get_arrow_codomain(actual), tg_type_get_arrow_codomain(expected));
+        tg_type_arrow(dom, cod)
+    } else if tg_type_is_mu(actual) && tg_type_is_mu(expected) {
+        let body = resolve_inner_foralls(tg_type_get_mu_body(actual), tg_type_get_mu_body(expected));
+        tg_type_mu(tg_type_get_mu_var(actual), body)
+    } else {
+        actual
+    }
+}
+
+/// Instantiate a forall type using the expected type to determine type arguments.
+/// For `forall T. body` against `expected`, extracts T by matching body's structure
+/// against expected, substitutes, and recurses if still forall.
+///
+/// On ExtractCompatible: body doesn't contain var — return forall_ty unchanged
+///   (the variable is phantom or unused in this structural position).
+/// On ExtractMismatch: structural incompatibility — return forall_ty unchanged
+///   (caller will detect the mismatch at a higher level via type equality).
+fn instantiate_forall_from_expected(forall_ty: TypeHandle, expected: TypeHandle) -> TypeHandle {
+    if tg_type_is_forall(forall_ty) {
+        let var = tg_type_get_forall_var(forall_ty);
+        let body = tg_type_get_forall_body(forall_ty);
+        let inner_body = get_innermost_forall_body(forall_ty);
+        let result = extract_type_arg_from_match(inner_body, expected, var);
+        match result {
+            ExtractFound(type_arg) =>
+                let instantiated = tg_type_substitute(body, var, type_arg);
+                if tg_type_is_forall(instantiated) {
+                    instantiate_forall_from_expected(instantiated, expected)
+                } else {
+                    instantiated
+                },
+            ExtractCompatible => forall_ty,
+            ExtractMismatch => forall_ty
+        }
+    } else {
+        forall_ty
+    }
+}

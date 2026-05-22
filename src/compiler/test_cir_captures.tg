@@ -1,0 +1,227 @@
+// src/compiler/test_cir_captures.tg
+// Unit tests for CIR capture list helpers (ADR 13.5.26j §2.1).
+//
+// Run with: tungsten test src/compiler/test_cir_captures.tg
+// expect_type tests: cost 3 (--check-only, no LLVM)
+// assert_eq_* tests: cost 5 (needs LLVM / devcontainer)
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+mod codegen;
+
+use driver::ffi::test::{assert_eq_nat, assert_eq_bool, assert_eq_string};
+use elab::cir::types::{
+    CIRCaptureList, CIRCaptureNil, CIRCaptureCons, CIRCapture,
+    CodegenIR, CodegenType, CTNat, CTBool, CTArrow,
+    CIRVar, CIRLambda, CIRLet, CIRApp, CIRFix, CIRNatLit, CIRUnit, CIRNatAdd
+};
+use elab::cir::capture::{
+    cir_captures_empty, cir_captures_add,
+    cir_captures_len, cir_captures_is_empty,
+    cir_captures_contains, cir_captures_dedupe, cir_captures_sort
+};
+use elab::cir::free_vars::free_vars;
+use driver::ffi::{List, Nil, Cons};
+use driver::util::strings::string_contains;
+use codegen::ir_closures::fix::emit_fix;
+use codegen::ir_builder::{ir_state_new, ir_state_env_types_string, ir_state_to_string};
+
+// ===========================================================================
+// Type-level tests (cost 3, run with --check-only)
+// ===========================================================================
+
+pub fn test_captures_empty_type() -> Nat {
+    let _ = expect_type(cir_captures_empty(), "CIRCaptureList");
+    0
+}
+
+pub fn test_captures_add_type() -> Nat {
+    let _ = expect_type(cir_captures_add("x", CTNat, CIRCaptureNil), "CIRCaptureList");
+    0
+}
+
+// ===========================================================================
+// Runtime value tests (cost 5, needs LLVM)
+// ===========================================================================
+
+pub fn test_captures_len_empty() -> Unit {
+    assert_eq_nat(cir_captures_len(CIRCaptureNil), 0)
+}
+
+pub fn test_captures_len_one() -> Unit {
+    let list = cir_captures_add("x", CTNat, CIRCaptureNil);
+    assert_eq_nat(cir_captures_len(list), 1)
+}
+
+pub fn test_captures_len_two() -> Unit {
+    let list = cir_captures_add("x", CTNat,
+        cir_captures_add("y", CTBool, CIRCaptureNil));
+    assert_eq_nat(cir_captures_len(list), 2)
+}
+
+pub fn test_captures_is_empty_nil() -> Unit {
+    assert_eq_bool(cir_captures_is_empty(CIRCaptureNil), true)
+}
+
+pub fn test_captures_is_empty_cons() -> Unit {
+    let list = cir_captures_add("x", CTNat, CIRCaptureNil);
+    assert_eq_bool(cir_captures_is_empty(list), false)
+}
+
+// ===========================================================================
+// P2: dedupe, sort, contains (cost 5)
+// ===========================================================================
+
+pub fn test_captures_contains_present() -> Unit {
+    let list = cir_captures_add("x", CTNat, cir_captures_empty());
+    assert_eq_bool(cir_captures_contains("x", list), true)
+}
+
+pub fn test_captures_contains_absent() -> Unit {
+    let list = cir_captures_add("x", CTNat, cir_captures_empty());
+    assert_eq_bool(cir_captures_contains("y", list), false)
+}
+
+pub fn test_captures_dedupe_removes_dup() -> Unit {
+    let list = cir_captures_add("x", CTNat,
+        cir_captures_add("y", CTBool,
+            cir_captures_add("x", CTNat, cir_captures_empty())));
+    assert_eq_nat(cir_captures_len(cir_captures_dedupe(list)), 2)
+}
+
+pub fn test_captures_sort_lexicographic() -> Unit {
+    let list = cir_captures_add("z", CTNat,
+        cir_captures_add("a", CTBool, cir_captures_empty()));
+    let sorted = cir_captures_sort(list);
+    // First element should be "a"
+    match sorted {
+        CIRCaptureCons(cap, _) => assert_eq_string(cap.name, "a"),
+        CIRCaptureNil() => assert_eq_bool(true, false)
+    }
+}
+
+// ===========================================================================
+// P4: free_vars tests (cost 5)
+// ===========================================================================
+
+/// AC5: free_vars returns empty for non-capturing lambda body
+pub fn test_free_vars_no_captures() -> Unit {
+    // body = CIRVar("x", CTNat), bound = ["x"]
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let fv = free_vars(body, Cons("x", Nil()));
+    assert_eq_nat(cir_captures_len(fv), 0)
+}
+
+/// AC6: free_vars returns correct capture for outer variable
+pub fn test_free_vars_single_capture() -> Unit {
+    // body references "y" which is not in bound
+    let body: CodegenIR = CIRVar("y", CTNat);
+    let fv = free_vars(body, Cons("x", Nil()));
+    assert_eq_nat(cir_captures_len(fv), 1);
+    match fv {
+        CIRCaptureCons(cap, _) => assert_eq_string(cap.name, "y"),
+        CIRCaptureNil() => assert_eq_bool(true, false)
+    }
+}
+
+/// AC7: nested lambda — inner captures outer param
+pub fn test_free_vars_nested_lambda() -> Unit {
+    // λx. λy. x  — inner body references x (outer param)
+    let inner_body: CodegenIR = CIRVar("x", CTNat);
+    let inner_lambda = CIRLambda("y", CTNat, inner_body, CIRCaptureNil, CTNat);
+    // free_vars of inner_lambda with bound=["x"] should be empty
+    // because CIRLambda is a closure boundary
+    let fv = free_vars(inner_lambda, Cons("x", Nil()));
+    assert_eq_nat(cir_captures_len(fv), 0)
+}
+
+/// AC10: transitive capture — variable in nested closure IS captured
+/// by enclosing scope (needed to construct nested closure's environment).
+/// Per §2.1: free_vars recurses into CIRLambda bodies with param added to bound.
+pub fn test_free_vars_transitive_capture() -> Unit {
+    // outer body = λy. z, bound = ["x"]
+    // z is free in the inner lambda; the enclosing scope must capture it
+    // transitively so it can construct inner's environment
+    let inner = CIRLambda("y", CTNat, CIRVar("z", CTNat), CIRCaptureNil, CTNat);
+    let fv = free_vars(inner, Cons("x", Nil()));
+    // z is transitively needed — enclosing scope captures it
+    assert_eq_nat(cir_captures_len(fv), 1)
+}
+
+/// free_vars deduplicates repeated references
+pub fn test_free_vars_dedup() -> Unit {
+    // body = x + x, bound = []
+    let body = CIRNatAdd(CIRVar("x", CTNat), CIRVar("x", CTNat));
+    let fv = free_vars(body, Nil());
+    assert_eq_nat(cir_captures_len(fv), 1)
+}
+
+/// free_vars sorts captures lexicographically
+pub fn test_free_vars_sorted() -> Unit {
+    // body = z + a, bound = []
+    let body = CIRNatAdd(CIRVar("z", CTNat), CIRVar("a", CTBool));
+    let fv = free_vars(body, Nil());
+    assert_eq_nat(cir_captures_len(fv), 2);
+    match fv {
+        CIRCaptureCons(first, _) => assert_eq_string(first.name, "a"),
+        CIRCaptureNil() => assert_eq_bool(true, false)
+    }
+}
+
+/// free_vars with let binding — bound var not captured
+pub fn test_free_vars_let_binding() -> Unit {
+    // let y = x in y, bound = []
+    let body = CIRLet("y", CTNat, CIRVar("x", CTNat), CIRVar("y", CTNat));
+    let fv = free_vars(body, Nil());
+    // only x is free (y is bound by the let)
+    assert_eq_nat(cir_captures_len(fv), 1);
+    match fv {
+        CIRCaptureCons(cap, _) => assert_eq_string(cap.name, "x"),
+        CIRCaptureNil() => assert_eq_bool(true, false)
+    }
+}
+
+/// free_vars with fix — self not captured
+pub fn test_free_vars_fix_self_excluded() -> Unit {
+    // fix f. f, bound = []
+    let body = CIRFix("f", CTArrow(CTNat, CTNat), CIRVar("f", CTArrow(CTNat, CTNat)), CIRCaptureNil);
+    let fv = free_vars(body, Nil());
+    // f is bound by fix, so no captures
+    assert_eq_nat(cir_captures_len(fv), 0)
+}
+
+// ===========================================================================
+// P7: emit_fix with external captures (AC8, AC11)
+// ===========================================================================
+
+/// AC8: emit_fix env struct includes self + external captures
+pub fn test_emit_fix_with_captures_env_type() -> Unit {
+    let caps = cir_captures_add("x", CTNat, cir_captures_empty());
+    let body = CIRVar("self", CTArrow(CTNat, CTNat));
+    let (_, st) = emit_fix(ir_state_new(), "self", CTArrow(CTNat, CTNat), body, caps);
+    let env_types = ir_state_env_types_string(st);
+    // Env should contain self closure + Nat capture
+    assert_eq_bool(string_contains(env_types, "<{ { ptr, ptr }, i64 }>"), true)
+}
+
+/// AC11: fix env slot 0 = self, slot 1+ = external captures
+pub fn test_emit_fix_with_captures_stores() -> Unit {
+    let caps = cir_captures_add("x", CTNat, cir_captures_empty());
+    let body = CIRVar("self", CTArrow(CTNat, CTNat));
+    let (_, st) = emit_fix(ir_state_new(), "self", CTArrow(CTNat, CTNat), body, caps);
+    let ir = ir_state_to_string(st);
+    // Must store both self closure and external capture
+    assert_eq_bool(string_contains(ir, "store { ptr, ptr }"), true);
+    assert_eq_bool(string_contains(ir, "store i64"), true)
+}
+
+/// emit_fix with external captures mallocs correct size (16 + 8 = 24)
+pub fn test_emit_fix_with_captures_malloc_size() -> Unit {
+    let caps = cir_captures_add("x", CTNat, cir_captures_empty());
+    let body = CIRVar("self", CTArrow(CTNat, CTNat));
+    let (_, st) = emit_fix(ir_state_new(), "self", CTArrow(CTNat, CTNat), body, caps);
+    let ir = ir_state_to_string(st);
+    assert_eq_bool(string_contains(ir, "call ptr @malloc(i64 24)"), true)
+}

@@ -1,0 +1,6 @@
+// math module - exports for alias testing
+pub type Point = { x: Nat, y: Nat }
+
+pub fn add(a: Nat, b: Nat) -> Nat {
+    a + b
+}

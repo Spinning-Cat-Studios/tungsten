@@ -1,0 +1,15 @@
+// src/compiler/elab/cir/mod.tg
+// CodegenIR module — re-exports all sub-modules for backwards compatibility.
+
+pub mod types;
+pub mod constructors;
+pub mod utils;
+pub mod capture;
+pub mod free_vars;
+
+// Re-export everything from sub-modules
+pub use elab::cir::types::*;
+pub use elab::cir::constructors::*;
+pub use elab::cir::utils::*;
+pub use elab::cir::capture::*;
+pub use elab::cir::free_vars::*;

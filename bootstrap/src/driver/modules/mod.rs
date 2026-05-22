@@ -16,7 +16,8 @@
 //! 4. Merges them into a combined `ModuleInfo` for resolution
 
 mod info;
-mod parse;
+mod info_reexports;
+pub(crate) mod parse;
 mod workspace;
 
 #[cfg(test)]
@@ -29,6 +30,7 @@ use crate::ast::{SourceFile, Visibility};
 
 // Re-export public items
 pub use info::{build_module_info, ModuleInfo};
+pub use info_reexports::resolve_pub_use_module;
 pub use parse::{
     build_source_map, collect_parse_errors, extract_module_dependencies, flatten_module_tree,
     parse_module_tree, ModuleDependencyInfo,

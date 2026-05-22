@@ -6,7 +6,7 @@
 // Note: Span type is imported from lexer::span (available via module hierarchy)
 
 use lexer::span::Span;
-use driver::util::{nat_to_string, string_is_empty};
+use driver::util::{nat_to_string, string_is_empty, Result, Ok, Err};
 use elab::error::{SourceInfo, offset_to_line_col};
 
 // ---------------------------------------------------------------------------

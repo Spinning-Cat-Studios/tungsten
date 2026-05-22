@@ -1,0 +1,294 @@
+// src/compiler/codegen/ir_expr.tg
+// CodegenIR → LLVM IR instruction emission.
+//
+// Handles the core expression forms:
+// - Literals: nat, bool, string, unit
+// - Variables and globals
+// - Let bindings
+// - If/else
+// - Arithmetic, comparison, boolean, and string operations
+// - Extern calls
+//
+// Each emit function takes (IRState, CodegenIR) and returns (String, IRState)
+// where String is the SSA name holding the result.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::nat_to_string;
+use elab::cir::types::{
+    CodegenIR, CodegenType,
+    CIRZero, CIRSucc, CIRNatLit, CIRTrue, CIRFalse, CIRUnit, CIRString,
+    CIRVar, CIRGlobal,
+    CIRLambda, CIRApp, CIRLet, CIRFix,
+    CIRPair, CIRFst, CIRSnd,
+    CIRInl, CIRInr, CIRCase,
+    CIRNatAdd, CIRNatSub, CIRNatMul, CIRNatDiv, CIRNatMod,
+    CIRNatEq, CIRNatLt, CIRNatLe, CIRNatGt, CIRNatGe,
+    CIRBoolAnd, CIRBoolOr, CIRBoolNot,
+    CIRStrConcat, CIRStrEq, CIRStrLen,
+    CIRIf,
+    CIRFold, CIRUnfold,
+    CIRRefNew, CIRRefGet, CIRRefSet,
+    CIRRefl, CIRSorry,
+    CIRTypeAbs, CIRTypeApp,
+    CIRExternCall,
+    CIRAnnot,
+    CIRStmtLet, CIRStmtExpr, CIRStmtList,
+    CIRCaptureList, CIRCaptureNil, CIRCaptureCons,
+    CTNat, CTBool, CTString, CTUnit
+};
+use codegen::ir_builder::{
+    IRState, fresh_name, fresh_label, emit_line, emit_blank
+};
+use codegen::ir_types::{llvm_type};
+
+// ===========================================================================
+// EXPRESSION EMISSION (core dispatch)
+// ===========================================================================
+
+/// Emit LLVM IR for a CodegenIR expression.
+/// Returns (result_ssa_name, updated_state).
+pub fn emit_expr(st: IRState, expr: CodegenIR) -> (String, IRState) {
+    match expr {
+        // -----------------------------------------------------------------
+        // Literals
+        // -----------------------------------------------------------------
+        CIRZero() => ("0", st),
+        CIRNatLit(n) => (nat_to_string(n), st),
+        CIRTrue() => ("true", st),
+        CIRFalse() => ("false", st),
+        CIRUnit() => ("zeroinitializer", st),
+        CIRSucc(inner) =>
+            let (v, st) = emit_expr(st, inner);
+            let (r, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ r ++ " = add i64 " ++ v ++ ", 1");
+            (r, st),
+
+        // -----------------------------------------------------------------
+        // Variables
+        // -----------------------------------------------------------------
+        CIRVar(name, _) => ("%" ++ name, st),
+        CIRGlobal(path) => ("@" ++ path, st),
+
+        // -----------------------------------------------------------------
+        // Let binding
+        // -----------------------------------------------------------------
+        CIRLet(name, ty, def, body) =>
+            let (def_val, st) = emit_expr(st, def);
+            let ty_str = llvm_type(ty);
+            // Universal copy: alloca+store+load works for all types (int, struct, ptr).
+            // mem2reg / opt will eliminate the alloca for simple cases.
+            let (addr, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ addr ++ " = alloca " ++ ty_str);
+            let st = emit_line(st, "  store " ++ ty_str ++ " " ++ def_val ++ ", ptr " ++ addr);
+            let st = emit_line(st, "  %" ++ name ++ " = load " ++ ty_str ++ ", ptr " ++ addr);
+            emit_expr(st, body),
+
+        // -----------------------------------------------------------------
+        // Arithmetic
+        // -----------------------------------------------------------------
+        CIRNatAdd(a, b) => emit_binop(st, "add i64", a, b),
+        CIRNatSub(a, b) => emit_binop(st, "sub i64", a, b),
+        CIRNatMul(a, b) => emit_binop(st, "mul i64", a, b),
+        CIRNatDiv(a, b) => emit_binop(st, "udiv i64", a, b),
+        CIRNatMod(a, b) => emit_binop(st, "urem i64", a, b),
+
+        // -----------------------------------------------------------------
+        // Comparisons
+        // -----------------------------------------------------------------
+        CIRNatEq(a, b) => emit_binop(st, "icmp eq i64", a, b),
+        CIRNatLt(a, b) => emit_binop(st, "icmp ult i64", a, b),
+        CIRNatLe(a, b) => emit_binop(st, "icmp ule i64", a, b),
+        CIRNatGt(a, b) => emit_binop(st, "icmp ugt i64", a, b),
+        CIRNatGe(a, b) => emit_binop(st, "icmp uge i64", a, b),
+
+        // -----------------------------------------------------------------
+        // Boolean operations
+        // -----------------------------------------------------------------
+        CIRBoolAnd(a, b) => emit_binop(st, "and i1", a, b),
+        CIRBoolOr(a, b) => emit_binop(st, "or i1", a, b),
+        CIRBoolNot(inner) =>
+            let (v, st) = emit_expr(st, inner);
+            let (r, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ r ++ " = xor i1 " ++ v ++ ", true");
+            (r, st),
+
+        // -----------------------------------------------------------------
+        // String operations (delegate to runtime)
+        // -----------------------------------------------------------------
+        CIRStrConcat(a, b) =>
+            let (va, st) = emit_expr(st, a);
+            let (vb, st) = emit_expr(st, b);
+            let (r, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ r ++ " = call ptr @tg_string_concat(ptr " ++ va ++ ", ptr " ++ vb ++ ")");
+            (r, st),
+        CIRStrEq(a, b) =>
+            let (va, st) = emit_expr(st, a);
+            let (vb, st) = emit_expr(st, b);
+            let (r, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ r ++ " = call i1 @tg_string_eq(ptr " ++ va ++ ", ptr " ++ vb ++ ")");
+            (r, st),
+        CIRStrLen(inner) =>
+            let (v, st) = emit_expr(st, inner);
+            let (r, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ r ++ " = call i64 @tg_string_len(ptr " ++ v ++ ")");
+            (r, st),
+
+        // -----------------------------------------------------------------
+        // If/else (M2)
+        // -----------------------------------------------------------------
+        CIRIf(cond, then_br, else_br) =>
+            emit_if(st, cond, then_br, else_br),
+
+        // -----------------------------------------------------------------
+        // Products (M5) — emit sub-exprs here, delegate IR building to ir_data
+        // FIXME: CIRPair/CIRFst/CIRSnd don't carry CodegenTypes, so we
+        // hardcode i64. When CIR is enriched with type annotations, pass
+        // the real types through to build_pair/extract_fst/extract_snd.
+        // -----------------------------------------------------------------
+        CIRPair(a, b) =>
+            let (a_val, st) = emit_expr(st, a);
+            let (b_val, st) = emit_expr(st, b);
+            build_pair(st, a_val, b_val, "i64", "i64"),
+        CIRFst(inner) =>
+            let (pair_val, st) = emit_expr(st, inner);
+            extract_fst(st, pair_val, "i64", "i64"),
+        CIRSnd(inner) =>
+            let (pair_val, st) = emit_expr(st, inner);
+            extract_snd(st, pair_val, "i64", "i64"),
+
+        // -----------------------------------------------------------------
+        // Sums (M6) — emit sub-exprs here, delegate IR building to ir_sums
+        // -----------------------------------------------------------------
+        CIRInl(value, sum_ty) =>
+            let (val, st) = emit_expr(st, value);
+            emit_sum_inl(st, val, sum_ty),
+        CIRInr(value, sum_ty) =>
+            let (val, st) = emit_expr(st, value);
+            emit_sum_inr(st, val, sum_ty),
+        CIRCase(scrut, sum_ty, left_name, left_body, right_name, right_body, result_ty) =>
+            emit_sum_case(st, scrut, sum_ty, left_name, left_body, right_name, right_body, result_ty),
+
+        // -----------------------------------------------------------------
+        // Closures (M4) — lambda, fix, application (ADR 13.5.26m)
+        // -----------------------------------------------------------------
+        CIRLambda(param, param_ty, body, captures, ret_ty) =>
+            emit_lambda(st, param, param_ty, body, captures, ret_ty),
+        CIRFix(self_name, self_ty, body, captures) =>
+            emit_fix(st, self_name, self_ty, body, captures),
+        CIRApp(fn_expr, arg_expr, arg_ty, ret_ty) =>
+            let (fn_val, st) = emit_expr(st, fn_expr);
+            let (arg_val, st) = emit_expr(st, arg_expr);
+            emit_app(st, fn_val, arg_val, arg_ty, ret_ty),
+
+        // -----------------------------------------------------------------
+        // Recursive types (M8) — stub
+        // -----------------------------------------------------------------
+        CIRFold(_, _) => emit_todo(st, "CIRFold"),
+        CIRUnfold(_, _) => emit_todo(st, "CIRUnfold"),
+
+        // -----------------------------------------------------------------
+        // References — stub
+        // -----------------------------------------------------------------
+        CIRRefNew(_) => emit_todo(st, "CIRRefNew"),
+        CIRRefGet(_) => emit_todo(st, "CIRRefGet"),
+        CIRRefSet(_, _) => emit_todo(st, "CIRRefSet"),
+
+        // -----------------------------------------------------------------
+        // Proof terms — erased at codegen
+        // -----------------------------------------------------------------
+        CIRRefl(_, _) => ("zeroinitializer", st),
+        CIRSorry(_) => ("zeroinitializer", st),
+
+        // -----------------------------------------------------------------
+        // Polymorphism — erased at codegen
+        // -----------------------------------------------------------------
+        CIRTypeAbs(_, body) => emit_expr(st, body),
+        CIRTypeApp(body, _) => emit_expr(st, body),
+
+        // -----------------------------------------------------------------
+        // Annotation — transparent
+        // -----------------------------------------------------------------
+        CIRAnnot(inner, _) => emit_expr(st, inner),
+
+        // -----------------------------------------------------------------
+        // String literal (M3) — extract to ir_strings.tg when implemented
+        // Needs: global @.str.N constant, @tg_string_new call, string counter
+        // in IRState. See ir_header.tg for extern declarations.
+        // -----------------------------------------------------------------
+        CIRString(s) => emit_todo(st, "CIRString"),
+
+        // -----------------------------------------------------------------
+        // Extern call (M3)
+        // Needs: argument emission loop, call instruction with correct
+        // return type and calling convention.
+        // -----------------------------------------------------------------
+        CIRExternCall(name, args) => emit_todo(st, "CIRExternCall"),
+
+        // -----------------------------------------------------------------
+        // Statement lists — should not appear at codegen level
+        // -----------------------------------------------------------------
+        CIRStmtLet(_, _, _) => emit_todo(st, "CIRStmtLet"),
+        CIRStmtExpr(_) => emit_todo(st, "CIRStmtExpr"),
+        CIRStmtList(_) => emit_todo(st, "CIRStmtList")
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Emit a binary operation: result = op lhs, rhs.
+fn emit_binop(
+    st: IRState, op: String, lhs: CodegenIR, rhs: CodegenIR
+) -> (String, IRState) {
+    let (l, st) = emit_expr(st, lhs);
+    let (r_val, st) = emit_expr(st, rhs);
+    let (result, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ result ++ " = " ++ op ++ " " ++ l ++ ", " ++ r_val);
+    (result, st)
+}
+
+/// Emit if/else as a conditional branch with phi node.
+fn emit_if(
+    st: IRState, cond: CodegenIR, then_br: CodegenIR, else_br: CodegenIR
+) -> (String, IRState) {
+    let (cond_val, st) = emit_expr(st, cond);
+    let (then_label, st) = fresh_label(st);
+    let (else_label, st) = fresh_label(st);
+    let (merge_label, st) = fresh_label(st);
+
+    let st = emit_line(st, "  br i1 " ++ cond_val ++ ", label %" ++ then_label ++ ", label %" ++ else_label);
+
+    // Then block
+    let st = emit_line(st, then_label ++ ":");
+    let (then_val, st) = emit_expr(st, then_br);
+    let st = emit_line(st, "  br label %" ++ merge_label);
+
+    // Else block
+    let st = emit_line(st, else_label ++ ":");
+    let (else_val, st) = emit_expr(st, else_br);
+    let st = emit_line(st, "  br label %" ++ merge_label);
+
+    // Merge block with phi
+    let st = emit_line(st, merge_label ++ ":");
+    let (result, st) = fresh_name(st);
+    // TODO: phi node needs the correct type; using i64 as default
+    let st = emit_line(st,
+        "  " ++ result ++ " = phi i64 [" ++ then_val ++ ", %" ++ then_label ++ "], [" ++ else_val ++ ", %" ++ else_label ++ "]");
+    (result, st)
+}
+
+/// Placeholder for unimplemented CIR variants.
+/// Emits a comment and returns zeroinitializer.
+fn emit_todo(st: IRState, variant: String) -> (String, IRState) {
+    let st = emit_line(st, "  ; TODO: " ++ variant ++ " not yet implemented");
+    ("zeroinitializer", st)
+}
+
+// ===========================================================================
+// DATA OPERATION IMPORTS (from ir_data — no circular dependency)
+// ===========================================================================
+
+use codegen::ir_data::{build_pair, extract_fst, extract_snd};
+use codegen::ir_sums::{emit_sum_inl, emit_sum_inr, emit_sum_case};
+use codegen::ir_closures::{emit_lambda, emit_fix, emit_app};

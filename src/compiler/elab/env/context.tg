@@ -1,0 +1,55 @@
+// Depth and return-type operations on the elaboration environment.
+//
+// These operations correspond to the EnvContext sub-environment
+// (depth counter + return type). Extracted from ops.tg for size.
+
+use elab::ffi::TypeHandle;
+use elab::env::types::{
+    Env, MaybeTypeHandle, NoTypeHandle, SomeTypeHandle, TryBlockTypeHandle,
+    MaybeSpan, NoSpan,
+    env_with_depth, env_with_return_type
+};
+
+// ===========================================================================
+// DEPTH OPERATIONS
+// ===========================================================================
+
+/// Get the current depth.
+pub fn env_depth(env: Env) -> Nat {
+    env.depth
+}
+
+/// Set the depth explicitly (for restoring after scope changes).
+pub fn env_set_depth(env: Env, depth: Nat) -> Env {
+    env_with_depth(env, depth)
+}
+
+// ===========================================================================
+// RETURN TYPE OPERATIONS
+// ===========================================================================
+
+/// Get the current return type (for return expressions).
+pub fn env_return_type(env: Env) -> MaybeTypeHandle {
+    env.return_type
+}
+
+/// Get the span of the current function (for return type errors).
+pub fn env_get_fn_span(env: Env) -> MaybeSpan {
+    NoSpan
+}
+
+/// Set the return type (when entering a function body).
+pub fn env_set_return_type(env: Env, ty: TypeHandle) -> Env {
+    env_with_return_type(env, SomeTypeHandle(ty))
+}
+
+/// Clear the return type (when leaving a function body).
+pub fn env_clear_return_type(env: Env) -> Env {
+    env_with_return_type(env, NoTypeHandle)
+}
+
+/// Set the return type for a try block context.
+/// `?` will use this type, but `return` will be rejected.
+pub fn env_set_try_block_return_type(env: Env, ty: TypeHandle) -> Env {
+    env_with_return_type(env, TryBlockTypeHandle(ty))
+}

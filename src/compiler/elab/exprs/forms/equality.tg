@@ -1,0 +1,295 @@
+// src/compiler/elab/exprs/forms/equality.tg
+// Equality combinator elaboration: subst, sym, trans, cong.
+//
+// All combinators desugar to Term::Subst at the core level.
+// sym/trans/cong construct their motive and witness internally.
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span, Motive, MotiveLambda, MotiveExpr, LambdaParam, TypeExpr,
+    MaybeTypeExpr, SomeTypeExpr, NoTypeExpr};
+use parser::ast::pattern::{Pattern, PatVar, PatWildcard};
+use parser::ast::common::{Ident, ident_name};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_refl, tg_term_subst, tg_term_app,
+    tg_type_eq, tg_type_is_eq, tg_type_get_eq_type, tg_type_get_eq_lhs, tg_type_get_eq_rhs,
+    tg_type_is_arrow, tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
+    tg_terms_equal, tg_types_equal
+};
+use elab::env::Env;
+use elab::env::ops::env_bind_local;
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error_coded
+};
+use elab::types::{elab_type};
+use elab::types::result_types::{ElabTypeResult, ElabTypeOk, ElabTypeErr};
+use elab::cir::{CodegenIR, CIRRefl, CIRUnit, ct_unit};
+
+// Import synth from parent module for elaborating sub-expressions
+use elab::exprs::synth;
+
+// ===========================================================================
+// SUBST ELABORATION
+// ===========================================================================
+
+/// Synthesize `subst(proof, motive, witness)`.
+///
+/// proof  : Eq<T, a, b>
+/// motive : |x: T| <type-expr>  — predicate lambda (ADR 21.5.26g)
+/// witness: P(a)
+/// result : P(b)
+pub fn synth_subst(env: Env, proof: Expr, motive: Motive, witness: Expr, span: Span) -> ElabExprResult {
+    // Infer the proof type — must be Eq<T, a, b>
+    match synth(env, proof) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, proof_term, proof_ty, _) =>
+            if !tg_type_is_eq(proof_ty) {
+                ElabExprErr(elab_expr_error_coded(
+                    "subst requires an equality proof as first argument",
+                    span,
+                    "E0403"
+                ))
+            } else {
+                let base_ty = tg_type_get_eq_type(proof_ty);
+                synth_subst_motive(env2, proof_term, proof_ty, base_ty, motive, witness, span)
+            }
+    }
+}
+
+/// Elaborate the motive and continue subst elaboration.
+fn synth_subst_motive(env: Env, proof_term: TermHandle, proof_ty: TypeHandle, base_ty: TypeHandle,
+                       motive: Motive, witness: Expr, span: Span) -> ElabExprResult {
+    match motive {
+        MotiveLambda(param, body, motive_span) =>
+            synth_subst_lambda_motive(env, proof_term, proof_ty, base_ty, param, body, motive_span, witness, span),
+        MotiveExpr(_) =>
+            ElabExprErr(elab_expr_error_coded(
+                "subst motive must be a predicate lambda |x: T| <type>, not a plain expression",
+                span,
+                "E0475"
+            ))
+    }
+}
+
+/// Elaborate a lambda motive `|x: τ| <type-body>`.
+fn synth_subst_lambda_motive(env: Env, proof_term: TermHandle, proof_ty: TypeHandle, base_ty: TypeHandle,
+                              param: LambdaParam, body: TypeExpr, motive_span: Span,
+                              witness: Expr, span: Span) -> ElabExprResult {
+    // Check parameter type matches equality base type
+    match param.ty {
+        SomeTypeExpr(param_ty_expr) =>
+            synth_subst_check_domain(env, proof_term, proof_ty, base_ty, param, param_ty_expr, body, motive_span, witness, span),
+        NoTypeExpr() =>
+            ElabExprErr(elab_expr_error_coded(
+                "motive parameter must have a type annotation",
+                motive_span,
+                "E0475"
+            ))
+    }
+}
+
+/// Check that the motive parameter type matches the equality base type.
+fn synth_subst_check_domain(env: Env, proof_term: TermHandle, proof_ty: TypeHandle, base_ty: TypeHandle,
+                             param: LambdaParam, param_ty_expr: TypeExpr, body: TypeExpr, motive_span: Span,
+                             witness: Expr, span: Span) -> ElabExprResult {
+    match elab_type(env, param_ty_expr) {
+        ElabTypeErr(e) => ElabExprErr(elab_expr_error_coded(
+            "motive parameter type is invalid",
+            motive_span,
+            "E0477"
+        )),
+        ElabTypeOk(param_ty_h, _) =>
+            synth_subst_verify_domain(env, proof_term, proof_ty, base_ty, param, param_ty_h, body, motive_span, witness, span)
+    }
+}
+
+/// Verify domain match and elaborate motive body.
+fn synth_subst_verify_domain(env: Env, proof_term: TermHandle, proof_ty: TypeHandle, base_ty: TypeHandle,
+                              param: LambdaParam, param_ty_h: TypeHandle, body: TypeExpr, motive_span: Span,
+                              witness: Expr, span: Span) -> ElabExprResult {
+    if !tg_types_equal(base_ty, param_ty_h) {
+        ElabExprErr(elab_expr_error_coded(
+            "motive parameter type does not match equality base type",
+            motive_span,
+            "E0476"
+        ))
+    } else {
+        // Bind the motive variable and elaborate the body as a type
+        let var_name = motive_param_name(param);
+        let env2 = env_bind_local(env, var_name, base_ty);
+        match elab_type(env2, body) {
+            ElabTypeErr(_) =>
+                ElabExprErr(elab_expr_error_coded(
+                    "motive body must be a type expression, not a term",
+                    motive_span,
+                    "E0477"
+                )),
+            ElabTypeOk(motive_result_ty, _) =>
+                synth_subst_witness(env, proof_term, proof_ty, base_ty, motive_result_ty, witness, span)
+        }
+    }
+}
+
+/// Extract the parameter name from a motive lambda.
+fn motive_param_name(param: LambdaParam) -> String {
+    match param.pattern {
+        PatVar(id) => ident_name(id),
+        PatWildcard(_) => "_",
+        _ => "_"
+    }
+}
+
+/// Elaborate the witness after motive validation.
+fn synth_subst_witness(env: Env, proof_term: TermHandle, proof_ty: TypeHandle, base_ty: TypeHandle,
+                        motive_ty: TypeHandle, witness: Expr, span: Span) -> ElabExprResult {
+    match synth(env, witness) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, witness_term, witness_ty, _) => {
+            let term = tg_term_subst(base_ty, motive_ty, proof_term, witness_term);
+            let cir = CIRRefl(ct_unit(), CIRUnit);
+            ElabExprOk(env2, term, witness_ty, cir)
+        }
+    }
+}
+
+// ===========================================================================
+// SYM ELABORATION
+// ===========================================================================
+
+/// Synthesize `sym(proof)`.
+/// Given proof : Eq<T, a, b>, produces : Eq<T, b, a>.
+/// Desugars to subst(proof, |x| Eq(T, x, a), refl(T, a)).
+pub fn synth_sym(env: Env, proof: Expr, span: Span) -> ElabExprResult {
+    match synth(env, proof) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, proof_term, proof_ty, proof_cir) =>
+            synth_sym_build(env2, proof_term, proof_ty, span)
+    }
+}
+
+fn synth_sym_build(env: Env, proof_term: TermHandle, proof_ty: TypeHandle, span: Span) -> ElabExprResult {
+    if !tg_type_is_eq(proof_ty) {
+        ElabExprErr(elab_expr_error_coded(
+            "sym requires an equality proof",
+            span,
+            "E0403"
+        ))
+    } else {
+        let ty = tg_type_get_eq_type(proof_ty);
+        let lhs = tg_type_get_eq_lhs(proof_ty);
+        let rhs = tg_type_get_eq_rhs(proof_ty);
+        // Build: subst [ty] [Eq(ty, _, lhs)] proof_term (refl [ty] lhs)
+        // Motive is correct-by-construction: domain=ty matches eq base type (ADR 21.5.26g)
+        let motive = tg_type_eq(ty, rhs, lhs);
+        let witness_term = tg_term_refl(ty, lhs);
+        let term = tg_term_subst(ty, motive, proof_term, witness_term);
+        // Result type: Eq<T, b, a>
+        let result_ty = tg_type_eq(ty, rhs, lhs);
+        let cir = CIRRefl(ct_unit(), CIRUnit);
+        ElabExprOk(env, term, result_ty, cir)
+    }
+}
+
+// ===========================================================================
+// TRANS ELABORATION
+// ===========================================================================
+
+/// Synthesize `trans(h1, h2)`.
+/// Given h1 : Eq<T, a, b> and h2 : Eq<T, b, c>, produces : Eq<T, a, c>.
+/// Desugars to subst(h2, |x| Eq(T, a, x), h1).
+pub fn synth_trans(env: Env, h1: Expr, h2: Expr, span: Span) -> ElabExprResult {
+    match synth(env, h1) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, h1_term, h1_ty, h1_cir) =>
+            synth_trans_h2(env2, h1_term, h1_ty, h2, span)
+    }
+}
+
+fn synth_trans_h2(
+    env: Env, h1_term: TermHandle, h1_ty: TypeHandle, h2: Expr, span: Span
+) -> ElabExprResult {
+    if !tg_type_is_eq(h1_ty) {
+        ElabExprErr(elab_expr_error_coded("trans requires equality proofs", span, "E0403"))
+    } else {
+        match synth(env, h2) {
+            ElabExprErr(e) => ElabExprErr(e),
+            ElabExprOk(env3, h2_term, h2_ty, _) =>
+                if !tg_type_is_eq(h2_ty) {
+                    ElabExprErr(elab_expr_error_coded("trans requires equality proofs", span, "E0403"))
+                } else {
+                    let ty = tg_type_get_eq_type(h1_ty);
+                    let a = tg_type_get_eq_lhs(h1_ty);
+                    let b = tg_type_get_eq_rhs(h1_ty);
+                    let h2_lhs = tg_type_get_eq_lhs(h2_ty);
+                    let c = tg_type_get_eq_rhs(h2_ty);
+                    if !tg_terms_equal(b, h2_lhs) {
+                        ElabExprErr(elab_expr_error_coded(
+                            "trans: endpoint mismatch - first proof's RHS does not equal second proof's LHS",
+                            span,
+                            "E0404"
+                        ))
+                    } else {
+                        // Build: subst [ty] [Eq(ty, a, _)] h2_term h1_term
+                        // Motive is correct-by-construction: domain=ty matches eq base type (ADR 21.5.26g)
+                        let motive = tg_type_eq(ty, a, c);
+                        let term = tg_term_subst(ty, motive, h2_term, h1_term);
+                        let result_ty = tg_type_eq(ty, a, c);
+                        let cir = CIRRefl(ct_unit(), CIRUnit);
+                        ElabExprOk(env3, term, result_ty, cir)
+                    }
+                }
+        }
+    }
+}
+
+// ===========================================================================
+// CONG ELABORATION
+// ===========================================================================
+
+/// Synthesize `cong(f, proof)`.
+/// Given f : A -> B and proof : Eq<A, a, b>, produces : Eq<B, f(a), f(b)).
+/// Desugars to subst(proof, |x| Eq(B, f(a), f(x)), refl(B, f(a))).
+pub fn synth_cong(env: Env, f: Expr, proof: Expr, span: Span) -> ElabExprResult {
+    match synth(env, f) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, f_term, f_ty, f_cir) =>
+            synth_cong_proof(env2, f_term, f_ty, proof, span)
+    }
+}
+
+fn synth_cong_proof(
+    env: Env, f_term: TermHandle, f_ty: TypeHandle, proof: Expr, span: Span
+) -> ElabExprResult {
+    if !tg_type_is_arrow(f_ty) {
+        ElabExprErr(elab_expr_error_coded(
+            "cong requires a function as first argument",
+            span,
+            "E0405"
+        ))
+    } else {
+        match synth(env, proof) {
+            ElabExprErr(e) => ElabExprErr(e),
+            ElabExprOk(env3, proof_term, proof_ty, _) =>
+                if !tg_type_is_eq(proof_ty) {
+                    ElabExprErr(elab_expr_error_coded(
+                        "cong requires an equality proof as second argument", span,
+                        "E0403"
+                    ))
+                } else {
+                    let codomain = tg_type_get_arrow_codomain(f_ty);
+                    let eq_ty = tg_type_get_eq_type(proof_ty);
+                    let a = tg_type_get_eq_lhs(proof_ty);
+                    let b = tg_type_get_eq_rhs(proof_ty);
+                    let fa = tg_term_app(f_term, a);
+                    let fb = tg_term_app(f_term, b);
+                    // Motive is correct-by-construction: domain=eq_ty matches eq base type (ADR 21.5.26g)
+                    let motive = tg_type_eq(codomain, fa, fb);
+                    let witness_term = tg_term_refl(codomain, fa);
+                    let term = tg_term_subst(eq_ty, motive, proof_term, witness_term);
+                    let result_ty = tg_type_eq(codomain, fa, fb);
+                    let cir = CIRRefl(ct_unit(), CIRUnit);
+                    ElabExprOk(env3, term, result_ty, cir)
+                }
+        }
+    }
+}

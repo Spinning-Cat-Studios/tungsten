@@ -1,0 +1,56 @@
+// src/compiler/lexer/tests/errors.tg
+// Error condition and reserved keyword tests.
+
+use lexer::token::{TokenKind, Token, token_kind, TokReserved};
+use lexer::scanner::{LexResult, tokenize, lex_result_tokens, lex_result_errors};
+use lexer::error::{has_errors};
+use driver::ffi::{List, Nil, Cons};
+use lexer::tests::{first_token_kind};
+
+fn test_unterminated_string() -> Bool {
+    let result = tokenize("\"hello", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+fn test_unterminated_char() -> Bool {
+    let result = tokenize("'x", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+fn test_nested_block_comment() -> Bool {
+    let result = tokenize("/* outer /* inner */ still outer */", "test.tg");
+    let errors = lex_result_errors(result);
+    !has_errors(errors)
+}
+
+fn test_unterminated_nested_block_comment() -> Bool {
+    let result = tokenize("/* outer /* inner */", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+fn test_reserved_keyword_error() -> Bool {
+    let result = tokenize("async", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+fn test_reserved_keyword_await() -> Bool {
+    let result = tokenize("await", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+fn test_reserved_keyword_pub() -> Bool {
+    let result = tokenize("pub", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+pub fn run_error_tests() -> Nat {
+    let passed = 0;
+    let passed = if test_unterminated_string() { passed + 1 } else { passed };
+    let passed = if test_unterminated_char() { passed + 1 } else { passed };
+    let passed = if test_nested_block_comment() { passed + 1 } else { passed };
+    let passed = if test_unterminated_nested_block_comment() { passed + 1 } else { passed };
+    let passed = if test_reserved_keyword_error() { passed + 1 } else { passed };
+    let passed = if test_reserved_keyword_await() { passed + 1 } else { passed };
+    let passed = if test_reserved_keyword_pub() { passed + 1 } else { passed };
+    passed
+}

@@ -1,0 +1,327 @@
+// src/compiler/test_codegen_closures.tg
+// Unit tests for M4 closure emission (ADR 13.5.26m).
+//
+// Run with: tungsten test src/compiler/test_codegen_closures.tg
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+mod codegen;
+
+use driver::ffi::test::{assert_eq_string, assert_eq_nat, assert_eq_bool};
+use codegen::ir_types::{llvm_type};
+use codegen::ir_builder::{ir_state_new, ir_state_to_string, ir_state_deferred_string, ir_state_env_types_string, ir_state_fork_body, ir_state_merge_body, ir_state_full_output, emit_line, emit_deferred, emit_env_type};
+use codegen::ir_closures::{emit_lambda, emit_app, emit_fix};
+use driver::util::string_contains;
+use elab::cir::types::{
+    CodegenType, CodegenIR,
+    CTNat, CTBool, CTUnit, CTArrow, CTPair,
+    CIRVar, CIRLambda,
+    CIRCaptureNil
+};
+use elab::cir::capture::{
+    cir_captures_empty, cir_captures_add,
+    cir_captures_len, cir_captures_is_empty
+};
+use codegen::capture_layout::{capture_env_type, capture_env_size};
+
+// ===========================================================================
+// emit_app: return type propagation
+// ===========================================================================
+
+pub fn test_emit_app_return_type_nat() -> Unit {
+    let st = ir_state_new();
+    let (_, st) = emit_app(st, "%f", "%arg", CTNat, CTNat);
+    let ir = ir_state_to_string(st);
+    // The call must use the return type (i64) in its signature
+    assert_eq_bool(string_contains(ir, "call i64"), true)
+}
+
+// ===========================================================================
+// emit_lambda: deferred + env_types
+// ===========================================================================
+
+pub fn test_emit_lambda_deferred_contains_define() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let (_, st) = emit_lambda(st, "x", CTNat, body, CIRCaptureNil, CTNat);
+    // Deferred buffer should contain the inner function definition
+    let deferred = ir_state_deferred_string(st);
+    assert_eq_bool(string_contains(deferred, "define i64 @lambda.0"), true)
+}
+
+pub fn test_emit_lambda_env_type_emitted() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let (_, st) = emit_lambda(st, "x", CTNat, body, CIRCaptureNil, CTNat);
+    // env_types should contain the env struct declaration
+    let env_types = ir_state_env_types_string(st);
+    assert_eq_bool(string_contains(env_types, "%env.0 = type {}"), true)
+}
+
+pub fn test_emit_lambda_body_in_deferred() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let (_, st) = emit_lambda(st, "x", CTNat, body, CIRCaptureNil, CTNat);
+    // Deferred inner function must contain a ret instruction
+    let deferred = ir_state_deferred_string(st);
+    assert_eq_bool(string_contains(deferred, "ret i64"), true)
+}
+
+// ===========================================================================
+// emit_lambda: capturing closure
+// ===========================================================================
+
+pub fn test_emit_lambda_capturing_malloc() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTBool);
+    let caps = cir_captures_add("y", CTNat, cir_captures_empty());
+    let (_, st) = emit_lambda(st, "x", CTBool, body, caps, CTBool);
+    let ir = ir_state_to_string(st);
+    // Must allocate env with malloc
+    assert_eq_bool(string_contains(ir, "call ptr @malloc"), true)
+}
+
+pub fn test_capture_stores_gep() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTBool);
+    let caps = cir_captures_add("y", CTNat, cir_captures_empty());
+    let (_, st) = emit_lambda(st, "x", CTBool, body, caps, CTBool);
+    let ir = ir_state_to_string(st);
+    // Must emit GEP for storing into env
+    assert_eq_bool(string_contains(ir, "getelementptr %env.0"), true)
+}
+
+pub fn test_capture_env_type_arrow() -> Unit {
+    let caps = cir_captures_add("f", CTArrow(CTNat, CTBool), cir_captures_empty());
+    // Arrow types are closures: { ptr, ptr } = 16 bytes
+    assert_eq_string(capture_env_type(caps), "<{ { ptr, ptr } }>")
+}
+
+pub fn test_emit_lambda_capturing_deferred_define() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTBool);
+    let caps = cir_captures_add("y", CTNat, cir_captures_empty());
+    let (_, st) = emit_lambda(st, "x", CTBool, body, caps, CTBool);
+    // Deferred must contain the inner function define
+    let deferred = ir_state_deferred_string(st);
+    assert_eq_bool(string_contains(deferred, "define i1 @lambda.0"), true)
+}
+
+// ===========================================================================
+// emit_fix: recursive closure
+// ===========================================================================
+
+pub fn test_emit_fix_self_slot() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("self", CTArrow(CTNat, CTNat));
+    let (_, st) = emit_fix(st, "self", CTArrow(CTNat, CTNat), body, CIRCaptureNil);
+    // Deferred should contain self-load from env slot 0
+    let deferred = ir_state_deferred_string(st);
+    assert_eq_bool(string_contains(deferred, "load { ptr, ptr }"), true)
+}
+
+pub fn test_emit_fix_malloc_16() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("self", CTArrow(CTNat, CTNat));
+    let (_, st) = emit_fix(st, "self", CTArrow(CTNat, CTNat), body, CIRCaptureNil);
+    let ir = ir_state_to_string(st);
+    // Must allocate 16 bytes for self-closure env
+    assert_eq_bool(string_contains(ir, "call ptr @malloc(i64 16)"), true)
+}
+
+// ===========================================================================
+// Nested lambda, return types, fork/merge isolation
+// ===========================================================================
+
+pub fn test_emit_lambda_nested() -> Unit {
+    let st = ir_state_new();
+    let inner: CodegenIR = CIRVar("y", CTNat);
+    let inner_lambda = CIRLambda("y", CTNat, inner, CIRCaptureNil, CTNat);
+    let (_, st) = emit_lambda(st, "x", CTNat, inner_lambda, CIRCaptureNil, CTArrow(CTNat, CTNat));
+    let deferred = ir_state_deferred_string(st);
+    // Both inner functions must appear in deferred with distinct names
+    assert_eq_bool(string_contains(deferred, "@lambda.0"), true);
+    assert_eq_bool(string_contains(deferred, "@lambda.1"), true)
+}
+
+pub fn test_emit_lambda_non_capturing_ret_type_bool() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let (_, st) = emit_lambda(st, "x", CTNat, body, CIRCaptureNil, CTBool);
+    let deferred = ir_state_deferred_string(st);
+    // Inner function return type must be i1 (Bool)
+    assert_eq_bool(string_contains(deferred, "define i1 @lambda.0"), true)
+}
+
+pub fn test_emit_app_unit_return() -> Unit {
+    let st = ir_state_new();
+    let (_, st) = emit_app(st, "%f", "%arg", CTNat, CTUnit);
+    let ir = ir_state_to_string(st);
+    // Unit return type should emit "call {}"
+    assert_eq_bool(string_contains(ir, "call {}"), true)
+}
+
+pub fn test_emit_fix_deferred_define() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("self", CTArrow(CTNat, CTNat));
+    let (_, st) = emit_fix(st, "self", CTArrow(CTNat, CTNat), body, CIRCaptureNil);
+    let deferred = ir_state_deferred_string(st);
+    // Must contain fix inner function define with correct signature
+    assert_eq_bool(string_contains(deferred, "define { ptr, ptr } @lambda.0"), true)
+}
+
+pub fn test_ir_state_fork_merge_preserves_output() -> Unit {
+    let st = ir_state_new();
+    let st = emit_line(st, "caller-line");
+    let body_st = ir_state_fork_body(st);
+    let body_st = emit_line(body_st, "body-line");
+    let st = ir_state_merge_body(st, body_st);
+    let output = ir_state_to_string(st);
+    // Caller output must be preserved after merge
+    assert_eq_bool(string_contains(output, "caller-line"), true);
+    // Body output must NOT leak into caller
+    assert_eq_bool(string_contains(output, "body-line"), false)
+}
+
+pub fn test_capture_env_size_arrow() -> Unit {
+    let caps = cir_captures_add("f", CTArrow(CTNat, CTBool), cir_captures_empty());
+    // Arrow = { ptr, ptr } = 16 bytes
+    assert_eq_nat(capture_env_size(caps), 16)
+}
+
+// ===========================================================================
+// Capture list queries
+// ===========================================================================
+
+pub fn test_cir_captures_len() -> Unit {
+    assert_eq_nat(cir_captures_len(cir_captures_empty()), 0);
+    let one = cir_captures_add("x", CTNat, cir_captures_empty());
+    assert_eq_nat(cir_captures_len(one), 1);
+    let two = cir_captures_add("y", CTBool, one);
+    assert_eq_nat(cir_captures_len(two), 2)
+}
+
+pub fn test_cir_captures_is_empty() -> Unit {
+    assert_eq_bool(cir_captures_is_empty(cir_captures_empty()), true);
+    let caps = cir_captures_add("x", CTNat, cir_captures_empty());
+    assert_eq_bool(cir_captures_is_empty(caps), false)
+}
+
+pub fn test_capture_env_type_pair() -> Unit {
+    let caps = cir_captures_add("p", CTPair(CTNat, CTBool), cir_captures_empty());
+    // Pair = { i64, i1 } → env wraps it in packed struct
+    assert_eq_string(capture_env_type(caps), "<{ { i64, i1 } }>")
+}
+
+// ===========================================================================
+// Multi-capture lambda, full output ordering
+// ===========================================================================
+
+pub fn test_emit_lambda_capturing_multi() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let caps = cir_captures_add("a", CTNat, cir_captures_add("b", CTBool, cir_captures_empty()));
+    let (_, st) = emit_lambda(st, "x", CTNat, body, caps, CTNat);
+    let deferred = ir_state_deferred_string(st);
+    // Body must load both captures from env via GEP at indices 0 and 1
+    assert_eq_bool(string_contains(deferred, "i32 0, i32 0"), true);
+    assert_eq_bool(string_contains(deferred, "i32 0, i32 1"), true)
+}
+
+pub fn test_ir_state_full_output_ordering() -> Unit {
+    let st = ir_state_new();
+    let st = emit_env_type(st, "%env.0 = type {}");
+    let st = emit_deferred(st, "define void @lambda.0() {}");
+    let st = emit_line(st, "define void @main() {}");
+    let full = ir_state_full_output(st);
+    // All three sections must be present in assembled output
+    assert_eq_bool(string_contains(full, "%env.0 = type {}"), true);
+    assert_eq_bool(string_contains(full, "define void @lambda.0"), true);
+    assert_eq_bool(string_contains(full, "define void @main"), true)
+}
+
+// ===========================================================================
+// Full-output end-to-end (AC1, AC2, AC4 strengthening)
+// ===========================================================================
+pub fn test_emit_lambda_non_capturing_full_ir() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let (_, st) = emit_lambda(st, "x", CTNat, body, CIRCaptureNil, CTNat);
+    let full = ir_state_full_output(st);
+    // env type declaration must be present
+    assert_eq_bool(string_contains(full, "%env.0 = type {}"), true);
+    // inner function define in deferred section
+    assert_eq_bool(string_contains(full, "define i64 @lambda.0"), true);
+    // closure pair with null env at call site
+    assert_eq_bool(string_contains(full, "ptr null"), true);
+    assert_eq_bool(string_contains(full, "insertvalue { ptr, ptr }"), true)
+}
+
+pub fn test_emit_lambda_capturing_full_ir() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let caps = cir_captures_add("y", CTNat, cir_captures_empty());
+    let (_, st) = emit_lambda(st, "x", CTBool, body, caps, CTBool);
+    let full = ir_state_full_output(st);
+    // packed env type declaration
+    assert_eq_bool(string_contains(full, "%env.0 = type <{ i64 }>"), true);
+    // inner function with capture load from env
+    assert_eq_bool(string_contains(full, "define i1 @lambda.0"), true);
+    assert_eq_bool(string_contains(full, "getelementptr %env.0, ptr %__env"), true);
+    // call-site: malloc + store + closure pair
+    assert_eq_bool(string_contains(full, "call ptr @malloc"), true);
+    assert_eq_bool(string_contains(full, "insertvalue { ptr, ptr }"), true)
+}
+
+pub fn test_emit_fix_store_self_closure() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("self", CTArrow(CTNat, CTNat));
+    let (_, st) = emit_fix(st, "self", CTArrow(CTNat, CTNat), body, CIRCaptureNil);
+    let ir = ir_state_to_string(st);
+    // Call-site output must store self closure into env slot 0
+    assert_eq_bool(string_contains(ir, "store { ptr, ptr }"), true)
+}
+
+pub fn test_emit_fix_env_type_declaration() -> Unit {
+    let (_, st) = emit_fix(ir_state_new(), "s", CTArrow(CTNat, CTNat), CIRVar("s", CTArrow(CTNat, CTNat)), CIRCaptureNil);
+    assert_eq_bool(string_contains(ir_state_env_types_string(st), "<{ { ptr, ptr } }>"), true)
+}
+
+pub fn test_emit_lambda_capturing_store_type() -> Unit {
+    let caps = cir_captures_add("y", CTNat, cir_captures_empty());
+    let (_, st) = emit_lambda(ir_state_new(), "x", CTBool, CIRVar("x", CTBool), caps, CTBool);
+    assert_eq_bool(string_contains(ir_state_to_string(st), "store i64"), true)
+}
+pub fn test_emit_app_pair_arg_type() -> Unit {
+    let (_, st) = emit_app(ir_state_new(), "%f", "%a", CTPair(CTNat, CTBool), CTNat);
+    assert_eq_bool(string_contains(ir_state_to_string(st), "{ i64, i1 }"), true)
+}
+
+// ===========================================================================
+// Additional coverage tests
+// ===========================================================================
+
+/// AC11 extended: fix with external captures emits self slot + capture slots.
+pub fn test_emit_fix_with_external_captures() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let caps = cir_captures_add("x", CTNat, cir_captures_empty());
+    let (_, st) = emit_fix(st, "self", CTArrow(CTNat, CTNat), body, caps);
+    let env_types = ir_state_env_types_string(st);
+    // Env must contain self closure slot AND external capture
+    assert_eq_bool(string_contains(env_types, "{ ptr, ptr }, i64"), true);
+    // Env allocation must be 16 (self) + 8 (Nat) = 24
+    let ir = ir_state_to_string(st);
+    assert_eq_bool(string_contains(ir, "@malloc(i64 24)"), true)
+}
+
+/// Closure value is always { ptr, ptr } — verify insertvalue pattern.
+pub fn test_emit_lambda_closure_value_type() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let (val, _) = emit_lambda(st, "x", CTNat, body, CIRCaptureNil, CTNat);
+    // The value should be an SSA name (starts with %)
+    assert_eq_bool(string_contains(val, "%"), true)
+}

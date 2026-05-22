@@ -19,766 +19,199 @@
 //
 // All environment operations return a new Env rather than mutating in place.
 // This follows the functional programming pattern used throughout Tungsten.
+//
+// ## Module Structure
+//
+// - types.tg:    Core type definitions (Env, MaybeTypeHandle, MaybeSpan)
+// - scope.tg:    Scope stack and local binding operations
+// - defs.tg:     Type/value/constructor definition data structures
+// - resolved.tg: Resolution result types
+// - module.tg:   Module path and module map operations
+// - ops.tg:      Environment mutation (scope, type var, registration, module, depth)
+// - resolve.tg:  Name resolution (single-name and path-based)
+//
+// ## Import Resolution: Driver → Elab Handoff
+//
+// Module import resolution spans two layers:
+//
+//   Driver layer (driver/modules/build/):
+//     Builds ModuleItemNames — flat name→identity maps for types, values,
+//     and constructors. Also runs re-export propagation (process_reexports)
+//     to copy pub-use'd names into the exporting module's name lists.
+//
+//   Elab layer (elab/env/ + elab/items/imports/):
+//     Converts ModuleItemNames into ModuleContents (typed lookup stubs)
+//     via build_module_contents_from_names. Import resolution then uses
+//     lookup_in_module to check these stubs.
+//
+// Key invariant:
+//   - Driver layer decides which names a module exports.
+//   - Elab layer turns those exported names into typed lookup stubs.
+//   - Import lookup should not rediscover exports from source files directly.
+//
+// See ADR 2.5.26g (constructor exports) and 3.5.26a (pub use re-exports).
+
+// ===========================================================================
+// TYPE INJECTION PATHWAYS
+// ===========================================================================
+//
+// The elaboration env supports three mechanisms for populating type info,
+// used at different stages:
+//
+// 1. Pre-elab stubs (populate_module_info / populate_type_stubs)
+//    - Fidelity: name + arity only, kind = STUB_KIND_UNSET
+//    - When: before collection, from ModuleInfo scan
+//    - Purpose: enable cross-module import resolution (Phase 1b)
+//
+// 2. Collection stubs (register_type_stub in collect/mod.tg)
+//    - Fidelity: name + arity + params, kind = INVALID_HANDLE
+//    - When: Phase 1a of each module's collection pass
+//    - Purpose: forward references within a module
+//    - May overwrite pre-elab stubs (detected by type_def_is_stub)
+//
+// 3. Post-elab injection (inject_prior_results in per_module/inject.tg)
+//    - Fidelity: full TypeDefInfo with encoding
+//    - When: between modules during per-module elaboration (W6.3a)
+//    - Purpose: upgrade stubs to full defs for completed dependencies
 
 pub mod types;
 pub mod scope;
 pub mod defs;
-pub mod resolved;
 pub mod module;
+pub mod ops;
+pub mod context;
+pub mod resolve;
+pub mod resolve_path;
 
-// Re-export all public items
+// Re-export all public items from submodules
 pub use elab::env::types::*;
 pub use elab::env::scope::*;
 pub use elab::env::defs::*;
-pub use elab::env::resolved::*;
 pub use elab::env::module::*;
+pub use elab::env::ops::*;
+pub use elab::env::context::*;
+pub use elab::env::resolve::*;
+pub use elab::env::resolve_path::*;
 
-use parser::ast::{
-    Ident, ident_name,
-    Path, MkPath,
-    ident_list_len,
-    VisPrivate, VisCrate, VisPublic
-};
 use driver::ffi::{List, Nil, Cons};
-use driver::util::{list_contains_string, list_is_prefix_or_eq_string};
-use elab::ffi::INVALID_HANDLE;
-
-// ===========================================================================
-// ENVIRONMENT
-// ===========================================================================
-
-/// The elaboration environment.
-pub type Env = {
-    scopes: ScopeStack,           // Local variable scopes
-    type_vars: List<String>,      // Bound type variables (for forall)
-    current_module: ElabModulePath,   // Current module path
-    modules: ModuleMap,           // All module contents
-    depth: Nat,                   // Current binding depth (for de Bruijn)
-    return_type: MaybeTypeHandle  // Expected return type (for return expressions)
-}
-
-/// Optional type handle for return_type.
-pub type MaybeTypeHandle =
-    | NoTypeHandle
-    | SomeTypeHandle(TypeHandle)
-
-/// Optional span for tracking source locations.
-pub type MaybeSpan =
-    | NoSpan
-    | SomeSpan(Span)
+use driver::modules::info::{
+    ModuleInfo, ModuleItemNames, ModuleRegistryEntry, module_info_empty
+};
+use driver::modules::path::{ModulePath};
+use elab::ffi::{STUB_KIND_UNSET};
+use lexer::span::{Span, span_new};
+use parser::ast::common::{Visibility, VisPublic};
 
 /// Create a new empty environment.
 pub fn env_new() -> Env {
     let root_path = elab_module_path_root();
     let root_contents = module_contents_empty(root_path);
     {
-        scopes: ScopeStackCons(ScopeNil, ScopeStackNil), // Start with one empty scope
+        scopes: ScopeStackCons(ScopeNil, ScopeStackNil),
         type_vars: Nil,
         current_module: root_path,
         modules: ModuleMapCons(root_path, root_contents, ModuleMapNil),
+        module_registry: module_info_empty(),
         depth: 0,
-        return_type: NoTypeHandle
+        return_type: NoTypeHandle,
+        elab_mode: ElabCheck
     }
 }
 
-// ===========================================================================
-// SCOPE OPERATIONS
-// ===========================================================================
+/// Populate the elaborator env with module info from the driver.
+///
+/// This converts the driver's ModuleInfo into module map entries in the
+/// elaborator's env. For W6.1, this registers module paths so they are
+/// available for future import resolution (W6.2).
+///
+/// Mirrors the bootstrap's `populate_module_info` in
+/// `bootstrap/src/elaborate/env/module_registry.rs`.
+pub fn populate_module_info(env: Env, info: ModuleInfo) -> Env {
+    let modules2 = register_modules_from_info(env.modules, info.modules);
+    env_with_modules(env, env.current_module, modules2, info)
+}
 
-/// Push a new scope onto the stack.
-pub fn env_push_scope(env: Env) -> Env {
-    {
-        scopes: ScopeStackCons(ScopeNil, env.scopes),
-        type_vars: env.type_vars,
-        current_module: env.current_module,
-        modules: env.modules,
-        depth: env.depth,
-        return_type: env.return_type
+/// Walk the module registry entries and register each module path
+/// in the elaborator's ModuleMap with stub contents from ModuleItemNames.
+/// This populates types, values, and constructors so that import resolution
+/// (Phase 1b) can find items in their owning modules.
+fn register_modules_from_info(
+    map: ModuleMap,
+    entries: List<ModuleRegistryEntry>
+) -> ModuleMap {
+    match entries {
+        Nil() => map,
+        Cons(entry, rest) =>
+            let (mod_path, names) = entry;
+            let elab_path = driver_path_to_elab_path(mod_path);
+            let contents = build_module_contents_from_names(elab_path, names);
+            let map2 = module_map_insert(map, elab_path, contents);
+            register_modules_from_info(map2, rest)
     }
 }
 
-/// Pop the current scope from the stack.
-pub fn env_pop_scope(env: Env) -> Env {
-    {
-        scopes: scope_stack_pop(env.scopes),
-        type_vars: env.type_vars,
-        current_module: env.current_module,
-        modules: env.modules,
-        depth: env.depth,
-        return_type: env.return_type
+/// Build ModuleContents with stub entries from ModuleItemNames.
+/// Creates TypeDefInfo stubs (name-only) and ValueDefInfo stubs (name-only)
+/// so that lookup_in_module can confirm item existence.
+fn build_module_contents_from_names(
+    path: ElabModulePath,
+    names: ModuleItemNames
+) -> ModuleContents {
+    let empty = module_contents_empty(path);
+    let with_types = populate_type_stubs(empty, names.types);
+    let with_values = populate_value_stubs(with_types, names.values);
+    let with_ctors = populate_constructor_stubs(with_values, names.constructors);
+    with_ctors
+}
+
+/// Populate ModuleContents with stub TypeDefInfo entries for each type name
+/// (Phase 0.5: pre-elaboration stub setup).
+fn populate_type_stubs(contents: ModuleContents, names: List<String>) -> ModuleContents {
+    match names {
+        Nil() => contents,
+        Cons(name, rest) =>
+            let core: TypeDefCore = { name: name, arity: 0, params: Nil };
+            let meta: TypeDefMeta = { kind: STUB_KIND_UNSET(), vis: VisPublic, span: span_new(0, 0, ""), encoded_type: 0 };
+            let stub = type_def_info_new(
+                core, meta
+            );
+            let contents2 = module_contents_add_type(contents, stub);
+            populate_type_stubs(contents2, rest)
     }
 }
 
-/// Bind a local variable in the current scope.
-/// Increments the depth and adds the binding.
-pub fn env_bind_local(env: Env, name: String, ty: TypeHandle) -> Env {
-    let new_depth = env.depth + 1;
-    let binding = local_binding_new(name, ty, env.depth);
-    let new_scopes = match env.scopes {
-        ScopeStackNil() =>
-            // Should not happen, but handle gracefully
-            ScopeStackCons(ScopeCons(binding, ScopeNil), ScopeStackNil),
-        ScopeStackCons(scope, rest) =>
-            ScopeStackCons(ScopeCons(binding, scope), rest)
-    };
-    {
-        scopes: new_scopes,
-        type_vars: env.type_vars,
-        current_module: env.current_module,
-        modules: env.modules,
-        depth: new_depth,
-        return_type: env.return_type
+/// Populate ModuleContents with stub ValueDefInfo entries for each value name
+/// (Phase 0.5: pre-elaboration stub setup).
+fn populate_value_stubs(contents: ModuleContents, names: List<String>) -> ModuleContents {
+    match names {
+        Nil() => contents,
+        Cons(name, rest) =>
+            let stub = value_def_info_new(name, 0, VisPublic, span_new(0, 0, ""));
+            let contents2 = module_contents_add_value(contents, stub);
+            populate_value_stubs(contents2, rest)
     }
 }
 
-/// Look up a local variable by name.
-/// Returns de Bruijn index, type, and source name if found.
-pub fn env_lookup_local(env: Env, name: String) -> MaybeResolvedValue {
-    match scope_stack_lookup(env.scopes, name) {
-        NoLocalBinding() => {
-            NoResolvedValue
-        },
-        SomeLocalBinding(binding) => {
-            // Calculate de Bruijn index: depth - binding_level - 1
-            let index = env.depth - binding.level - 1;
-            // Return name for CIR generation
-            SomeResolvedValue(ResolvedLocal(index, binding.ty, binding.name))
-        }
+/// Populate ModuleContents with stub ConstructorInfo entries for each constructor name
+/// (Phase 0.5: pre-elaboration stub setup).
+// All constructor stubs currently use VisPublic because the current
+// self-hosted compiler path treats exported type stubs as module-public.
+// If private/export-restricted types are added, constructor visibility
+// should inherit from the parent type declaration.
+fn populate_constructor_stubs(contents: ModuleContents, names: List<String>) -> ModuleContents {
+    match names {
+        Nil() => contents,
+        Cons(name, rest) =>
+            let id: CtorIdentity = { name: name, parent_type: "", index: 0, arity: 0 };
+            let stub = constructor_info_new(
+                id, 0, 0, VisPublic, span_new(0, 0, "")
+            );
+            let contents2 = module_contents_add_constructor(contents, stub);
+            populate_constructor_stubs(contents2, rest)
     }
 }
 
-// ===========================================================================
-// TYPE VARIABLE OPERATIONS
-// ===========================================================================
-
-/// Bind a type variable (for forall).
-pub fn env_bind_type_var(env: Env, name: String) -> Env {
-    {
-        scopes: env.scopes,
-        type_vars: Cons(name, env.type_vars),
-        current_module: env.current_module,
-        modules: env.modules,
-        depth: env.depth,
-        return_type: env.return_type
-    }
-}
-
-/// Unbind a type variable (pop from list).
-pub fn env_unbind_type_var(env: Env) -> Env {
-    let new_type_vars: List<String> = match env.type_vars {
-        Nil() => Nil(),
-        Cons(_, rest) => rest
-    };
-    {
-        scopes: env.scopes,
-        type_vars: new_type_vars,
-        current_module: env.current_module,
-        modules: env.modules,
-        depth: env.depth,
-        return_type: env.return_type
-    }
-}
-
-/// Alias for env_bind_type_var (legacy name).
-pub fn env_push_type_var(env: Env, name: String) -> Env {
-    env_bind_type_var(env, name)
-}
-
-/// Alias for env_unbind_type_var (legacy name).
-pub fn env_pop_type_var(env: Env) -> Env {
-    env_unbind_type_var(env)
-}
-
-/// Check if a name is a bound type variable.
-pub fn env_is_type_var(env: Env, name: String) -> Bool {
-    list_contains_string(env.type_vars, name)
-}
-
-// ===========================================================================
-// REGISTRATION OPERATIONS
-// ===========================================================================
-
-/// Get the current module contents.
-pub fn env_current_module_contents(env: Env) -> ModuleContents {
-    match module_map_lookup(env.modules, env.current_module) {
-        SomeModuleContents(c) => c,
-        NoModuleContents() => module_contents_empty(env.current_module)
-    }
-}
-
-/// Update the current module contents.
-fn env_update_module_contents(env: Env, contents: ModuleContents) -> Env {
-    {
-        scopes: env.scopes,
-        type_vars: env.type_vars,
-        current_module: env.current_module,
-        modules: module_map_insert(env.modules, env.current_module, contents),
-        depth: env.depth,
-        return_type: env.return_type
-    }
-}
-
-/// Register a type definition in the current module.
-pub fn env_register_type(env: Env, def: TypeDefInfo) -> Env {
-    let contents = env_current_module_contents(env);
-    let new_contents = module_contents_add_type(contents, def);
-    env_update_module_contents(env, new_contents)
-}
-
-/// Register a value definition in the current module.
-pub fn env_register_value(env: Env, def: ValueDefInfo) -> Env {
-    
-    let contents = env_current_module_contents(env);
-    let new_contents = module_contents_add_value(contents, def);
-    env_update_module_contents(env, new_contents)
-}
-
-/// Register a constructor in the current module.
-pub fn env_register_constructor(env: Env, info: ConstructorInfo) -> Env {
-    let contents = env_current_module_contents(env);
-    let new_contents = module_contents_add_constructor(contents, info);
-    env_update_module_contents(env, new_contents)
-}
-
-/// Register an import in the current module.
-pub fn env_add_import(env: Env, imp: Import) -> Env {
-    let contents = env_current_module_contents(env);
-    let new_contents = module_contents_add_import(contents, imp);
-    env_update_module_contents(env, new_contents)
-}
-
-// ===========================================================================
-// SINGLE-NAME RESOLUTION
-// ===========================================================================
-
-/// Resolve a simple (unqualified) type name.
-pub fn env_resolve_type(env: Env, name: String) -> MaybeResolvedType {
-    // First check type variables
-    if env_is_type_var(env, name) {
-        SomeResolvedType(ResolvedTypeVar(name))
-    } else {
-        // Then check current module's types
-        let contents = env_current_module_contents(env);
-        match type_def_list_lookup(contents.types, name) {
-            SomeTypeDef(def) => SomeResolvedType(ResolvedTypeDef(def)),
-            NoTypeDef() =>
-                // Check imports
-                env_resolve_type_via_imports(env, contents.imports, name)
-        }
-    }
-}
-
-/// Helper: resolve type through imports.
-fn env_resolve_type_via_imports(env: Env, imports: List<Import>, name: String) -> MaybeResolvedType {
-    match imports {
-        Nil() => NoResolvedType,
-        Cons(imp, rest) =>
-            if imp.local_name == name {
-                // Found matching import, resolve in source module
-                match module_map_lookup(env.modules, imp.source_path) {
-                    NoModuleContents() => env_resolve_type_via_imports(env, rest, name),
-                    SomeModuleContents(contents) =>
-                        match type_def_list_lookup(contents.types, imp.source_name) {
-                            SomeTypeDef(def) => SomeResolvedType(ResolvedTypeDef(def)),
-                            NoTypeDef() =>
-                                // Try source module's imports (re-exports)
-                                env_resolve_type_via_source_imports(env, contents.imports, imp.source_name, rest, name)
-                        }
-                }
-            } else {
-                env_resolve_type_via_imports(env, rest, name)
-            }
-    }
-}
-
-/// Helper: resolve type through a source module's imports (for re-exports).
-fn env_resolve_type_via_source_imports(
-    env: Env,
-    source_imports: List<Import>,
-    source_name: String,
-    rest: List<Import>,
-    original_name: String
-) -> MaybeResolvedType {
-    match source_imports {
-        Nil() => 
-            // Not found in source module's imports, continue with rest
-            env_resolve_type_via_imports(env, rest, original_name),
-        Cons(imp, source_rest) =>
-            if imp.local_name == source_name {
-                // Found matching re-export, resolve in its source module
-                match module_map_lookup(env.modules, imp.source_path) {
-                    NoModuleContents() => 
-                        env_resolve_type_via_source_imports(env, source_rest, source_name, rest, original_name),
-                    SomeModuleContents(contents) =>
-                        match type_def_list_lookup(contents.types, imp.source_name) {
-                            SomeTypeDef(def) => SomeResolvedType(ResolvedTypeDef(def)),
-                            NoTypeDef() =>
-                                // Could recurse further for chained re-exports, but limit to one level
-                                env_resolve_type_via_source_imports(env, source_rest, source_name, rest, original_name)
-                        }
-                }
-            } else {
-                env_resolve_type_via_source_imports(env, source_rest, source_name, rest, original_name)
-            }
-    }
-}
-
-/// Resolve a simple (unqualified) value name.
-pub fn env_resolve_value(env: Env, name: String) -> MaybeResolvedValue {
-    // First check local bindings
-    match env_lookup_local(env, name) {
-        SomeResolvedValue(resolved) => SomeResolvedValue(resolved),
-        NoResolvedValue() =>
-            // Then check current module's values
-            let contents = env_current_module_contents(env);
-            match value_def_list_lookup(contents.values, name) {
-                SomeValueDef(def) => SomeResolvedValue(ResolvedGlobal(def.name, def.ty)),
-                NoValueDef() =>
-                    // Check constructors
-                    match constructor_list_lookup(contents.constructors, name) {
-                        SomeConstructor(info) => SomeResolvedValue(ResolvedConstructor(info)),
-                        NoConstructor() =>
-                            // Check imports
-                            env_resolve_value_via_imports(env, contents.imports, name)
-                    }
-            }
-    }
-}
-
-/// Helper: resolve value through imports.
-fn env_resolve_value_via_imports(env: Env, imports: List<Import>, name: String) -> MaybeResolvedValue {
-    match imports {
-        Nil() => NoResolvedValue,
-        Cons(imp, rest) =>
-            if imp.local_name == name {
-                match module_map_lookup(env.modules, imp.source_path) {
-                    NoModuleContents() => env_resolve_value_via_imports(env, rest, name),
-                    SomeModuleContents(contents) =>
-                        // Try value first
-                        match value_def_list_lookup(contents.values, imp.source_name) {
-                            SomeValueDef(def) => SomeResolvedValue(ResolvedGlobal(def.name, def.ty)),
-                            NoValueDef() =>
-                                // Then try constructor
-                                match constructor_list_lookup(contents.constructors, imp.source_name) {
-                                    SomeConstructor(info) => SomeResolvedValue(ResolvedConstructor(info)),
-                                    NoConstructor() =>
-                                        // Then try source module's imports (re-exports)
-                                        env_resolve_value_via_source_imports(env, contents.imports, imp.source_name, rest, name)
-                                }
-                        }
-                }
-            } else {
-                env_resolve_value_via_imports(env, rest, name)
-            }
-    }
-}
-
-/// Helper: resolve value through a source module's imports (for re-exports).
-/// If found, continue resolution. Otherwise, continue searching rest of original imports.
-fn env_resolve_value_via_source_imports(
-    env: Env,
-    source_imports: List<Import>,
-    source_name: String,
-    rest: List<Import>,
-    original_name: String
-) -> MaybeResolvedValue {
-    match source_imports {
-        Nil() => 
-            // Not found in source module's imports, continue with rest
-            env_resolve_value_via_imports(env, rest, original_name),
-        Cons(imp, source_rest) =>
-            if imp.local_name == source_name {
-                // Found matching re-export, resolve in its source module
-                match module_map_lookup(env.modules, imp.source_path) {
-                    NoModuleContents() => 
-                        env_resolve_value_via_source_imports(env, source_rest, source_name, rest, original_name),
-                    SomeModuleContents(contents) =>
-                        match value_def_list_lookup(contents.values, imp.source_name) {
-                            SomeValueDef(def) => SomeResolvedValue(ResolvedGlobal(def.name, def.ty)),
-                            NoValueDef() =>
-                                match constructor_list_lookup(contents.constructors, imp.source_name) {
-                                    SomeConstructor(info) => SomeResolvedValue(ResolvedConstructor(info)),
-                                    NoConstructor() =>
-                                        // Could recurse further for chained re-exports, but limit to one level
-                                        env_resolve_value_via_source_imports(env, source_rest, source_name, rest, original_name)
-                                }
-                        }
-                }
-            } else {
-                env_resolve_value_via_source_imports(env, source_rest, source_name, rest, original_name)
-            }
-    }
-}
-
-// ===========================================================================
-// PATH RESOLUTION
-// ===========================================================================
-
-/// Resolve a path to a type.
-pub fn env_resolve_type_path(env: Env, path: Path) -> TypePathResult {
-    match path {
-        MkPath(segments, span) =>
-            if ident_list_len(segments) == 1 {
-                // Simple name
-                let name = ident_list_head_name(segments);
-                match env_resolve_type(env, name) {
-                    SomeResolvedType(resolved) => TypePathOk(resolved),
-                    NoResolvedType() => TypePathErr(env_error_new("unknown type: " ++ name, span))
-                }
-            } else {
-                // Qualified path: resolve module path, then look up name
-                env_resolve_qualified_type_path(env, segments, span)
-            }
-    }
-}
-
-/// Alias for env_resolve_type (legacy name).
-pub fn env_lookup_type(env: Env, name: String) -> MaybeResolvedType {
-    env_resolve_type(env, name)
-}
-
-/// Alias for env_resolve_value (legacy name).
-pub fn env_lookup_value(env: Env, name: String) -> MaybeResolvedValue {
-    env_resolve_value(env, name)
-}
-
-/// Look up a value and return its definition info (if it's a global value).
-/// This is a convenience wrapper over env_lookup_value that extracts just
-/// the ValueDefInfo for global values - useful when callers just need the type.
-pub fn env_lookup_value_def(env: Env, name: String) -> MaybeValueDef {
-    match env_resolve_value(env, name) {
-        NoResolvedValue() => NoValueDef,
-        SomeResolvedValue(resolved) =>
-            match resolved {
-                ResolvedGlobal(def_name, ty) =>
-                    // Reconstruct ValueDefInfo from resolved global
-                    SomeValueDef(value_def_info_new(def_name, ty, VisPublic, { start: 0, end: 0, file: "" })),
-                ResolvedLocal(_, ty, src_name) =>
-                    // Locals also get wrapped as ValueDefInfo
-                    SomeValueDef(value_def_info_new(src_name, ty, VisPrivate, { start: 0, end: 0, file: "" })),
-                ResolvedConstructor(_) =>
-                    // Constructors don't have ValueDefInfo - return not found
-                    NoValueDef
-            }
-    }
-}
-
-/// Look up a type and return its definition info (if it's a type definition).
-/// This is a convenience wrapper over env_lookup_type that extracts just
-/// the TypeDefInfo for type definitions.
-pub fn env_lookup_type_def(env: Env, name: String) -> MaybeTypeDef {
-    match env_resolve_type(env, name) {
-        NoResolvedType() => NoTypeDef,
-        SomeResolvedType(resolved) =>
-            match resolved {
-                ResolvedTypeDef(info) => SomeTypeDef(info),
-                ResolvedTypeVar(_) => NoTypeDef  // Type variables don't have TypeDefInfo
-            }
-    }
-}
-
-/// Global type definition lookup: searches ALL modules, not just current module & imports.
-/// Used as fallback when standard lookup fails for cross-module type references.
-pub fn env_global_lookup_type_def(env: Env, name: String) -> MaybeTypeDef {
-    match env_lookup_type_def(env, name) {
-        SomeTypeDef(info) => SomeTypeDef(info),
-        NoTypeDef() =>
-            // Fallback: search all modules in the module map
-            search_all_modules_for_type(env.modules, name)
-    }
-}
-
-/// Search all modules in the module map for a type definition by name.
-fn search_all_modules_for_type(map: ModuleMap, name: String) -> MaybeTypeDef {
-    match map {
-        ModuleMapNil() => NoTypeDef,
-        ModuleMapCons(_, contents, rest) =>
-            match type_def_list_lookup(contents.types, name) {
-                SomeTypeDef(info) =>
-                    // Skip stubs that haven't been filled in yet
-                    if info.encoded_type == INVALID_HANDLE {
-                        search_all_modules_for_type(rest, name)
-                    } else {
-                        SomeTypeDef(info)
-                    },
-                NoTypeDef() =>
-                    search_all_modules_for_type(rest, name)
-            }
-    }
-}
-
-/// Resolve a path to a value.
-pub fn env_resolve_value_path(env: Env, path: Path) -> ValuePathResult {
-    match path {
-        MkPath(segments, span) =>
-            if ident_list_len(segments) == 1 {
-                // Simple name
-                let name = ident_list_head_name(segments);
-                match env_resolve_value(env, name) {
-                    SomeResolvedValue(resolved) => ValuePathOk(resolved),
-                    NoResolvedValue() => ValuePathErr(env_error_new("unknown value: " ++ name, span))
-                }
-            } else {
-                // Qualified path
-                env_resolve_qualified_value_path(env, segments, span)
-            }
-    }
-}
-
-/// Helper: get head name from ident list.
-pub fn ident_list_head_name(list: List<Ident>) -> String {
-    match list {
-        Nil() => "",
-        Cons(id, _) => ident_name(id)
-    }
-}
-
-/// Helper: resolve qualified type path.
-fn env_resolve_qualified_type_path(env: Env, segments: List<Ident>, span: Span) -> TypePathResult {
-    // All but last segment is module path, last is type name
-    let module_path = ident_list_to_module_path_init(segments);
-    let type_name = ident_list_last_name(segments);
-    
-    match module_map_lookup(env.modules, module_path) {
-        NoModuleContents() =>
-            TypePathErr(env_error_new("unknown module in path", span)),
-        SomeModuleContents(contents) =>
-            match type_def_list_lookup(contents.types, type_name) {
-                SomeTypeDef(def) =>
-                    // Check visibility
-                    if env_check_visibility(env, def.visibility, module_path) {
-                        TypePathOk(ResolvedTypeDef(def))
-                    } else {
-                        let defined_in = elab_module_path_to_string(module_path);
-                        let accessed_from = elab_module_path_to_string(env.current_module);
-                        TypePathErr(env_error_new(
-                            "type `" ++ type_name ++ "` is private (defined in `" ++ defined_in ++ "`) and cannot be accessed from `" ++ accessed_from ++ "`",
-                            span
-                        ))
-                    },
-                NoTypeDef() =>
-                    TypePathErr(env_error_new("unknown type: " ++ type_name, span))
-            }
-    }
-}
-
-/// Helper: resolve qualified value path.
-fn env_resolve_qualified_value_path(env: Env, segments: List<Ident>, span: Span) -> ValuePathResult {
-    let module_path = ident_list_to_module_path_init(segments);
-    let value_name = ident_list_last_name(segments);
-    
-    match module_map_lookup(env.modules, module_path) {
-        NoModuleContents() =>
-            ValuePathErr(env_error_new("unknown module in path", span)),
-        SomeModuleContents(contents) =>
-            // Try value first
-            match value_def_list_lookup(contents.values, value_name) {
-                SomeValueDef(def) =>
-                    // Check visibility
-                    if env_check_visibility(env, def.visibility, module_path) {
-                        ValuePathOk(ResolvedGlobal(def.name, def.ty))
-                    } else {
-                        let defined_in = elab_module_path_to_string(module_path);
-                        let accessed_from = elab_module_path_to_string(env.current_module);
-                        ValuePathErr(env_error_new(
-                            "function `" ++ value_name ++ "` is private (defined in `" ++ defined_in ++ "`) and cannot be accessed from `" ++ accessed_from ++ "`",
-                            span
-                        ))
-                    },
-                NoValueDef() =>
-                    // Then try constructor
-                    match constructor_list_lookup(contents.constructors, value_name) {
-                        SomeConstructor(info) =>
-                            // Check constructor visibility
-                            if env_check_visibility(env, info.visibility, module_path) {
-                                ValuePathOk(ResolvedConstructor(info))
-                            } else {
-                                let defined_in = elab_module_path_to_string(module_path);
-                                let accessed_from = elab_module_path_to_string(env.current_module);
-                                ValuePathErr(env_error_new(
-                                    "constructor `" ++ value_name ++ "` is private (defined in `" ++ defined_in ++ "`) and cannot be accessed from `" ++ accessed_from ++ "`",
-                                    span
-                                ))
-                            },
-                        NoConstructor() =>
-                            ValuePathErr(env_error_new("unknown value: " ++ value_name, span))
-                    }
-            }
-    }
-}
-
-/// Helper: convert all but last ident to module path.
-fn ident_list_to_module_path_init(list: List<Ident>) -> ElabModulePath {
-    MkElabModulePath(ident_list_to_string_list_init(list))
-}
-
-/// Helper: convert ident list to string list, excluding last element.
-fn ident_list_to_string_list_init(list: List<Ident>) -> List<String> {
-    match list {
-        Nil() => Nil,
-        Cons(id, rest) =>
-            match rest {
-                Nil() => Nil,  // Last element, exclude
-                Cons(_, _) => Cons(ident_name(id), ident_list_to_string_list_init(rest))
-            }
-    }
-}
-
-/// Helper: get last name from ident list.
-fn ident_list_last_name(list: List<Ident>) -> String {
-    match list {
-        Nil() => "",
-        Cons(id, rest) =>
-            match rest {
-                Nil() => ident_name(id),
-                Cons(_, _) => ident_list_last_name(rest)
-            }
-    }
-}
-
-// ===========================================================================
-// MODULE OPERATIONS
-// ===========================================================================
-
-/// Enter a module (push module path).
-pub fn env_enter_module(env: Env, name: String) -> Env {
-    let new_path = elab_module_path_append(env.current_module, name);
-    // Create empty module if it doesn't exist
-    let new_modules = match module_map_lookup(env.modules, new_path) {
-        SomeModuleContents(_) => env.modules,
-        NoModuleContents() =>
-            module_map_insert(env.modules, new_path, module_contents_empty(new_path))
-    };
-    {
-        scopes: env.scopes,
-        type_vars: env.type_vars,
-        current_module: new_path,
-        modules: new_modules,
-        depth: env.depth,
-        return_type: env.return_type
-    }
-}
-
-/// Leave the current module (pop module path).
-pub fn env_leave_module(env: Env) -> Env {
-    match env.current_module {
-        MkElabModulePath(segments) =>
-            let new_path = MkElabModulePath(list_init_string(segments));
-            {
-                scopes: env.scopes,
-                type_vars: env.type_vars,
-                current_module: new_path,
-                modules: env.modules,
-                depth: env.depth,
-                return_type: env.return_type
-            } : Env
-    }
-}
-
-// ===========================================================================
-// VISIBILITY CHECKING
-// ===========================================================================
-
-/// Check if an item with given visibility is accessible from the current module.
-pub fn env_check_visibility(
-    env: Env,
-    item_visibility: Visibility,
-    item_module: ElabModulePath
-) -> Bool {
-    match item_visibility {
-        VisPublic() => true,
-        VisCrate() => true,  // TODO: crate boundary checking
-        VisPrivate() =>
-            // Private items are visible within the same module or submodules
-            elab_module_path_is_prefix_or_eq(item_module, env.current_module)
-    }
-}
-
-/// Check if path A is a prefix of or equal to path B.
-fn elab_module_path_is_prefix_or_eq(a: ElabModulePath, b: ElabModulePath) -> Bool {
-    match a {
-        MkElabModulePath(segs_a) => match b {
-            MkElabModulePath(segs_b) => list_is_prefix_or_eq_string(segs_a, segs_b)
-        }
-    }
-}
-
-// ===========================================================================
-// DEPTH OPERATIONS
-// ===========================================================================
-
-/// Get the current depth.
-pub fn env_depth(env: Env) -> Nat {
-    env.depth
-}
-
-/// Set the depth explicitly (for restoring after scope changes).
-pub fn env_set_depth(env: Env, depth: Nat) -> Env {
-    {
-        scopes: env.scopes,
-        type_vars: env.type_vars,
-        current_module: env.current_module,
-        modules: env.modules,
-        depth: depth,
-        return_type: env.return_type
-    }
-}
-
-// ===========================================================================
-// RETURN TYPE OPERATIONS
-// ===========================================================================
-
-/// Get the current return type (for return expressions).
-pub fn env_return_type(env: Env) -> MaybeTypeHandle {
-    env.return_type
-}
-
-/// Get the span of the current function (for return type errors).
-/// Returns NoSpan if not tracking fn_span (can be enhanced later).
-pub fn env_get_fn_span(env: Env) -> MaybeSpan {
-    // Currently not tracked in Env; return NoSpan
-    // Future enhancement: Add fn_span field to Env and set it in env_set_return_type
-    NoSpan
-}
-
-/// Set the return type (when entering a function body).
-pub fn env_set_return_type(env: Env, ty: TypeHandle) -> Env {
-    let new_scopes = env.scopes;
-    let new_type_vars = env.type_vars;
-    let new_current_module = env.current_module;
-    let new_modules = env.modules;
-    let new_depth = env.depth;
-    let new_return_type = SomeTypeHandle(ty);
-    let result: Env = {
-        scopes: new_scopes,
-        type_vars: new_type_vars,
-        current_module: new_current_module,
-        modules: new_modules,
-        depth: new_depth,
-        return_type: new_return_type
-    };
-    result
-}
-
-/// Clear the return type (when leaving a function body).
-pub fn env_clear_return_type(env: Env) -> Env {
-    {
-        scopes: env.scopes,
-        type_vars: env.type_vars,
-        current_module: env.current_module,
-        modules: env.modules,
-        depth: env.depth,
-        return_type: NoTypeHandle
-    }
-}
-
-// ===========================================================================
-// CONSTRUCTOR HELPERS
-// ===========================================================================
-
-/// Count the total number of constructors for a given ADT type.
-/// This is needed to compute injection paths for constructor elaboration.
-pub fn env_count_constructors(env: Env, parent_type: String) -> Nat {
-    let contents = env_current_module_contents(env);
-    constructor_list_count_for_type(contents.constructors, parent_type)
+/// Convert a driver ModulePath to an elab ElabModulePath.
+fn driver_path_to_elab_path(path: ModulePath) -> ElabModulePath {
+    MkElabModulePath(path.segments)
 }

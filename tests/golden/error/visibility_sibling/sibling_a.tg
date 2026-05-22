@@ -1,0 +1,5 @@
+// Sibling A has a private type.
+
+type SecretType = Nat
+
+pub fn public_fn() -> Nat { 0 }

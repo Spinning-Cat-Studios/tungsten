@@ -1,0 +1,5 @@
+// Submodule providing items for grouped import test.
+
+pub type GroupType = Nat
+
+pub fn group_fn(x: GroupType) -> Nat { x + 1 }

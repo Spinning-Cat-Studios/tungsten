@@ -1,0 +1,115 @@
+// src/compiler/driver/cli/output.tg
+// CLI output functions and command accessors.
+
+use driver::ffi::{println, eprintln, stderr_is_tty};
+use driver::util::{string_concat};
+use parser::option::{Option, Some, None};
+use driver::cli::{
+    Command, CmdCheck, CmdRun, CmdCompile, CmdTest, CmdError,
+    CheckOpts, RunOpts, CompileOpts, TestOpts, CliError
+};
+
+// ===========================================================================
+// OUTPUT FUNCTIONS
+// ===========================================================================
+
+/// Print help message.
+pub fn print_help() -> Unit {
+    println("Tungsten - A proof language compiler");
+    println("");
+    println("USAGE:");
+    println("    tungsten <COMMAND> [OPTIONS] <FILE>");
+    println("    tungsten <FILE>                      (shorthand for 'run')");
+    println("");
+    println("COMMANDS:");
+    println("    check      Type-check a file without running");
+    println("    run        Type-check and evaluate a file");
+    println("    compile    Compile to native executable");
+    println("    test       Run tests and report results");
+    println("    info       Show compiler capabilities and build info");
+    println("    explain    Explain flags and error codes");
+    println("    help       Show this help message");
+    println("    version    Show version information");
+    println("");
+    println("OPTIONS:");
+    println("    -v, --verbose       Enable verbose output");
+    println("    --max-errors N      Maximum errors to display (default: 20)");
+    println("");
+    println("CHECK OPTIONS:");
+    println("    --dump-core PATTERN   Dump Core IR for matching definitions (comma-separated)");
+    println("    --check-tyvar-escape  Report free TyVar escapes after elaboration");
+    println("");
+    println("COMPILE OPTIONS:");
+    println("    -o, --output PATH   Output file path");
+    println("    --emit-llvm         Emit LLVM IR instead of executable");
+    println("");
+    println("TEST OPTIONS:");
+    println("    --filter PATTERN    Only run tests matching PATTERN")
+}
+
+/// Print version.
+pub fn print_version() -> Unit {
+    println("tungsten 1.5.0 (self-hosted)")
+}
+
+/// Print CLI error in clap style.
+pub fn print_error(err: CliError) -> Unit {
+    // Use colors if stderr is a TTY
+    let use_color = stderr_is_tty();
+    
+    if use_color {
+        // Red "error:" prefix
+        eprintln(string_concat("\x1b[1;31merror:\x1b[0m ", err.message))
+    } else {
+        eprintln(string_concat("error: ", err.message))
+    };
+    
+    eprintln("");
+    eprintln(string_concat("Usage: ", err.usage));
+    eprintln("");
+    eprintln("For more information, try 'tungsten help'.")
+}
+
+// ===========================================================================
+// COMMAND EXECUTION HELPERS
+// ===========================================================================
+
+/// Check if command is an error.
+pub fn is_cmd_error(cmd: Command) -> Bool {
+    match cmd {
+        CmdError(_) => true,
+        _ => false
+    }
+}
+
+/// Get verbose flag from command.
+pub fn get_verbose(cmd: Command) -> Bool {
+    match cmd {
+        CmdCheck(opts) => opts.verbose,
+        CmdRun(opts) => opts.verbose,
+        CmdCompile(opts) => opts.verbose,
+        CmdTest(opts) => opts.verbose,
+        _ => false
+    }
+}
+
+/// Get max_errors from command.
+pub fn get_max_errors(cmd: Command) -> Nat {
+    match cmd {
+        CmdCheck(opts) => opts.max_errors,
+        CmdRun(opts) => opts.max_errors,
+        CmdTest(opts) => opts.max_errors,
+        _ => 20
+    }
+}
+
+/// Get file path from command.
+pub fn get_file(cmd: Command) -> Option<String> {
+    match cmd {
+        CmdCheck(opts) => Some(opts.file),
+        CmdRun(opts) => Some(opts.file),
+        CmdCompile(opts) => Some(opts.file),
+        CmdTest(opts) => Some(opts.file),
+        _ => None
+    }
+}

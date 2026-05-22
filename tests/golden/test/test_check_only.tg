@@ -1,0 +1,4 @@
+fn test_expect_type() -> Unit {
+    expect_type(42, "Nat");
+    ()
+}

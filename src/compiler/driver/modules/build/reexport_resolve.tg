@@ -1,0 +1,237 @@
+// src/compiler/driver/modules/build/reexport_resolve.tg
+// Re-export path resolution and item-copying helpers.
+//
+// Extracted from reexports.tg to stay under the 16-function guideline.
+// These handle individual re-export resolution (simple, glob) and
+// the copy-into-target-module logic.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option, Some, None, string_eq, list_append_string};
+use parser::ast::common::{Ident, ident_name};
+use parser::ast::nodes::{Path, MkPath};
+use driver::modules::path::{ModulePath, module_path_new, module_path_join, module_path_parent};
+use driver::modules::info::{
+    ModuleInfo, ModuleItemNames,
+    module_info_get_module, module_info_register_item,
+    module_info_update_contents,
+    module_item_names_add_ctor
+};
+use driver::modules::build::register::{index_type_decl, index_value_decl};
+use driver::modules::build::warn::{warn_relative_fallback, warn_relative_failure};
+
+// ===========================================================================
+// SIMPLE + GLOB RE-EXPORT
+// ===========================================================================
+
+/// Re-export a specific item: `pub use foo::bar::Item;`
+pub fn reexport_simple(
+    path: Path,
+    target_module: ModulePath,
+    prefix_segs: List<String>,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match path {
+        MkPath(segments, _span) =>
+            let all_segs = append_ident_names(prefix_segs, segments);
+            let (mod_segs, item_name) = split_last_string(all_segs);
+            let raw_path = module_path_new(mod_segs);
+            let source_path = resolve_reexport_source_path(info, raw_path, target_module);
+            let result = module_info_get_module(info, source_path);
+            match result {
+                None() => info,
+                Some(source_contents) =>
+                    reexport_name_into(info, target_module, item_name, source_contents)
+            }
+    }
+}
+
+/// Re-export all items: `pub use foo::bar::*;`
+pub fn reexport_glob(
+    path: Path,
+    target_module: ModulePath,
+    prefix_segs: List<String>,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match path {
+        MkPath(segments, _span) =>
+            let all_segs = append_ident_names(prefix_segs, segments);
+            let source_path = module_path_new(all_segs);
+            let result = module_info_get_module(info, source_path);
+            match result {
+                None() => info,
+                Some(source_contents) =>
+                    reexport_all_names(info, target_module, source_contents)
+            }
+    }
+}
+
+// ===========================================================================
+// COPY ITEMS INTO TARGET MODULE
+// ===========================================================================
+
+/// Copy a single named item from source contents into the target module.
+fn reexport_name_into(
+    info: ModuleInfo,
+    target_module: ModulePath,
+    name: String,
+    source: ModuleItemNames
+) -> ModuleInfo {
+    if list_contains_str(source.types, name) {
+        index_type_decl(info, name, target_module)
+    } else if list_contains_str(source.values, name) {
+        index_value_decl(info, name, target_module)
+    } else if list_contains_str(source.constructors, name) {
+        register_constructor_name(info, name, target_module)
+    } else {
+        info
+    }
+}
+
+/// Copy all items from source contents into the target module.
+fn reexport_all_names(
+    info: ModuleInfo,
+    target_module: ModulePath,
+    source: ModuleItemNames
+) -> ModuleInfo {
+    let info2 = copy_names_as_types(info, target_module, source.types);
+    let info3 = copy_names_as_values(info2, target_module, source.values);
+    copy_names_as_constructors(info3, target_module, source.constructors)
+}
+
+fn copy_names_as_types(info: ModuleInfo, target: ModulePath, names: List<String>) -> ModuleInfo {
+    match names {
+        Nil() => info,
+        Cons(name, rest) =>
+            let info2 = index_type_decl(info, name, target);
+            copy_names_as_types(info2, target, rest)
+    }
+}
+
+fn copy_names_as_values(info: ModuleInfo, target: ModulePath, names: List<String>) -> ModuleInfo {
+    match names {
+        Nil() => info,
+        Cons(name, rest) =>
+            let info2 = index_value_decl(info, name, target);
+            copy_names_as_values(info2, target, rest)
+    }
+}
+
+fn copy_names_as_constructors(info: ModuleInfo, target: ModulePath, names: List<String>) -> ModuleInfo {
+    match names {
+        Nil() => info,
+        Cons(name, rest) =>
+            let info2 = register_constructor_name(info, name, target);
+            copy_names_as_constructors(info2, target, rest)
+    }
+}
+
+/// Register a constructor name (without full variant info).
+fn register_constructor_name(info: ModuleInfo, name: String, module_path: ModulePath) -> ModuleInfo {
+    let info2 = module_info_register_item(info, name, module_path);
+    match module_info_get_module(info2, module_path) {
+        None() => info2,
+        Some(contents) =>
+            let new_contents = module_item_names_add_ctor(contents, name);
+            module_info_update_contents(info2, module_path, new_contents)
+    }
+}
+
+// ===========================================================================
+// PATH RESOLUTION
+// ===========================================================================
+
+// NOTE: child > sibling > absolute resolution is also implemented in:
+//   - driver/modules/build/resolve.tg  (resolve_flatten_module_path)
+//   - elab/items/imports/mod.tg        (resolve_use_module_path)
+// The elab implementation uses different types (ElabModulePath / ModuleMap).
+// The driver implementations live in separate import contexts.
+// Keep behaviour in sync manually.
+
+/// Resolve a module path for re-export using child > sibling > absolute priority.
+/// Emits warnings via shared helpers when fallback is used (ADR 10.5.26m §2.2).
+fn resolve_reexport_source_path(
+    info: ModuleInfo,
+    raw_path: ModulePath,
+    current_module: ModulePath
+) -> ModulePath {
+    let child = module_path_join(current_module, raw_path);
+    match module_info_get_module(info, child) {
+        Some(_) => warn_relative_fallback("re-export", "child", raw_path, child, current_module),
+        None() => resolve_reexport_try_sibling(info, raw_path, current_module)
+    }
+}
+
+fn resolve_reexport_try_sibling(
+    info: ModuleInfo,
+    raw_path: ModulePath,
+    current_module: ModulePath
+) -> ModulePath {
+    match module_path_parent(current_module) {
+        None() => raw_path,
+        Some(parent) =>
+            let sibling = module_path_join(parent, raw_path);
+            match module_info_get_module(info, sibling) {
+                Some(_) => warn_relative_fallback("re-export", "sibling", raw_path, sibling, current_module),
+                None() => resolve_reexport_try_absolute(info, raw_path, current_module)
+            }
+    }
+}
+
+fn resolve_reexport_try_absolute(
+    info: ModuleInfo,
+    raw_path: ModulePath,
+    current_module: ModulePath
+) -> ModulePath {
+    match module_info_get_module(info, raw_path) {
+        Some(_) => raw_path,
+        None() => warn_relative_failure("re-export", raw_path, current_module)
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+pub fn extend_prefix_segs(prefix: List<String>, path: Path) -> List<String> {
+    match path {
+        MkPath(segments, _span) => append_ident_names(prefix, segments)
+    }
+}
+
+fn append_ident_names(acc: List<String>, idents: List<Ident>) -> List<String> {
+    match idents {
+        Nil() => acc,
+        Cons(id, rest) =>
+            append_ident_names(list_append_string(acc, ident_name(id)), rest)
+    }
+}
+
+fn split_last_string(list: List<String>) -> (List<String>, String) {
+    match list {
+        Nil() => (Nil, ""),
+        Cons(s, rest) =>
+            if list_is_empty_string(rest) {
+                let result: (List<String>, String) = (Nil, s);
+                result
+            } else {
+                let (prefix, last) = split_last_string(rest);
+                (Cons(s, prefix), last)
+            }
+    }
+}
+
+fn list_is_empty_string(list: List<String>) -> Bool {
+    match list {
+        Nil() => true,
+        Cons(_, _) => false
+    }
+}
+
+fn list_contains_str(list: List<String>, target: String) -> Bool {
+    match list {
+        Nil() => false,
+        Cons(s, rest) =>
+            if string_eq(s, target) { true }
+            else { list_contains_str(rest, target) }
+    }
+}

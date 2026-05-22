@@ -1,0 +1,202 @@
+// src/compiler/elab/ffi/terms.tg
+// FFI term constructors — all extern "C" declarations.
+//
+// Note: TermHandle and TypeHandle are type aliases for Nat,
+// defined in the parent module (elab::ffi). We use Nat directly
+// here to avoid circular imports.
+
+// ============================================================================
+// Term Constructors (Essential)
+// ============================================================================
+
+// Construct a variable term by de Bruijn index
+pub extern "C" fn tg_term_var(index: Nat) -> Nat
+
+// Construct a variable term by name
+pub extern "C" fn tg_term_var_named(name: Nat) -> Nat
+
+// Construct lambda
+pub extern "C" fn tg_term_lambda(name: Nat, param_ty: Nat, body: Nat) -> Nat
+
+// Shorter alias for tg_term_lambda
+pub extern "C" fn tg_term_abs(name: Nat, param_ty: Nat, body: Nat) -> Nat
+
+// Construct application: t1 t2
+pub extern "C" fn tg_term_app(func: Nat, arg: Nat) -> Nat
+
+// Construct let binding
+pub extern "C" fn tg_term_let(name: Nat, ty: Nat, def: Nat, body: Nat) -> Nat
+
+// Construct zero (natural number)
+pub extern "C" fn tg_term_zero() -> Nat
+
+// Construct successor: succ t
+pub extern "C" fn tg_term_succ(n: Nat) -> Nat
+
+// Construct natural number literal
+pub extern "C" fn tg_term_nat_lit(n: Nat) -> Nat
+
+// Construct boolean true
+pub extern "C" fn tg_term_true() -> Nat
+
+// Construct boolean false  
+pub extern "C" fn tg_term_false() -> Nat
+
+// Construct unit value: ()
+pub extern "C" fn tg_term_unit() -> Nat
+
+// Construct a sorry/hole (placeholder term of given type for unimplemented proofs)
+pub extern "C" fn tg_term_sorry(ty: Nat) -> Nat
+
+// Construct string literal
+pub extern "C" fn tg_term_string(s: Nat) -> Nat
+
+// ============================================================================
+// Extended Term Constructors
+// ============================================================================
+
+// Construct if-then-else
+pub extern "C" fn tg_term_if(cond: Nat, then_e: Nat, else_e: Nat) -> Nat
+
+// Construct pair
+pub extern "C" fn tg_term_pair(fst: Nat, snd: Nat) -> Nat
+
+// Construct first projection
+pub extern "C" fn tg_term_fst(pair: Nat) -> Nat
+
+// Construct second projection
+pub extern "C" fn tg_term_snd(pair: Nat) -> Nat
+
+// Construct left injection
+pub extern "C" fn tg_term_inl(sum_ty: Nat, value: Nat) -> Nat
+
+// Construct right injection
+pub extern "C" fn tg_term_inr(sum_ty: Nat, value: Nat) -> Nat
+
+// Construct type annotation
+pub extern "C" fn tg_term_annot(term: Nat, ty: Nat) -> Nat
+
+// Construct fix-point
+pub extern "C" fn tg_term_fix(name: Nat, ty: Nat, body: Nat) -> Nat
+
+// Construct global reference
+pub extern "C" fn tg_term_global(name: Nat) -> Nat
+
+// ============================================================================
+// Arithmetic Term Constructors
+// ============================================================================
+
+// Construct natural addition
+pub extern "C" fn tg_term_nat_add(a: Nat, b: Nat) -> Nat
+
+// Construct natural subtraction
+pub extern "C" fn tg_term_nat_sub(a: Nat, b: Nat) -> Nat
+
+// Construct natural multiplication
+pub extern "C" fn tg_term_nat_mul(a: Nat, b: Nat) -> Nat
+
+// Construct natural division
+pub extern "C" fn tg_term_nat_div(a: Nat, b: Nat) -> Nat
+
+// Construct natural modulo
+pub extern "C" fn tg_term_nat_mod(a: Nat, b: Nat) -> Nat
+
+// Construct natural equality
+pub extern "C" fn tg_term_nat_eq(a: Nat, b: Nat) -> Nat
+
+// Construct natural less-than
+pub extern "C" fn tg_term_nat_lt(a: Nat, b: Nat) -> Nat
+
+// Construct natural less-than-or-equal
+pub extern "C" fn tg_term_nat_le(a: Nat, b: Nat) -> Nat
+
+// Construct natural greater-than
+pub extern "C" fn tg_term_nat_gt(a: Nat, b: Nat) -> Nat
+
+// Construct natural greater-than-or-equal
+pub extern "C" fn tg_term_nat_ge(a: Nat, b: Nat) -> Nat
+
+// ============================================================================
+// Boolean Term Constructors
+// ============================================================================
+
+// Construct boolean AND
+pub extern "C" fn tg_term_bool_and(a: Nat, b: Nat) -> Nat
+
+// Construct boolean OR
+pub extern "C" fn tg_term_bool_or(a: Nat, b: Nat) -> Nat
+
+// Construct boolean NOT
+pub extern "C" fn tg_term_bool_not(a: Nat) -> Nat
+
+// ============================================================================
+// String Term Constructors
+// ============================================================================
+
+// Construct string concatenation
+pub extern "C" fn tg_term_str_concat(a: Nat, b: Nat) -> Nat
+
+// Construct string equality
+pub extern "C" fn tg_term_str_eq(a: Nat, b: Nat) -> Nat
+
+// Construct string length
+pub extern "C" fn tg_term_str_len(s: Nat) -> Nat
+
+// Construct reflexivity proof
+pub extern "C" fn tg_term_refl(ty: Nat, term: Nat) -> Nat
+
+// Construct substitution proof: subst [τ] [P] eq_proof witness
+pub extern "C" fn tg_term_subst(ty: Nat, motive: Nat, eq_proof: Nat, witness: Nat) -> Nat
+
+// Construct natural number induction: natind [motive] base step n
+pub extern "C" fn tg_term_natind(motive: Nat, base: Nat, step: Nat, n: Nat) -> Nat
+
+// Construct natural number primitive recursion: natrec [ty] base step n
+pub extern "C" fn tg_term_natrec(ty: Nat, base: Nat, step: Nat, n: Nat) -> Nat
+
+// ============================================================================
+// Sum Type and Pattern Matching
+// ============================================================================
+
+// Construct case analysis
+pub extern "C" fn tg_term_case(scrut: Nat, left_name: Nat, left_body: Nat, right_name: Nat, right_body: Nat) -> Nat
+
+// ============================================================================
+// Recursive Types
+// ============================================================================
+
+// Construct fold
+pub extern "C" fn tg_term_fold(mu_ty: Nat, term: Nat) -> Nat
+
+// Construct unfold
+pub extern "C" fn tg_term_unfold(mu_ty: Nat, term: Nat) -> Nat
+
+// ============================================================================
+// Polymorphism
+// ============================================================================
+
+// Construct type abstraction
+pub extern "C" fn tg_term_type_abs(name: Nat, body: Nat) -> Nat
+
+// Construct type application
+pub extern "C" fn tg_term_type_app(term: Nat, ty: Nat) -> Nat
+
+// ============================================================================
+// References
+// ============================================================================
+
+// Construct a new reference
+pub extern "C" fn tg_term_ref_new(value: Nat) -> Nat
+
+// Construct reference dereference
+pub extern "C" fn tg_term_ref_get(r: Nat) -> Nat
+
+// Construct reference assignment
+pub extern "C" fn tg_term_ref_set(r: Nat, value: Nat) -> Nat
+
+// ============================================================================
+// Control Flow
+// ============================================================================
+
+// Construct early return (ADR 13.5.26d)
+pub extern "C" fn tg_term_return(inner: Nat) -> Nat

@@ -1,0 +1,34 @@
+// Warning helpers for relative import fallback in elab phase (ADR 10.5.26m).
+
+use driver::ffi::process::eprintln;
+use elab::env::{ElabModulePath, elab_module_path_to_string, elab_module_path_eq};
+
+/// Warn if raw != resolved (successful child/sibling fallback), return resolved.
+pub fn warn_elab_relative_fallback(
+    strategy: String,
+    raw: ElabModulePath,
+    resolved: ElabModulePath,
+    current: ElabModulePath
+) -> ElabModulePath {
+    if elab_module_path_eq(raw, resolved) {
+        resolved
+    } else {
+        let _ = eprintln("warning: relative import `" ++ elab_module_path_to_string(raw)
+            ++ "` resolved via " ++ strategy ++ " as `" ++ elab_module_path_to_string(resolved)
+            ++ "` from `" ++ elab_module_path_to_string(current) ++ "`");
+        let _ = eprintln("  = help: use absolute import: `"
+            ++ elab_module_path_to_string(resolved) ++ "`");
+        resolved
+    }
+}
+
+/// Warn when all lookups fail (P3b), return raw.
+pub fn warn_elab_relative_failure(
+    raw: ElabModulePath,
+    current: ElabModulePath
+) -> ElabModulePath {
+    let _ = eprintln("warning: relative import `" ++ elab_module_path_to_string(raw)
+        ++ "` could not be resolved from `" ++ elab_module_path_to_string(current) ++ "`");
+    let _ = eprintln("  = help: use absolute import rooted at a top-level module (e.g., `parser::`, `elab::`, `driver::`, `lexer::`)");
+    raw
+}

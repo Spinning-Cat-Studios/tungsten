@@ -1,0 +1,161 @@
+// src/compiler/parser/items/types/adt.tg
+// ADT body and variant parsing.
+
+use lexer::token::{TokenKind, TokPipe, TokLParen, TokRParen, TokComma};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new};
+use parser::ast::nodes::{TypeExpr, type_expr_span, TypeDefBody, TypeDefAdt, Variant};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use driver::util::{Result, Ok, Err};
+use parser::types::{parse_type};
+
+/// Check if current position looks like an ADT start.
+/// Returns true if we see: IDENT ("(" | "|" | where_clause_or_next_item).
+pub fn is_adt_start(cur: Cursor) -> Bool {
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => false,
+        SomeIdentResult(_, cur2) =>
+            is_adt_start_after_ident(cur2)
+    }
+}
+
+fn is_adt_start_after_ident(cur: Cursor) -> Bool {
+    match cursor_peek_kind(cur) {
+        None() => false,
+        Some(kind) => is_adt_start_kind(kind)
+    }
+}
+
+fn is_adt_start_kind(kind: TokenKind) -> Bool {
+    match kind {
+        TokLParen() => true,
+        TokPipe() => true,
+        _ => false
+    }
+}
+
+/// Parse an ADT body.
+///
+/// Grammar:
+///   AdtBody = "|"? Variant ("|" Variant)*
+pub fn parse_adt_body(cur: Cursor) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
+    // Optional leading |
+    let cur2 = if cursor_check(cur, TokPipe()) {
+        cursor_advance(cur)
+    } else {
+        cur
+    };
+    
+    // Parse first variant
+    let (variant, cur3) = parse_variant(cur2)?;
+    parse_variants_rest(cur3, Cons(variant, Nil()))
+}
+
+/// Parse a single ADT variant.
+///
+/// Grammar:
+///   Variant = IDENT ("(" TypeExprList ")")?
+fn parse_variant(cur: Cursor) -> Result<(Variant, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    match cursor_eat_ident(cur) {
+        NoIdentResult() =>
+            parse_variant_no_ident(cur),
+        SomeIdentResult(name, cur2) =>
+            parse_variant_after_ident(start_span, name, cur2)
+    }
+}
+
+fn parse_variant_no_ident(cur: Cursor) -> Result<(Variant, Cursor), ParseError> {
+    let found = match cursor_peek_kind(cur) {
+        None() => "end of file",
+        Some(k) => token_kind_name(k)
+    };
+    Err(parse_error_expected("variant name", found, cursor_peek_span(cur)))
+}
+
+fn parse_variant_after_ident(start_span: Span, name: String, cur: Cursor) -> Result<(Variant, Cursor), ParseError> {
+    if cursor_check(cur, TokLParen()) {
+        let cur2 = cursor_advance(cur);
+        if cursor_check(cur2, TokRParen()) {
+            let cur3 = cursor_advance(cur2);
+            let variant: Variant = {
+                name: ident_new(name, start_span),
+                fields: Nil(),
+                span: span_merge(start_span, cursor_peek_span(cur2))
+            };
+            Ok((variant, cur3))
+        } else {
+            let (fields, end_span, cur3) = parse_variant_fields(cur2)?;
+            parse_variant_close(start_span, name, fields, cur3)
+        }
+    } else {
+        let variant: Variant = {
+            name: ident_new(name, start_span),
+            fields: Nil(),
+            span: start_span
+        };
+        Ok((variant, cur))
+    }
+}
+
+fn parse_variant_close(start_span: Span, name: String, fields: List<TypeExpr>, cur: Cursor) -> Result<(Variant, Cursor), ParseError> {
+    let (end_tok, cur2) = cursor_expect(cur, TokRParen())?;
+    let variant: Variant = {
+        name: ident_new(name, start_span),
+        fields: fields,
+        span: span_merge(start_span, end_tok.span)
+    };
+    Ok((variant, cur2))
+}
+
+/// Parse variant fields: comma-separated type list.
+fn parse_variant_fields(cur: Cursor) -> Result<(List<TypeExpr>, Span, Cursor), ParseError> {
+    let (ty, cur2) = parse_type(cur)?;
+    parse_variant_fields_rest(cur2, Cons(ty, Nil()), type_expr_span(ty))
+}
+
+/// Parse remaining variant fields.
+fn parse_variant_fields_rest(cur: Cursor, acc: List<TypeExpr>, last_span: Span) -> Result<(List<TypeExpr>, Span, Cursor), ParseError> {
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma
+        if cursor_check(cur2, TokRParen()) {
+            Ok((list_reverse(acc), last_span, cur2))
+        } else {
+            let (ty, cur3) = parse_type(cur2)?;
+            parse_variant_fields_rest(cur3, Cons(ty, acc), type_expr_span(ty))
+        }
+    } else {
+        Ok((list_reverse(acc), last_span, cur))
+    }
+}
+
+/// Parse remaining variants.
+fn parse_variants_rest(cur: Cursor, acc: List<Variant>) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
+    if cursor_check(cur, TokPipe()) {
+        let cur2 = cursor_advance(cur);
+        let (variant, cur3) = parse_variant(cur2)?;
+        parse_variants_rest(cur3, Cons(variant, acc))
+    } else {
+        let reversed = list_reverse(acc);
+        let last_span = variant_list_last_span(reversed);
+        Ok((TypeDefAdt(reversed), last_span, cur))
+    }
+}
+
+/// Get span of last variant in list (or empty span if list is empty).
+fn variant_list_last_span(list: List<Variant>) -> Span {
+    match list {
+        Nil() => span_empty(0, ""),
+        Cons(v, rest) => match rest {
+            Nil() => v.span,
+            Cons(_, _) => variant_list_last_span(rest)
+        }
+    }
+}

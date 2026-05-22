@@ -1,3 +1,8 @@
+warning: Phase A.5 global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0007]: the name `Foo` is imported multiple times (at 203..206)
+  note: first imported here (at 187..190)
+  help: use `as` to rename one import: `use mymod::Foo as foo_alias;`
+  hint: run `tungsten doctor check phase-a5 <file>` for details
 [E0007] Error: the name `Foo` is imported multiple times
    ╭─[tests/golden/error/duplicate_import_same_module/main.tg:8:12]
    │
@@ -8,7 +13,7 @@
    │            ─┬─  
    │             ╰─── 
    │ 
-   │ Help: use `as` to rename one import: `use main::mymod::Foo as foo_alias;`
+   │ Help: use `as` to rename one import: `use mymod::Foo as foo_alias;`
 ───╯
 
 error: aborting due to 1 error

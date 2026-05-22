@@ -1,0 +1,45 @@
+// Runtime value tests for record spread syntax (ADR 13.5.26i).
+// AC3 + AC6b — requires `tungsten test` with LLVM (cost 5).
+
+type Point = { x: Nat, y: Nat }
+type Point3D = { x: Nat, y: Nat, z: Nat }
+
+// ── AC3: Runtime value correctness ──────────────────────────────────
+
+fn test_anonymous_spread_values() -> Unit {
+    let p: Point = { x: 1, y: 2 };
+    let q: Point = { ...p, x: 10 };
+    assert_eq_nat(q.x, 10);
+    assert_eq_nat(q.y, 2)
+}
+
+fn test_named_spread_values() -> Unit {
+    let p = Point { x: 3, y: 4 };
+    let q = Point { ...p, x: 30 };
+    assert_eq_nat(q.x, 30);
+    assert_eq_nat(q.y, 4)
+}
+
+fn test_named_spread_no_overrides_values() -> Unit {
+    let p = Point { x: 5, y: 6 };
+    let q = Point { ...p };
+    assert_eq_nat(q.x, 5);
+    assert_eq_nat(q.y, 6)
+}
+
+fn test_spread_three_fields_values() -> Unit {
+    let p = Point3D { x: 1, y: 2, z: 3 };
+    let q = Point3D { ...p, z: 30 };
+    assert_eq_nat(q.x, 1);
+    assert_eq_nat(q.y, 2);
+    assert_eq_nat(q.z, 30)
+}
+
+// ── AC6b: Pure spread copy values ───────────────────────────────────
+
+fn test_anonymous_spread_copy_values() -> Unit {
+    let p: Point = { x: 7, y: 8 };
+    let q: Point = { ...p };
+    assert_eq_nat(q.x, 7);
+    assert_eq_nat(q.y, 8)
+}

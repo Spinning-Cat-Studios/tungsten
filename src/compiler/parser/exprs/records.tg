@@ -6,18 +6,18 @@ use lexer::span::{Span, span_merge};
 use parser::error::{ParseError, parse_error_expected, parse_error_eof};
 use parser::cursor::{Cursor, cursor_peek_kind, cursor_check, cursor_check_ahead, cursor_check_ident,
     cursor_is_eof, cursor_advance, cursor_expect, cursor_eat_ident, token_kind_name,
-    ParseResultToken, ParseOkToken, ParseErrToken,
     EatIdentResult, SomeIdentResult, NoIdentResult};
 use parser::option::{Option, None, Some};
-use parser::ast::common::{Ident, ident_new};
-use parser::ast::nodes::{Expr, ExprRecordLit, expr_span,
+use parser::ast::common::{Ident, ident_new, Path, path_span};
+use parser::ast::nodes::{Expr, ExprRecordLit, ExprNamedRecord, expr_span,
     MaybeExpr, NoExpr, SomeExpr,
     FieldInit};
 use driver::ffi::{List, Nil, Cons};
 use driver::util::list_reverse;
-use result::{ParseResultExpr, ParseOkExpr, ParseErrExpr, cursor_peek_span};
+use driver::util::{Result, Ok, Err};
+use parser::exprs::result::{cursor_peek_span};
 use parser::exprs::postfix::parse_postfix;
-use pratt::parse_expr;
+use parser::exprs::pratt::parse_expr;
 
 // ===========================================================================
 // RECORD LITERAL DETECTION
@@ -58,7 +58,7 @@ pub fn is_record_literal_start(cur: Cursor) -> Bool {
 // ===========================================================================
 
 /// Parse a record literal: `{ field: expr, ... }` or `{ ...spread, field: expr }`
-pub fn parse_record_literal(cur: Cursor) -> ParseResultExpr {
+pub fn parse_record_literal(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
     let start_span = cursor_peek_span(cur);
     let cur2 = cursor_advance(cur);  // consume `{`
     
@@ -66,25 +66,21 @@ pub fn parse_record_literal(cur: Cursor) -> ParseResultExpr {
     if cursor_check(cur2, TokDotDotDot()) {
         let cur3 = cursor_advance(cur2);  // consume `...`
         // Parse spread expression (using postfix to avoid ambiguity)
-        match parse_postfix(cur3) {
-            ParseErrExpr(e) => ParseErrExpr(e),
-            ParseOkExpr(spread_expr, cur4) => {
-                // After spread, expect `,` or `}`
-                if cursor_check(cur4, TokRBrace()) {
-                    let cur5 = cursor_advance(cur4);
-                    let span = span_merge(start_span, cursor_peek_span(cur4));
-                    ParseOkExpr(ExprRecordLit(SomeExpr(spread_expr), Nil, span), cur5)
-                } else if cursor_check(cur4, TokComma()) {
-                    let cur5 = cursor_advance(cur4);
-                    parse_record_fields(cur5, start_span, SomeExpr(spread_expr), Nil)
-                } else {
-                    let found = match cursor_peek_kind(cur4) {
-                        None() => "end of file",
-                        Some(k) => token_kind_name(k)
-                    };
-                    ParseErrExpr(parse_error_expected("',' or '}'", found, cursor_peek_span(cur4)))
-                }
-            }
+        let (spread_expr, cur4) = parse_postfix(cur3)?;
+        // After spread, expect `,` or `}`
+        if cursor_check(cur4, TokRBrace()) {
+            let cur5 = cursor_advance(cur4);
+            let span = span_merge(start_span, cursor_peek_span(cur4));
+            Ok((ExprRecordLit(SomeExpr(spread_expr), Nil, span), cur5))
+        } else if cursor_check(cur4, TokComma()) {
+            let cur5 = cursor_advance(cur4);
+            parse_record_fields(cur5, start_span, SomeExpr(spread_expr), Nil)
+        } else {
+            let found = match cursor_peek_kind(cur4) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            Err(parse_error_expected("',' or '}'", found, cursor_peek_span(cur4)))
         }
     } else {
         // No spread, parse fields directly
@@ -93,14 +89,14 @@ pub fn parse_record_literal(cur: Cursor) -> ParseResultExpr {
 }
 
 /// Parse record field initializations until `}`.
-fn parse_record_fields(cur: Cursor, start_span: Span, spread: MaybeExpr, acc: List<FieldInit>) -> ParseResultExpr {
+fn parse_record_fields(cur: Cursor, start_span: Span, spread: MaybeExpr, acc: List<FieldInit>) -> Result<(Expr, Cursor), ParseError> {
     // Check for closing brace
     if cursor_check(cur, TokRBrace()) {
         let cur2 = cursor_advance(cur);
         let span = span_merge(start_span, cursor_peek_span(cur));
-        ParseOkExpr(ExprRecordLit(spread, list_reverse(acc), span), cur2)
+        Ok((ExprRecordLit(spread, list_reverse(acc), span), cur2))
     } else if cursor_is_eof(cur) {
-        ParseErrExpr(parse_error_eof("'}'", cursor_peek_span(cur)))
+        Err(parse_error_eof("'}'", cursor_peek_span(cur)))
     } else {
         // Parse field: `name: expr`
         match cursor_eat_ident(cur) {
@@ -109,49 +105,128 @@ fn parse_record_fields(cur: Cursor, start_span: Span, spread: MaybeExpr, acc: Li
                     None() => "end of file",
                     Some(k) => token_kind_name(k)
                 };
-                ParseErrExpr(parse_error_expected("field name", found, cursor_peek_span(cur)))
+                Err(parse_error_expected("field name", found, cursor_peek_span(cur)))
             },
             SomeIdentResult(name, cur2) => {
                 let name_span = cursor_peek_span(cur);
-                match cursor_expect(cur2, TokColon()) {
-                    ParseErrToken(e) => ParseErrExpr(e),
-                    ParseOkToken(_, cur3) => {
-                        match parse_expr(cur3) {
-                            ParseErrExpr(e) => ParseErrExpr(e),
-                            ParseOkExpr(value, cur4) => {
-                                let field_span = span_merge(name_span, expr_span(value));
-                                let field: FieldInit = {
-                                    name: ident_new(name, name_span),
-                                    value: value,
-                                    span: field_span
-                                };
-                                let new_acc = Cons(field, acc);
-                                
-                                // Check for comma or closing brace
-                                if cursor_check(cur4, TokComma()) {
-                                    let cur5 = cursor_advance(cur4);
-                                    // Allow trailing comma
-                                    if cursor_check(cur5, TokRBrace()) {
-                                        let cur6 = cursor_advance(cur5);
-                                        let span = span_merge(start_span, cursor_peek_span(cur5));
-                                        ParseOkExpr(ExprRecordLit(spread, list_reverse(new_acc), span), cur6)
-                                    } else {
-                                        parse_record_fields(cur5, start_span, spread, new_acc)
-                                    }
-                                } else if cursor_check(cur4, TokRBrace()) {
-                                    let cur5 = cursor_advance(cur4);
-                                    let span = span_merge(start_span, cursor_peek_span(cur4));
-                                    ParseOkExpr(ExprRecordLit(spread, list_reverse(new_acc), span), cur5)
-                                } else {
-                                    let found = match cursor_peek_kind(cur4) {
-                                        None() => "end of file",
-                                        Some(k) => token_kind_name(k)
-                                    };
-                                    ParseErrExpr(parse_error_expected("',' or '}'", found, cursor_peek_span(cur4)))
-                                }
-                            }
-                        }
+                let (_, cur3) = cursor_expect(cur2, TokColon())?;
+                let (value, cur4) = parse_expr(cur3)?;
+                let field_span = span_merge(name_span, expr_span(value));
+                let field: FieldInit = {
+                    name: ident_new(name, name_span),
+                    value: value,
+                    span: field_span
+                };
+                let new_acc = Cons(field, acc);
+
+                // Check for comma or closing brace
+                if cursor_check(cur4, TokComma()) {
+                    let cur5 = cursor_advance(cur4);
+                    // Allow trailing comma
+                    if cursor_check(cur5, TokRBrace()) {
+                        let cur6 = cursor_advance(cur5);
+                        let span = span_merge(start_span, cursor_peek_span(cur5));
+                        Ok((ExprRecordLit(spread, list_reverse(new_acc), span), cur6))
+                    } else {
+                        parse_record_fields(cur5, start_span, spread, new_acc)
                     }
+                } else if cursor_check(cur4, TokRBrace()) {
+                    let cur5 = cursor_advance(cur4);
+                    let span = span_merge(start_span, cursor_peek_span(cur4));
+                    Ok((ExprRecordLit(spread, list_reverse(new_acc), span), cur5))
+                } else {
+                    let found = match cursor_peek_kind(cur4) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    Err(parse_error_expected("',' or '}'", found, cursor_peek_span(cur4)))
+                }
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// NAMED RECORD CONSTRUCTOR (ADR 13.5.26h)
+// ===========================================================================
+
+/// Parse named record fields: `{ field: expr, ... }` or `{ ...spread, field: expr }` after the type name.
+/// Called from postfix.tg when `Path { ...` is detected with uppercase path.
+/// The cursor should be positioned at the `{`.
+pub fn parse_named_record_fields(name: Path, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let start_span = path_span(name);
+    let cur2 = cursor_advance(cur);  // consume `{`
+
+    // Check for spread at start: `TypeName { ...spread, ... }`
+    if cursor_check(cur2, TokDotDotDot()) {
+        let cur3 = cursor_advance(cur2);  // consume `...`
+        let (spread_expr, cur4) = parse_postfix(cur3)?;
+        if cursor_check(cur4, TokRBrace()) {
+            let cur5 = cursor_advance(cur4);
+            let span = span_merge(start_span, cursor_peek_span(cur4));
+            Ok((ExprNamedRecord(name, SomeExpr(spread_expr), Nil, span), cur5))
+        } else if cursor_check(cur4, TokComma()) {
+            let cur5 = cursor_advance(cur4);
+            parse_named_fields_loop(name, cur5, start_span, SomeExpr(spread_expr), Nil)
+        } else {
+            let found = match cursor_peek_kind(cur4) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            Err(parse_error_expected("',' or '}'", found, cursor_peek_span(cur4)))
+        }
+    } else {
+        parse_named_fields_loop(name, cur2, start_span, NoExpr, Nil)
+    }
+}
+
+/// Parse comma-separated `field: expr` until `}`, producing ExprNamedRecord.
+fn parse_named_fields_loop(name: Path, cur: Cursor, start_span: Span, spread: MaybeExpr, acc: List<FieldInit>) -> Result<(Expr, Cursor), ParseError> {
+    if cursor_check(cur, TokRBrace()) {
+        let cur2 = cursor_advance(cur);
+        let span = span_merge(start_span, cursor_peek_span(cur));
+        Ok((ExprNamedRecord(name, spread, list_reverse(acc), span), cur2))
+    } else if cursor_is_eof(cur) {
+        Err(parse_error_eof("'}'", cursor_peek_span(cur)))
+    } else {
+        match cursor_eat_ident(cur) {
+            NoIdentResult() => {
+                let found = match cursor_peek_kind(cur) {
+                    None() => "end of file",
+                    Some(k) => token_kind_name(k)
+                };
+                Err(parse_error_expected("field name", found, cursor_peek_span(cur)))
+            },
+            SomeIdentResult(field_name, cur2) => {
+                let name_span = cursor_peek_span(cur);
+                let (_, cur3) = cursor_expect(cur2, TokColon())?;
+                let (value, cur4) = parse_expr(cur3)?;
+                let field_span = span_merge(name_span, expr_span(value));
+                let field: FieldInit = {
+                    name: ident_new(field_name, name_span),
+                    value: value,
+                    span: field_span
+                };
+                let new_acc = Cons(field, acc);
+                if cursor_check(cur4, TokComma()) {
+                    let cur5 = cursor_advance(cur4);
+                    if cursor_check(cur5, TokRBrace()) {
+                        let cur6 = cursor_advance(cur5);
+                        let span = span_merge(start_span, cursor_peek_span(cur5));
+                        Ok((ExprNamedRecord(name, spread, list_reverse(new_acc), span), cur6))
+                    } else {
+                        parse_named_fields_loop(name, cur5, start_span, spread, new_acc)
+                    }
+                } else if cursor_check(cur4, TokRBrace()) {
+                    let cur5 = cursor_advance(cur4);
+                    let span = span_merge(start_span, cursor_peek_span(cur4));
+                    Ok((ExprNamedRecord(name, spread, list_reverse(new_acc), span), cur5))
+                } else {
+                    let found = match cursor_peek_kind(cur4) {
+                        None() => "end of file",
+                        Some(k) => token_kind_name(k)
+                    };
+                    Err(parse_error_expected("',' or '}'", found, cursor_peek_span(cur4)))
                 }
             }
         }

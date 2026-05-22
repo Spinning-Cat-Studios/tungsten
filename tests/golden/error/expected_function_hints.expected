@@ -1,0 +1,11 @@
+[E0013] Error: expected function, found `Nat`
+   ╭─[tests/golden/error/expected_function_hints.tg:4:7]
+   │
+ 4 │     x(1)
+   │       ┬  
+   │       ╰── expected function, found `Nat`
+───╯
+  hint: run `tungsten explain error E0013`
+  hint: run `tungsten doctor suggest-tools "type mismatch"`
+
+error: aborting due to 1 error

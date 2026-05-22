@@ -1,0 +1,11 @@
+// CLI module: defines Command sum type with subcommand options.
+// Mirrors driver::cli defining Command/ExplainOpts.
+
+pub type Command =
+    | DoAlpha(String)
+    | DoBeta(BetaOpts)
+    | DoHelp
+
+pub type BetaOpts =
+    | BetaFoo(String)
+    | BetaBar

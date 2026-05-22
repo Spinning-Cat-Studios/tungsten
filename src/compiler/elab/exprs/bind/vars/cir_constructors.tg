@@ -1,0 +1,82 @@
+// src/compiler/elab/exprs/bind/vars/cir_constructors.tg
+// CIR (Codegen IR) constructor helpers.
+
+use elab::ffi::{
+    TypeHandle,
+    tg_type_is_mu
+};
+use elab::env::ConstructorInfo;
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CIRVar, CIRLambda, CIRInl, CIRInr, CIRFold
+};
+use elab::cir::free_vars::free_vars;
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// CIR CONSTRUCTOR HELPERS
+// ===========================================================================
+
+/// Build CIR injection chain for constructor at given index.
+pub fn build_cir_injection(
+    value: CodegenIR,
+    index: Nat,
+    total: Nat,
+    adt_type: CodegenType
+) -> CodegenIR {
+    if total <= 1 {
+        // Single constructor: no injection needed
+        value
+    } else {
+        // Navigate to the target depth in the sum type and inject
+        build_cir_injection_at_depth(value, index, total, adt_type)
+    }
+}
+
+/// Build CIR injection at specific depth in nested sum.
+fn build_cir_injection_at_depth(
+    value: CodegenIR,
+    index: Nat,
+    remaining: Nat,
+    sum_type: CodegenType
+) -> CodegenIR {
+    if remaining <= 1 {
+        // At the bottom, just return value
+        value
+    } else if index == 0 {
+        // First variant: inl
+        CIRInl(value, sum_type)
+    } else {
+        // Later variant: inr followed by recursive injection
+        let inner_inj = build_cir_injection_at_depth(value, index - 1, remaining - 1, sum_type);
+        CIRInr(inner_inj, sum_type)
+    }
+}
+
+/// Build a CIR lambda term for the constructor.
+pub fn build_cir_constructor_lambda(
+    info: ConstructorInfo,
+    total: Nat,
+    adt_type: CodegenType,
+    field_type: CodegenType
+) -> CodegenIR {
+    // Create a lambda that takes the fields and injects
+    let param_name = "x";
+    
+    // Variable referencing the lambda parameter by name
+    let param_var = CIRVar(param_name, field_type);
+    
+    // Build the injection
+    let injected = build_cir_injection(param_var, info.index, total, adt_type);
+    
+    // Fold if the Core type is recursive (we check via FFI)
+    let body = if tg_type_is_mu(info.result_type) {
+        CIRFold(adt_type, injected)
+    } else {
+        injected
+    };
+    
+    // Wrap in lambda
+    let captures = free_vars(body, Cons(param_name, Nil()));
+    CIRLambda(param_name, field_type, body, captures, adt_type)
+}

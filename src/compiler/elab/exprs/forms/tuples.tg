@@ -1,0 +1,157 @@
+// src/compiler/elab/exprs/tuples.tg
+// Tuple elaboration: n-ary tuples encoded as nested pairs.
+
+use lexer::span::Span;
+use parser::ast::Expr;
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_pair, tg_term_unit,
+    tg_type_product, tg_type_unit,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right
+};
+use elab::env::Env;
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error, TermInfo};
+use elab::cir::{CodegenIR, CodegenType, CIRUnit, CIRPair, ct_unit, ct_pair};
+
+use driver::util::list_is_empty;
+
+// Import synth/check from parent module for mutual recursion
+use elab::exprs::{synth, check};
+
+// ===========================================================================
+// TUPLE ELABORATION
+// ===========================================================================
+
+/// Synthesize a tuple expression.
+/// 
+/// Tuples are encoded as nested pairs (right-associative):
+///   (a, b, c) → (a, (b, c))
+///   () → unit
+///   (a,) → a (single-element tuple is just the element)
+pub fn synth_tuple(env: Env, elems: List<Expr>, span: Span) -> ElabExprResult {
+    match elems {
+        Nil() =>
+            let term = tg_term_unit();
+            let ty = tg_type_unit();
+            ElabExprOk(env, term, ty, CIRUnit()),
+        Cons(first, rest) =>
+            if list_is_empty(rest) {
+                synth(env, first)
+            } else {
+                synth_tuple_nested(env, elems, span)
+            }
+    }
+}
+
+/// Build nested pairs for multi-element tuples.
+fn synth_tuple_nested(env: Env, elems: List<Expr>, span: Span) -> ElabExprResult {
+    match elems {
+        Nil() =>
+            let term = tg_term_unit();
+            let ty = tg_type_unit();
+            ElabExprOk(env, term, ty, CIRUnit()),
+        Cons(first, rest) =>
+            synth_tuple_element(env, first, rest, span)
+    }
+}
+
+fn synth_tuple_element(env: Env, first: Expr, rest: List<Expr>, span: Span) -> ElabExprResult {
+    match synth(env, first) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, first_term, first_ty, first_cir) =>
+            if list_is_empty(rest) {
+                ElabExprOk(env2, first_term, first_ty, first_cir)
+            } else {
+                let fi: TermInfo = { term: first_term, ty: first_ty, cir: first_cir };
+                synth_tuple_rest(env2, fi, rest, span)
+            }
+    }
+}
+
+fn synth_tuple_rest(
+    env: Env, first: TermInfo,
+    rest: List<Expr>, span: Span
+) -> ElabExprResult {
+    match synth_tuple_nested(env, rest, span) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, rest_term, rest_ty, rest_cir) =>
+            let pair_term = tg_term_pair(first.term, rest_term);
+            let pair_ty = tg_type_product(first.ty, rest_ty);
+            let pair_cir = CIRPair(first.cir, rest_cir);
+            ElabExprOk(env2, pair_term, pair_ty, pair_cir)
+    }
+}
+
+/// Check a tuple against an expected product type.
+///
+/// Decomposes the expected type and checks each element against
+/// the corresponding product component.
+pub fn check_tuple(
+    env: Env,
+    elems: List<Expr>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match elems {
+        Nil() =>
+            ElabExprOk(env, tg_term_unit(), tg_type_unit(), CIRUnit()),
+        Cons(first, rest) =>
+            if list_is_empty(rest) {
+                check(env, first, expected)
+            } else {
+                check_tuple_nested(env, elems, expected, span)
+            }
+    }
+}
+
+/// Check multi-element tuple against expected product type.
+fn check_tuple_nested(
+    env: Env,
+    elems: List<Expr>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match elems {
+        Nil() =>
+            ElabExprOk(env, tg_term_unit(), tg_type_unit(), CIRUnit()),
+        Cons(first, rest) =>
+            if list_is_empty(rest) {
+                check(env, first, expected)
+            } else {
+                check_tuple_nested_multi(env, first, rest, expected, span)
+            }
+    }
+}
+
+fn check_tuple_nested_multi(
+    env: Env, first: Expr, rest: List<Expr>,
+    expected: TypeHandle, span: Span
+) -> ElabExprResult {
+    if tg_type_is_product(expected) {
+        let left_ty = tg_type_get_product_left(expected);
+        let right_ty = tg_type_get_product_right(expected);
+        match check(env, first, left_ty) {
+            ElabExprErr(e) => ElabExprErr(e),
+            ElabExprOk(env2, first_term, first_ty, first_cir) =>
+                let fi: TermInfo = { term: first_term, ty: first_ty, cir: first_cir };
+                check_tuple_rest(env2, fi, rest, right_ty, span)
+        }
+    } else {
+        synth_tuple_nested(env, Cons(first, rest), span)
+    }
+}
+
+fn check_tuple_rest(
+    env: Env, first: TermInfo,
+    rest: List<Expr>, right_ty: TypeHandle, span: Span
+) -> ElabExprResult {
+    match check_tuple_nested(env, rest, right_ty, span) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, rest_term, rest_ty, rest_cir) =>
+            let pair_term = tg_term_pair(first.term, rest_term);
+            let pair_ty = tg_type_product(first.ty, rest_ty);
+            let pair_cir = CIRPair(first.cir, rest_cir);
+            ElabExprOk(env2, pair_term, pair_ty, pair_cir)
+    }
+}

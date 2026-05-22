@@ -1,0 +1,11 @@
+// Test: pub use re-exported constructors are importable downstream.
+
+pub mod source;
+pub mod reexporter;
+
+use reexporter::{Color, Red, Green, color_name};
+
+fn main() -> Nat {
+    let c: Color = Green;
+    color_name(c)
+}

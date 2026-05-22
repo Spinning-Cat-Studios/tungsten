@@ -1,0 +1,17 @@
+// types module — exports a record type and a sum type.
+// These become stubs in sibling module info before elaboration.
+
+pub type Color =
+    | Red
+    | Green
+    | Blue
+
+pub type Pair = { first: Nat, second: Nat }
+
+pub fn make_pair(a: Nat, b: Nat) -> Pair {
+    { first: a, second: b }
+}
+
+pub fn default_color() -> Color {
+    Red
+}

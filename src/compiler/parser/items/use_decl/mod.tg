@@ -1,0 +1,87 @@
+// src/compiler/parser/items/use_decl/mod.tg
+// Module and use declaration parsing — entry points.
+//
+// Split from use_decl.tg (ADR 10.5.26k §6) into:
+// - mod.tg: public entry points (parse_mod, parse_use_item)
+// - use_trees.tg: use tree parsing and list parsing
+// - use_paths.tg: use path parsing
+
+pub mod use_trees;
+pub mod use_paths;
+
+use lexer::token::{TokSemi};
+use lexer::span::{Span, span_merge};
+use parser::error::{parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_peek_span, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use driver::util::{Result, Ok, Err};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, Visibility};
+use parser::ast::nodes::{Item, ItemMod, ItemUse,
+    UseDecl, UseTree, ModDecl};
+
+// ===========================================================================
+// MODULE DECLARATION PARSING
+// ===========================================================================
+
+/// Parse a module declaration.
+///
+/// Grammar:
+///   Mod = "mod" IDENT ";"
+pub fn parse_mod(cur: Cursor, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    let cur2 = cursor_advance(cur);
+    match cursor_eat_ident(cur2) {
+        NoIdentResult() =>
+            parse_mod_no_ident(cur2),
+        SomeIdentResult(name, cur3) =>
+            parse_mod_semi(vis, start_span, name, cursor_peek_span(cur2), cur3)
+    }
+}
+
+fn parse_mod_no_ident(cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let found = match cursor_peek_kind(cur) {
+        None() => "end of file",
+        Some(k) => token_kind_name(k)
+    };
+    Err(parse_error_expected("module name", found, cursor_peek_span(cur)))
+}
+
+fn parse_mod_semi(vis: Visibility, start_span: Span, name: String, name_span: Span, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (end_tok, cur2) = cursor_expect(cur, TokSemi())?;
+    let mod_decl: ModDecl = {
+        vis: vis,
+        name: ident_new(name, name_span),
+        span: span_merge(start_span, end_tok.span)
+    };
+    let mod_item = ItemMod(mod_decl);
+    Ok((mod_item, cur2))
+}
+
+// ===========================================================================
+// USE DECLARATION PARSING
+// ===========================================================================
+
+/// Parse a use declaration.
+///
+/// Grammar:
+///   Use = "use" UseTree ";"
+pub fn parse_use_item(cur: Cursor, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    // Consume "use" keyword
+    let cur2 = cursor_advance(cur);
+    
+    // Parse use tree
+    let (tree, cur3) = parse_use_tree(cur2)?;
+    parse_use_item_semi(vis, start_span, tree, cur3)
+}
+
+fn parse_use_item_semi(vis: Visibility, start_span: Span, tree: UseTree, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (end_tok, cur2) = cursor_expect(cur, TokSemi())?;
+    let use_decl: UseDecl = {
+        vis: vis,
+        tree: tree,
+        span: span_merge(start_span, end_tok.span)
+    };
+    let use_item = ItemUse(use_decl);
+    Ok((use_item, cur2))
+}

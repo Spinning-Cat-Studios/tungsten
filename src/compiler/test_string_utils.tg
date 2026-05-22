@@ -1,0 +1,146 @@
+// Unit tests for driver/util/strings.tg functions.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_bool, assert_eq_nat, assert_eq_string};
+use driver::util::{
+    string_eq, starts_with, ends_with, string_is_empty,
+    is_numeric, nat_to_string, string_contains
+};
+use parser::option::{Option, Some, None};
+use driver::util::{parse_nat};
+
+// ---------------------------------------------------------------------------
+// string_eq
+// ---------------------------------------------------------------------------
+
+pub fn test_string_eq_same() -> Unit {
+    assert_eq_bool(string_eq("hello", "hello"), true)
+}
+
+pub fn test_string_eq_different() -> Unit {
+    assert_eq_bool(string_eq("hello", "world"), false)
+}
+
+pub fn test_string_eq_empty() -> Unit {
+    assert_eq_bool(string_eq("", ""), true)
+}
+
+pub fn test_string_eq_prefix_only() -> Unit {
+    assert_eq_bool(string_eq("hel", "hello"), false)
+}
+
+// ---------------------------------------------------------------------------
+// starts_with
+// ---------------------------------------------------------------------------
+
+pub fn test_starts_with_match() -> Unit {
+    assert_eq_bool(starts_with("hello world", "hello"), true)
+}
+
+pub fn test_starts_with_no_match() -> Unit {
+    assert_eq_bool(starts_with("hello world", "world"), false)
+}
+
+pub fn test_starts_with_empty_prefix() -> Unit {
+    assert_eq_bool(starts_with("hello", ""), true)
+}
+
+pub fn test_starts_with_longer_prefix() -> Unit {
+    assert_eq_bool(starts_with("hi", "hello"), false)
+}
+
+// ---------------------------------------------------------------------------
+// ends_with
+// ---------------------------------------------------------------------------
+
+pub fn test_ends_with_match() -> Unit {
+    assert_eq_bool(ends_with("hello.tg", ".tg"), true)
+}
+
+pub fn test_ends_with_no_match() -> Unit {
+    assert_eq_bool(ends_with("hello.rs", ".tg"), false)
+}
+
+// ---------------------------------------------------------------------------
+// string_is_empty
+// ---------------------------------------------------------------------------
+
+pub fn test_string_is_empty_true() -> Unit {
+    assert_eq_bool(string_is_empty(""), true)
+}
+
+pub fn test_string_is_empty_false() -> Unit {
+    assert_eq_bool(string_is_empty("x"), false)
+}
+
+// ---------------------------------------------------------------------------
+// string_contains
+// ---------------------------------------------------------------------------
+
+pub fn test_string_contains_found() -> Unit {
+    assert_eq_bool(string_contains("hello world", "world"), true)
+}
+
+pub fn test_string_contains_not_found() -> Unit {
+    assert_eq_bool(string_contains("hello world", "xyz"), false)
+}
+
+pub fn test_string_contains_empty_needle() -> Unit {
+    assert_eq_bool(string_contains("hello", ""), true)
+}
+
+// ---------------------------------------------------------------------------
+// nat_to_string
+// ---------------------------------------------------------------------------
+
+pub fn test_nat_to_string_zero() -> Unit {
+    assert_eq_string(nat_to_string(0), "0")
+}
+
+pub fn test_nat_to_string_single_digit() -> Unit {
+    assert_eq_string(nat_to_string(7), "7")
+}
+
+pub fn test_nat_to_string_multi_digit() -> Unit {
+    assert_eq_string(nat_to_string(42), "42")
+}
+
+// ---------------------------------------------------------------------------
+// parse_nat
+// ---------------------------------------------------------------------------
+
+pub fn test_parse_nat_valid() -> Unit {
+    match parse_nat("123") {
+        Some(n) => assert_eq_nat(n, 123),
+        None() => assert_eq_bool(true, false)
+    }
+}
+
+pub fn test_parse_nat_zero() -> Unit {
+    match parse_nat("0") {
+        Some(n) => assert_eq_nat(n, 0),
+        None() => assert_eq_bool(true, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// is_numeric
+// ---------------------------------------------------------------------------
+
+pub fn test_is_numeric_true() -> Unit {
+    assert_eq_bool(is_numeric("12345"), true)
+}
+
+pub fn test_is_numeric_false() -> Unit {
+    assert_eq_bool(is_numeric("12x45"), false)
+}
+
+pub fn test_is_numeric_empty() -> Unit {
+    assert_eq_bool(is_numeric(""), false)
+}
+
+pub fn main() -> Nat { 0 }

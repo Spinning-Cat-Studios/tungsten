@@ -1,0 +1,8 @@
+// Test: importing the same name twice produces E0007.
+
+pub mod mymod;
+
+use mymod::Foo;
+use mymod::Foo;
+
+fn main() -> Nat { 0 }

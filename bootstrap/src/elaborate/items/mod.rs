@@ -19,6 +19,7 @@ mod elaborate;
 mod export_validation;
 mod extern_fn;
 mod imports;
+mod imports_glob;
 mod type_building;
 
 use crate::ast::Item;
@@ -64,13 +65,7 @@ impl<'a> Elaborator<'a> {
     ///
     /// Returns Some(CoreDef) for value items, None for type definitions.
     pub(crate) fn elaborate_item(&mut self, item: &Item) -> ElabResult<Option<CoreDef>> {
-        // Set current_module based on the item's location
-        // This is used for visibility checking in qualified path resolution
-        if let Some(name) = self.get_item_name(item) {
-            if let Some(module_path) = self.env.get_item_module(&name) {
-                self.current_module = module_path.clone();
-            }
-        }
+        self.setup_item_context(item);
 
         match item {
             Item::Function(func) => Ok(Some(self.elaborate_function(func)?)),
@@ -82,6 +77,20 @@ impl<'a> Elaborator<'a> {
             Item::Mod(_) => Ok(None), // Module declarations handled during parsing
             Item::Use(_) => Ok(None), // Use declarations: Phase 4 will process imports
             Item::Error(_) => Ok(None),
+        }
+    }
+
+    /// Set up tracing and module context for the current item.
+    fn setup_item_context(&mut self, item: &Item) {
+        // Track current definition name for --trace-types (ADR 13.4.26c §5)
+        self.current_def_name = self.get_item_name(item);
+
+        // Set current_module based on the item's location
+        // This is used for visibility checking in qualified path resolution
+        if let Some(name) = self.get_item_name(item) {
+            if let Some(module_path) = self.env.get_item_module(&name) {
+                self.current_module = module_path.clone();
+            }
         }
     }
 

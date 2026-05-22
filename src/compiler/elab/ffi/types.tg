@@ -1,0 +1,152 @@
+// src/compiler/elab/ffi/types.tg
+// FFI type constructors and introspection — all extern "C" declarations.
+//
+// Note: TermHandle and TypeHandle are type aliases for Nat,
+// defined in the parent module (elab::ffi). We use Nat directly
+// here to avoid circular imports.
+
+// ============================================================================
+// Type Constructors (Essential)
+// ============================================================================
+
+// Construct Nat type
+pub extern "C" fn tg_type_nat() -> Nat
+
+// Construct Bool type
+pub extern "C" fn tg_type_bool() -> Nat
+
+// Construct String type
+pub extern "C" fn tg_type_string() -> Nat
+
+// Construct Unit type
+pub extern "C" fn tg_type_unit() -> Nat
+
+// Construct arrow (function) type
+pub extern "C" fn tg_type_arrow(domain: Nat, codomain: Nat) -> Nat
+
+// Construct Void type (empty type)
+pub extern "C" fn tg_type_void() -> Nat
+
+// Construct Prop type
+pub extern "C" fn tg_type_prop() -> Nat
+
+// Construct product type
+pub extern "C" fn tg_type_product(left: Nat, right: Nat) -> Nat
+
+// Construct sum type
+pub extern "C" fn tg_type_sum(left: Nat, right: Nat) -> Nat
+
+// Construct pointer type (for FFI)
+pub extern "C" fn tg_type_ptr(pointee: Nat) -> Nat
+
+// Construct reference type
+pub extern "C" fn tg_type_ref(inner: Nat) -> Nat
+
+// ============================================================================
+// Extended Type Constructors
+// ============================================================================
+
+// Construct type variable
+pub extern "C" fn tg_type_var(name: Nat) -> Nat
+
+// Construct forall type
+pub extern "C" fn tg_type_forall(name: Nat, body: Nat) -> Nat
+
+// Construct recursive type
+pub extern "C" fn tg_type_mu(name: Nat, body: Nat) -> Nat
+
+// Construct equality type
+pub extern "C" fn tg_type_eq(ty: Nat, lhs: Nat, rhs: Nat) -> Nat
+
+// ============================================================================
+// Type Tag (discriminant)
+// ============================================================================
+
+// Return a numeric tag identifying the type variant.
+// 0=Nat, 1=Bool, 2=String, 3=Unit, 4=Void, 5=Prop,
+// 6=Arrow, 7=Product, 8=Sum, 9=TyVar, 10=Forall,
+// 11=Mu, 12=Eq, 13=Ref, 14=Ptr, 15=App, 99=unknown
+pub extern "C" fn tg_type_tag(ty: Nat) -> Nat
+
+// ============================================================================
+// Type Introspection
+// ============================================================================
+
+// Check if a type is a mu-type (recursive type)
+pub extern "C" fn tg_type_is_mu(ty: Nat) -> Bool
+
+// Get the body of a mu-type
+pub extern "C" fn tg_type_get_mu_body(ty: Nat) -> Nat
+
+// Check if a type is a sum type
+pub extern "C" fn tg_type_is_sum(ty: Nat) -> Bool
+
+// Get the left component of a sum type
+pub extern "C" fn tg_type_get_sum_left(ty: Nat) -> Nat
+
+// Get the right component of a sum type
+pub extern "C" fn tg_type_get_sum_right(ty: Nat) -> Nat
+
+// Check if a type is a product type
+pub extern "C" fn tg_type_is_product(ty: Nat) -> Bool
+
+// Get the left component of a product type
+pub extern "C" fn tg_type_get_product_left(ty: Nat) -> Nat
+
+// Get the right component of a product type
+pub extern "C" fn tg_type_get_product_right(ty: Nat) -> Nat
+
+// Check if a type is an arrow (function) type
+pub extern "C" fn tg_type_is_arrow(ty: Nat) -> Bool
+
+// Get the domain of an arrow type
+pub extern "C" fn tg_type_get_arrow_domain(ty: Nat) -> Nat
+
+// Get the codomain of an arrow type
+pub extern "C" fn tg_type_get_arrow_codomain(ty: Nat) -> Nat
+
+// Check if a type is an equality type
+pub extern "C" fn tg_type_is_eq(ty: Nat) -> Bool
+
+// Get the type component of an equality type
+pub extern "C" fn tg_type_get_eq_type(ty: Nat) -> Nat
+
+// Get the LHS term of an equality type
+pub extern "C" fn tg_type_get_eq_lhs(ty: Nat) -> Nat
+
+// Get the RHS term of an equality type
+pub extern "C" fn tg_type_get_eq_rhs(ty: Nat) -> Nat
+
+// Check if a type is a forall type
+pub extern "C" fn tg_type_is_forall(ty: Nat) -> Bool
+
+// Get the body of a forall type
+pub extern "C" fn tg_type_get_forall_body(ty: Nat) -> Nat
+
+// Get the variable name of a forall type (returns C string pointer)
+pub extern "C" fn tg_type_get_forall_var(ty: Nat) -> Nat
+
+// Get the variable name of a mu-type (returns C string pointer)
+pub extern "C" fn tg_type_get_mu_var(ty: Nat) -> Nat
+
+// Substitute a type variable in a type: τ[α := τ']
+pub extern "C" fn tg_type_substitute(ty: Nat, var_name: Nat, replacement: Nat) -> Nat
+
+// ============================================================================
+// Type Name Introspection (for named field access)
+// ============================================================================
+
+// Check if a type is a type variable (named type like record names)
+pub extern "C" fn tg_type_is_tyvar(ty: Nat) -> Bool
+
+// Get the name of a type variable (returns C string pointer, null if not TyVar)
+pub extern "C" fn tg_type_get_tyvar_name(ty: Nat) -> Nat
+
+// Check if a type is a type application (parametric type like List<T>)
+pub extern "C" fn tg_type_is_app(ty: Nat) -> Bool
+
+// Get the name of a type application (returns C string pointer, null if not App)
+pub extern "C" fn tg_type_get_app_name(ty: Nat) -> Nat
+
+// Debug: print type info to stderr
+pub extern "C" fn tg_type_debug(ty: Nat) -> Unit

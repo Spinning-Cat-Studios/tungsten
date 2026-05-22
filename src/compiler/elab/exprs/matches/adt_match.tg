@@ -1,0 +1,288 @@
+// ADT match elaboration.
+//
+// Handles the core ADT match dispatch: determines arm count, reorders arms,
+// and delegates to binary match, catch-all, or multi-arm elaboration.
+
+use parser::ast::{
+    Pattern, PatVar, PatWildcard, PatConstructor, MatchArm, Expr,
+    Ident, Path
+};
+use lexer::span::Span;
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_case, tg_term_unfold,
+    tg_type_is_mu, tg_type_get_mu_body, tg_type_get_mu_var,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_substitute,
+    tg_type_is_product,
+    tg_string_to_cstr
+};
+use elab::cir::{CodegenIR, CIRUnfold, ct_unit, build_cir_case_from_handles};
+use elab::env::{Env, env_push_scope, env_pop_scope};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr};
+use elab::exprs::forms::result::{elab_expr_error, elab_expr_error_coded, add_expected_because};
+use elab::error::ExpMatchBranch;
+use elab::exprs::{check, synth};
+use elab::exprs::matches::patterns::{
+    is_catch_all_pattern, is_newtype_unwrap,
+    bind_pattern_in_scope, get_arm_binding_type
+};
+use elab::exprs::matches::arm_reorder::reorder_arms_by_constructor;
+use elab::exprs::matches::multi_arm::{
+    elab_multi_arm_match, elab_multi_arm_match_checked
+};
+use elab::exprs::matches::desugar::{
+    desugar_nested_arms, DesugarResult, DesugarOk, DesugarErr
+};
+use elab::exprs::matches::{ScrutInfo};
+
+// ===========================================================================
+// INTERNAL RECORD TYPES
+// ===========================================================================
+
+/// Extended scrutinee for ADT match internals (post-unfold).
+pub type AdtMatchScrutInfo = {
+    term: TermHandle,
+    sum_ty: TypeHandle,
+    orig_ty: TypeHandle,
+    cir: CodegenIR
+}
+
+/// Target for check-mode match: expected type + span.
+type MatchCheckTarget = {
+    expected: TypeHandle,
+    span: Span
+}
+
+// ===========================================================================
+// ADT MATCH DISPATCH
+// ===========================================================================
+
+/// Elaborate an ADT match expression in synth mode.
+pub fn elab_adt_match(env: Env, scrut: ScrutInfo, arms: List<MatchArm>, span: Span) -> ElabExprResult {
+    // If μ-type, unfold first
+    let match_scrut: ScrutInfo = if tg_type_is_mu(scrut.ty) {
+        { term: tg_term_unfold(scrut.ty, scrut.term), ty: tg_type_get_mu_body(scrut.ty), cir: CIRUnfold(ct_unit(), scrut.cir) }
+    } else {
+        scrut
+    };
+    
+    let sorted_arms = reorder_arms_by_constructor(env, arms);
+    // Desugar nested constructor patterns into inner match expressions
+    match desugar_nested_arms(sorted_arms, span) {
+        DesugarErr(msg, s) => ElabExprErr(elab_expr_error_coded(msg, s, "E0307")),
+        DesugarOk(desugared_arms) =>
+    
+    match desugared_arms {
+        Nil() =>
+            ElabExprErr(elab_expr_error("empty match arms", span)),
+        Cons(arm1, rest) =>
+            match rest {
+                Nil() =>
+                    if is_catch_all_pattern(arm1.pattern) {
+                        let ca_scrut: ScrutInfo = { term: scrut.term, ty: scrut.ty, cir: match_scrut.cir };
+                        elab_catch_all_arm(env, ca_scrut, arm1, span)
+                    } else if tg_type_is_product(match_scrut.ty) {
+                        let ca_scrut: ScrutInfo = { term: scrut.term, ty: match_scrut.ty, cir: match_scrut.cir };
+                        elab_catch_all_arm(env, ca_scrut, arm1, span)
+                    } else if is_newtype_unwrap(env, arm1, scrut.ty) {
+                        let ca_scrut: ScrutInfo = { term: scrut.term, ty: scrut.ty, cir: match_scrut.cir };
+                        elab_catch_all_arm(env, ca_scrut, arm1, span)
+                    } else {
+                        ElabExprErr(elab_expr_error("non-exhaustive match: single non-catch-all arm", span))
+                    },
+                Cons(arm2, rest2) =>
+                    let ms: AdtMatchScrutInfo = { term: match_scrut.term, sum_ty: match_scrut.ty, orig_ty: scrut.ty, cir: match_scrut.cir };
+                    match rest2 {
+                        Nil() =>
+                            elab_binary_match(env, ms, arm1, arm2, span),
+                        Cons(_, _) =>
+                            elab_multi_arm_match(env, ms, desugared_arms, span)
+                    }
+            }
+    }
+    }
+}
+
+/// Elaborate ADT match with expected type.
+pub fn elab_adt_match_checked(
+    env: Env,
+    scrut: ScrutInfo,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    let match_scrut: ScrutInfo = if tg_type_is_mu(scrut.ty) {
+        { term: tg_term_unfold(scrut.ty, scrut.term), ty: tg_type_get_mu_body(scrut.ty), cir: CIRUnfold(ct_unit(), scrut.cir) }
+    } else {
+        scrut
+    };
+    
+    let sorted_arms = reorder_arms_by_constructor(env, arms);
+    // Desugar nested constructor patterns into inner match expressions
+    match desugar_nested_arms(sorted_arms, span) {
+        DesugarErr(msg, s) => ElabExprErr(elab_expr_error_coded(msg, s, "E0307")),
+        DesugarOk(desugared_arms) =>
+    
+    match desugared_arms {
+        Nil() =>
+            ElabExprErr(elab_expr_error("empty match arms", span)),
+        Cons(arm1, rest) =>
+            match rest {
+                Nil() =>
+                    if is_catch_all_pattern(arm1.pattern) {
+                        let ca_scrut: ScrutInfo = { term: scrut.term, ty: scrut.ty, cir: match_scrut.cir };
+                        elab_catch_all_arm_checked(env, ca_scrut, arm1, expected, span)
+                    } else if tg_type_is_product(match_scrut.ty) {
+                        let ca_scrut: ScrutInfo = { term: scrut.term, ty: match_scrut.ty, cir: match_scrut.cir };
+                        elab_catch_all_arm_checked(env, ca_scrut, arm1, expected, span)
+                    } else if is_newtype_unwrap(env, arm1, scrut.ty) {
+                        let ca_scrut: ScrutInfo = { term: scrut.term, ty: scrut.ty, cir: match_scrut.cir };
+                        elab_catch_all_arm_checked(env, ca_scrut, arm1, expected, span)
+                    } else {
+                        ElabExprErr(elab_expr_error("non-exhaustive match", span))
+                    },
+                Cons(arm2, rest2) =>
+                    let ms: AdtMatchScrutInfo = { term: match_scrut.term, sum_ty: match_scrut.ty, orig_ty: scrut.ty, cir: match_scrut.cir };
+                    match rest2 {
+                        Nil() =>
+                            let target: MatchCheckTarget = { expected: expected, span: span };
+                            elab_binary_match_checked(env, ms, arm1, arm2, target),
+                        Cons(_, _) =>
+                            elab_multi_arm_match_checked(env, ms, desugared_arms, expected, span)
+                    }
+            }
+    }
+    }
+}
+
+// ===========================================================================
+// BINARY MATCH (EXACTLY 2 ARMS)
+// ===========================================================================
+
+/// Elaborate a binary sum match (exactly 2 arms).
+fn elab_binary_match(
+    env: Env,
+    ms: AdtMatchScrutInfo,
+    arm1: MatchArm,
+    arm2: MatchArm,
+    span: Span
+) -> ElabExprResult {
+    let left_ty = tg_type_get_sum_left(ms.sum_ty);
+    let right_ty = tg_type_get_sum_right(ms.sum_ty);
+    
+    let (left_ty, right_ty) = if tg_type_is_mu(ms.orig_ty) {
+        let mu_var = tg_type_get_mu_var(ms.orig_ty);
+        (tg_type_substitute(left_ty, mu_var, ms.orig_ty),
+         tg_type_substitute(right_ty, mu_var, ms.orig_ty))
+    } else {
+        (left_ty, right_ty)
+    };
+    
+    let arm1_bind_ty = get_arm_binding_type(env, arm1, left_ty, ms.sum_ty, ms.orig_ty);
+    let arm2_bind_ty = get_arm_binding_type(env, arm2, right_ty, ms.sum_ty, ms.orig_ty);
+    
+    let (_, var1) = bind_pattern_in_scope(env, arm1.pattern, arm1_bind_ty);
+    let (_, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+    let arm1_span = arm1.span;
+    
+    let env1 = env_push_scope(env);
+    let (env1, _) = bind_pattern_in_scope(env1, arm1.pattern, arm1_bind_ty);
+    match synth(env1, arm1.body) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body1, result_ty, body1_cir) =>
+            let env3 = env_push_scope(env_pop_scope(env2));
+            let (env3, _) = bind_pattern_in_scope(env3, arm2.pattern, arm2_bind_ty);
+            match check(env3, arm2.body, result_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(arm1_span))),
+                ElabExprOk(env4, body2, _, body2_cir) =>
+                    let term = tg_term_case(
+                        ms.term,
+                        tg_string_to_cstr(var1), body1,
+                        tg_string_to_cstr(var2), body2
+                    );
+                    let cir = build_cir_case_from_handles(ms.cir, ms.sum_ty, var1, body1_cir, var2, body2_cir, result_ty);
+                    ElabExprOk(env_pop_scope(env4), term, result_ty, cir)
+            }
+    }
+}
+
+/// Elaborate binary match with expected type.
+fn elab_binary_match_checked(
+    env: Env,
+    ms: AdtMatchScrutInfo,
+    arm1: MatchArm,
+    arm2: MatchArm,
+    target: MatchCheckTarget
+) -> ElabExprResult {
+    let left_ty = tg_type_get_sum_left(ms.sum_ty);
+    let right_ty = tg_type_get_sum_right(ms.sum_ty);
+    
+    let (left_ty, right_ty) = if tg_type_is_mu(ms.orig_ty) {
+        let mu_var = tg_type_get_mu_var(ms.orig_ty);
+        (tg_type_substitute(left_ty, mu_var, ms.orig_ty),
+         tg_type_substitute(right_ty, mu_var, ms.orig_ty))
+    } else {
+        (left_ty, right_ty)
+    };
+    
+    let arm1_bind_ty = get_arm_binding_type(env, arm1, left_ty, ms.sum_ty, ms.orig_ty);
+    let arm2_bind_ty = get_arm_binding_type(env, arm2, right_ty, ms.sum_ty, ms.orig_ty);
+    
+    let (_, var1) = bind_pattern_in_scope(env, arm1.pattern, arm1_bind_ty);
+    let (_, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+    let arm1_span = arm1.span;
+    
+    let env1 = env_push_scope(env);
+    let (env1, _) = bind_pattern_in_scope(env1, arm1.pattern, arm1_bind_ty);
+    match check(env1, arm1.body, target.expected) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body1, _, body1_cir) =>
+            let env3 = env_push_scope(env_pop_scope(env2));
+            let (env3, _) = bind_pattern_in_scope(env3, arm2.pattern, arm2_bind_ty);
+            match check(env3, arm2.body, target.expected) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(arm1_span))),
+                ElabExprOk(env4, body2, _, body2_cir) =>
+                    let term = tg_term_case(
+                        ms.term,
+                        tg_string_to_cstr(var1), body1,
+                        tg_string_to_cstr(var2), body2
+                    );
+                    let cir = build_cir_case_from_handles(ms.cir, ms.sum_ty, var1, body1_cir, var2, body2_cir, target.expected);
+                    ElabExprOk(env_pop_scope(env4), term, target.expected, cir)
+            }
+    }
+}
+
+// ===========================================================================
+// CATCH-ALL ARM
+// ===========================================================================
+
+/// Elaborate a catch-all arm (single arm with variable/wildcard pattern).
+fn elab_catch_all_arm(env: Env, scrut: ScrutInfo, arm: MatchArm, span: Span) -> ElabExprResult {
+    let env1 = env_push_scope(env);
+    let (env1, _) = bind_pattern_in_scope(env1, arm.pattern, scrut.ty);
+    match synth(env1, arm.body) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body, result_ty, body_cir) =>
+            ElabExprOk(env_pop_scope(env2), body, result_ty, body_cir)
+    }
+}
+
+/// Elaborate catch-all arm with expected type.
+fn elab_catch_all_arm_checked(
+    env: Env,
+    scrut: ScrutInfo,
+    arm: MatchArm,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    let env1 = env_push_scope(env);
+    let (env1, _) = bind_pattern_in_scope(env1, arm.pattern, scrut.ty);
+    match check(env1, arm.body, expected) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body, _, body_cir) =>
+            ElabExprOk(env_pop_scope(env2), body, expected, body_cir)
+    }
+}

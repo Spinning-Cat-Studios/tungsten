@@ -1,0 +1,132 @@
+// src/compiler/driver/modules/build/reexports.tg
+// Pass 2 of build_module_info: process `pub use` re-exports.
+//
+// When a module has `pub use other::Item`, this pass copies the referenced
+// items into the re-exporting module's ModuleItemNames so that import
+// resolution (Phase 1b) can find them.
+
+use driver::ffi::{List, Nil, Cons};
+use parser::ast::common::{Visibility, VisPublic};
+use parser::ast::nodes::{
+    Item, ItemUse,
+    UseDecl, UseTree,
+    UseTreeSimple, UseTreeAlias, UseTreeRename,
+    UseTreeNested, UseTreePath, UseTreeGroup, UseTreeGlob,
+    source_file_items
+};
+use driver::modules::path::{ModulePath, module_path_child};
+use driver::modules::info::{ModuleInfo};
+use driver::modules::tree::parsed::{ParsedModule};
+use driver::modules::build::get_module_name;
+use driver::modules::build::reexport_resolve::{
+    reexport_simple, reexport_glob, extend_prefix_segs
+};
+
+// ===========================================================================
+// PUB USE RE-EXPORT PROCESSING
+// ===========================================================================
+
+/// Walk module tree and process pub use re-exports.
+pub fn process_reexports(
+    module: ParsedModule,
+    current_path: ModulePath,
+    info: ModuleInfo
+) -> ModuleInfo {
+    let items = source_file_items(module.source_file);
+    let info2 = process_reexport_items(items, current_path, info);
+    process_reexport_submodules(module.submodules, current_path, info2)
+}
+
+fn process_reexport_submodules(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match submodules {
+        Nil() => info,
+        Cons(sub, rest) =>
+            let name = get_module_name(sub);
+            let child_path = module_path_child(parent_path, name);
+            let info2 = process_reexports(sub, child_path, info);
+            process_reexport_submodules(rest, parent_path, info2)
+    }
+}
+
+fn process_reexport_items(
+    items: List<Item>,
+    module_path: ModulePath,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match items {
+        Nil() => info,
+        Cons(item, rest) =>
+            let info2 = process_reexport_item(item, module_path, info);
+            process_reexport_items(rest, module_path, info2)
+    }
+}
+
+fn process_reexport_item(
+    item: Item,
+    module_path: ModulePath,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match item {
+        ItemUse(decl) =>
+            process_reexport_use(decl, module_path, info),
+        _ => info
+    }
+}
+
+fn process_reexport_use(
+    decl: UseDecl,
+    module_path: ModulePath,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match decl.vis {
+        VisPublic() =>
+            process_reexport_tree(decl.tree, module_path, Nil, info),
+        _ => info
+    }
+}
+
+/// Process a use tree for re-export, extracting item names.
+fn process_reexport_tree(
+    tree: UseTree,
+    target_module: ModulePath,
+    prefix_segs: List<String>,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match tree {
+        UseTreeSimple(path) =>
+            reexport_simple(path, target_module, prefix_segs, info),
+        UseTreePath(path) =>
+            reexport_simple(path, target_module, prefix_segs, info),
+        UseTreeAlias(path, _alias) =>
+            reexport_simple(path, target_module, prefix_segs, info),
+        UseTreeRename(path, _alias, _span) =>
+            reexport_simple(path, target_module, prefix_segs, info),
+        UseTreeGroup(path, trees, _span) =>
+            let new_prefix = extend_prefix_segs(prefix_segs, path);
+            process_reexport_tree_list(trees, target_module, new_prefix, info),
+        UseTreeNested(path, trees, _span) =>
+            let new_prefix = extend_prefix_segs(prefix_segs, path);
+            process_reexport_tree_list(trees, target_module, new_prefix, info),
+        UseTreeGlob(path, _span) =>
+            reexport_glob(path, target_module, prefix_segs, info)
+    }
+}
+
+fn process_reexport_tree_list(
+    trees: List<UseTree>,
+    target_module: ModulePath,
+    prefix_segs: List<String>,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match trees {
+        Nil() => info,
+        Cons(tree, rest) =>
+            let info2 = process_reexport_tree(tree, target_module, prefix_segs, info);
+            process_reexport_tree_list(rest, target_module, prefix_segs, info2)
+    }
+}
+

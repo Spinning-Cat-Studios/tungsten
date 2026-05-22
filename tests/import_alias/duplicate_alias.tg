@@ -1,0 +1,10 @@
+// AC10: Two imports aliased to the same name should produce E0007
+mod math;
+mod util;
+
+use math::add as foo;
+use util::add as foo;
+
+fn main() -> Nat {
+    foo(1, 2)
+}

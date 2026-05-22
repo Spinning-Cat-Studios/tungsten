@@ -1,0 +1,76 @@
+// src/compiler/elab/adt/projection.tg
+// Field projection and pattern matching support.
+
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::TypeHandle;
+use elab::adt::{AdtVariant, MaybeNat, NoNat, SomeNat};
+use elab::adt::injection::{InjectionPath, InjectionPathNil, compute_injection_path, find_constructor_index, get_variant_at_index};
+use driver::util::list_len;
+
+// ===========================================================================
+// PROJECTION HELPERS
+// ===========================================================================
+
+/// The projection path for a field in a product type.
+pub type ProjectionPath =
+    | ProjectionPathNil
+    | ProjectionPathFst(ProjectionPath)   // fst
+    | ProjectionPathSnd(ProjectionPath)   // snd
+
+/// Compute the projection path for field at given index.
+pub fn compute_projection_path(index: Nat, total: Nat) -> ProjectionPath {
+    if total <= 1 {
+        ProjectionPathNil
+    } else if index == 0 {
+        ProjectionPathFst(ProjectionPathNil)
+    } else if index == total - 1 {
+        compute_all_snd(index)
+    } else {
+        ProjectionPathSnd(compute_projection_path(index - 1, total - 1))
+    }
+}
+
+/// Helper: generate a path of all snd projections.
+fn compute_all_snd(count: Nat) -> ProjectionPath {
+    if count == 0 {
+        ProjectionPathNil
+    } else {
+        ProjectionPathSnd(compute_all_snd(count - 1))
+    }
+}
+
+// ===========================================================================
+// PATTERN MATCHING SUPPORT
+// ===========================================================================
+
+/// Information needed to match on a constructor.
+pub type MatchInfo = {
+    injection_path: InjectionPath,
+    projection_path: ProjectionPath,
+    field_count: Nat
+}
+
+/// Maybe MatchInfo type.
+pub type MaybeMatchInfo =
+    | NoMatchInfo
+    | SomeMatchInfo(MatchInfo)
+
+/// Get match info for a constructor.
+pub fn get_match_info(
+    variants: List<AdtVariant>,
+    constructor_name: String
+) -> MaybeMatchInfo {
+    match find_constructor_index(variants, constructor_name) {
+        NoNat() => NoMatchInfo,
+        SomeNat(index) =>
+            let total = list_len(variants);
+            let injection = compute_injection_path(index, total);
+            let fields = get_variant_at_index(variants, index);
+            let field_count = list_len(fields);
+            SomeMatchInfo({
+                injection_path: injection,
+                projection_path: ProjectionPathNil,
+                field_count: field_count
+            } : MatchInfo)
+    }
+}

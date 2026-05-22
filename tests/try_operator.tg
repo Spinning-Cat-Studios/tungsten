@@ -1,0 +1,111 @@
+// tests/try_operator.tg
+// Tests for the `?` (try) operator — ADR 13.5.26e
+
+type Result<T, E> =
+    | Err(E)
+    | Ok(T)
+
+type Option<T> =
+    | None
+    | Some(T)
+
+// ---- Result tests ----
+
+fn fallible_ok() -> Result<Nat, String> {
+    Ok(42)
+}
+
+fn fallible_err() -> Result<Nat, String> {
+    Err("oops")
+}
+
+// Basic: ? on Ok unwraps the value
+fn try_result_ok_inner() -> Result<Nat, String> {
+    let x = fallible_ok()?;
+    Ok(x)
+}
+
+// Basic: ? on Err propagates the error
+fn try_result_err_inner() -> Result<Nat, String> {
+    let x = fallible_err()?;
+    Ok(x)
+}
+
+// ---- Option tests ----
+
+fn maybe_some() -> Option<Nat> {
+    Some(42)
+}
+
+fn maybe_none() -> Option<Nat> {
+    None
+}
+
+// ? on Some unwraps
+fn try_option_some_inner() -> Option<Nat> {
+    let x = maybe_some()?;
+    Some(x)
+}
+
+// ? on None propagates
+fn try_option_none_inner() -> Option<Nat> {
+    let x = maybe_none()?;
+    Some(x)
+}
+
+// ---- Type checking tests ----
+
+// ? extracts the right type
+fn test_try_type_inference() -> Result<Nat, String> {
+    let x = fallible_ok()?;
+    expect_type(x, "Nat");
+    Ok(x)
+}
+
+// ---- Error tests (AC #5, #6) ----
+
+// AC #5: ? on non-Result/Option type produces E0040
+fn test_try_on_non_try_type() -> Unit {
+    expect_error(42?, "E0040");
+    ()
+}
+
+// AC #6: ? with incompatible return type produces E0041
+fn test_try_return_mismatch() -> Nat {
+    expect_error(fallible_ok()?, "E0041");
+    0
+}
+
+// ---- Chain tests (AC #7) ----
+
+fn step1() -> Result<Nat, String> {
+    Ok(10)
+}
+
+fn step2(x: Nat) -> Result<Nat, String> {
+    Ok(x + 20)
+}
+
+fn step3(x: Nat) -> Result<Nat, String> {
+    Ok(x + 30)
+}
+
+// Multiple sequential ? operations
+fn test_try_chain() -> Result<Nat, String> {
+    let a = step1()?;
+    let b = step2(a)?;
+    let c = step3(b)?;
+    expect_type(c, "Nat");
+    Ok(c)
+}
+
+// ---- Closure tests (AC #8) ----
+
+// ? inside a closure returns from the closure, not the enclosing function
+fn test_try_in_closure() -> Result<Nat, String> {
+    let f: Result<Nat, String> -> Result<Nat, String> = fn (r: Result<Nat, String>) => {
+        let v = r?;
+        Ok(v + 1)
+    };
+    f(Ok(10))
+}

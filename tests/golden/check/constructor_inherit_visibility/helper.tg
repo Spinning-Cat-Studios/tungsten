@@ -1,0 +1,7 @@
+// Pub type with mixed constructor visibility.
+// All constructors inherit pub since none are annotated.
+
+pub type Token =
+    | Ident
+    | Number
+    | InternalMarker

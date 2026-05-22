@@ -1,0 +1,11 @@
+// Regression test: two sibling modules each define a local 'helper'
+// function. Body elaboration in each module uses its own 'helper'
+// without corruption from the other sibling's definition.
+// See ADR 6.5.26e §6, acceptance criterion "same-name sibling isolation".
+
+pub mod alpha;
+pub mod beta;
+
+fn main() -> Nat {
+    alpha::run() + beta::run()
+}

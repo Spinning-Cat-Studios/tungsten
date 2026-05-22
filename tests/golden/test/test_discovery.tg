@@ -1,0 +1,13 @@
+fn test_nat_type() -> Unit {
+    expect_type(42, "Nat");
+    ()
+}
+
+fn test_bool_type() -> Unit {
+    expect_type(true, "Bool");
+    ()
+}
+
+fn helper() -> Nat {
+    42
+}

@@ -1,0 +1,91 @@
+// src/compiler/driver/modules/build/flatten.tg
+// Flatten a module tree into a combined item list.
+//
+// During flattening, relative use-declaration paths are resolved to
+// absolute paths so the elab layer (which processes a flat item list
+// without module context) can resolve all imports.
+
+use driver::ffi::{List, Nil, Cons};
+use parser::ast::nodes::{
+    SourceFile, Item, ItemMod,
+    source_file_items, source_file_span, source_file_new
+};
+use driver::modules::tree::parsed::{ParsedModule};
+use driver::modules::path::{ModulePath, module_path_root, module_path_child};
+use driver::modules::info::{ModuleInfo};
+use driver::modules::build::get_module_name;
+use driver::modules::build::resolve::resolve_use_paths;
+
+// ===========================================================================
+// FLATTENING
+// ===========================================================================
+
+/// Flatten a module tree into a combined list of items.
+/// Submodules are processed first so their definitions are available to the parent.
+/// Mod declarations (`mod foo;`) are excluded from the result.
+/// Relative use-declaration paths are resolved to absolute.
+pub fn flatten_module_items(
+    module: ParsedModule,
+    current_path: ModulePath,
+    info: ModuleInfo
+) -> List<Item> {
+    let submodule_items = flatten_submodules(module.submodules, current_path, info);
+    let this_items = filter_mod_decls(source_file_items(module.source_file));
+    let resolved_items = resolve_use_paths(this_items, current_path, info);
+    list_append_items(submodule_items, resolved_items)
+}
+
+/// Flatten items from a list of submodules.
+fn flatten_submodules(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath,
+    info: ModuleInfo
+) -> List<Item> {
+    match submodules {
+        Nil() => Nil,
+        Cons(sub, rest) =>
+            let name = get_module_name(sub);
+            let child_path = module_path_child(parent_path, name);
+            let sub_items = flatten_module_items(sub, child_path, info);
+            let rest_items = flatten_submodules(rest, parent_path, info);
+            list_append_items(sub_items, rest_items)
+    }
+}
+
+/// Filter out mod declarations from the flattened item list.
+/// Use declarations are kept so Phase 1b import resolution can fire.
+pub fn filter_mod_decls(items: List<Item>) -> List<Item> {
+    match items {
+        Nil() => Nil,
+        Cons(item, rest) =>
+            if is_mod_item(item) {
+                filter_mod_decls(rest)
+            } else {
+                Cons(item, filter_mod_decls(rest))
+            }
+    }
+}
+
+fn is_mod_item(item: Item) -> Bool {
+    match item {
+        ItemMod(_) => true,
+        _ => false
+    }
+}
+
+/// Append two item lists.
+fn list_append_items(a: List<Item>, b: List<Item>) -> List<Item> {
+    match a {
+        Nil() => b,
+        Cons(item, rest) => Cons(item, list_append_items(rest, b))
+    }
+}
+
+/// Build a combined SourceFile from flattened items.
+/// Resolves relative use-declaration paths to absolute using ModuleInfo.
+pub fn build_combined_source_file(module: ParsedModule, info: ModuleInfo) -> SourceFile {
+    let root = module_path_root();
+    let items = flatten_module_items(module, root, info);
+    let original_span = source_file_span(module.source_file);
+    source_file_new(items, original_span)
+}

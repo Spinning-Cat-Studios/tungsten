@@ -1,0 +1,10 @@
+// src/compiler/codegen/ir_closures/mod.tg
+// Closure codegen — lambda, fix, and application emission.
+
+pub mod lambda;
+pub mod fix;
+pub mod application;
+
+pub use codegen::ir_closures::lambda::*;
+pub use codegen::ir_closures::fix::*;
+pub use codegen::ir_closures::application::*;

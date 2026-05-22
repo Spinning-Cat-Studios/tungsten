@@ -1,0 +1,36 @@
+// Tests for record spread syntax: { ...expr, field: value }
+// AC2 type-level tests — verified via `tungsten test --check-only` (cost 3).
+// Runtime tests (AC3/AC6b) are in tests/record_spread_runtime.tg.
+
+type Point = { x: Nat, y: Nat }
+type Point3D = { x: Nat, y: Nat, z: Nat }
+
+fn test_anonymous_spread_type() -> Unit {
+    let p: Point = { x: 1, y: 2 };
+    let q: Point = { ...p, x: 10 };
+    expect_type(q, "Point")
+}
+
+fn test_named_spread_type() -> Unit {
+    let p = Point { x: 3, y: 4 };
+    let q = Point { ...p, x: 30 };
+    expect_type(q, "Point")
+}
+
+fn test_named_spread_no_overrides_type() -> Unit {
+    let p = Point { x: 5, y: 6 };
+    let q = Point { ...p };
+    expect_type(q, "Point")
+}
+
+fn test_anonymous_spread_no_overrides_type() -> Unit {
+    let p: Point = { x: 1, y: 2 };
+    let q: Point = { ...p };
+    expect_type(q, "Point")
+}
+
+fn test_named_spread_three_fields_type() -> Unit {
+    let p = Point3D { x: 1, y: 2, z: 3 };
+    let q = Point3D { ...p, z: 30 };
+    expect_type(q, "Point3D")
+}

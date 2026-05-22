@@ -1,0 +1,58 @@
+// tests/try_tuple_let.tg
+// P0 prerequisite for ADR 15.5.26c: verify tuple-let + ? composition.
+
+type Result<T, E> =
+    | Ok(T)
+    | Err(E)
+
+// --- 2-tuple ---
+
+fn pair_ok() -> Result<(Nat, String), String> {
+    Ok((42, "hello"))
+}
+
+fn pair_err() -> Result<(Nat, String), String> {
+    Err("boom")
+}
+
+fn test_tuple_let_try_ok() -> Result<(Nat, String), String> {
+    let (a, b) = pair_ok()?;
+    expect_type(a, "Nat");
+    expect_type(b, "String");
+    Ok((a, b))
+}
+
+fn test_tuple_let_try_err() -> Result<(Nat, String), String> {
+    let (a, b) = pair_err()?;
+    Ok((a, b))
+}
+
+// --- Cross-type ? (different success types, same error type) ---
+
+fn nat_result() -> Result<Nat, String> {
+    Ok(42)
+}
+
+fn test_cross_type_try() -> Result<String, String> {
+    let x = nat_result()?;
+    Ok("got it")
+}
+
+// Cross-type with tuple destructuring (the parser migration pattern)
+fn test_cross_type_tuple_try() -> Result<Nat, String> {
+    let (a, b) = pair_ok()?;
+    Ok(a)
+}
+
+
+fn triple_ok() -> Result<(Nat, String, Bool), String> {
+    Ok((1, "x", true))
+}
+
+fn test_triple_let_try() -> Result<(Nat, String, Bool), String> {
+    let (a, b, c) = triple_ok()?;
+    expect_type(a, "Nat");
+    expect_type(b, "String");
+    expect_type(c, "Bool");
+    Ok((a, b, c))
+}

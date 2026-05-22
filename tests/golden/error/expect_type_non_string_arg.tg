@@ -1,0 +1,8 @@
+// Golden test: expect_type with non-string second argument should error.
+
+fn test_non_string_arg() -> Unit {
+    expect_type(42, 1);
+    ()
+}
+
+pub fn main() -> Nat { 0 }

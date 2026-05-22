@@ -1,0 +1,5 @@
+// Helper module: defines a function that returns Bool
+
+pub fn get_value() -> Bool {
+    true
+}

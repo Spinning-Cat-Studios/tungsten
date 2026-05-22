@@ -1,0 +1,89 @@
+// tests/try_block.tg
+// Tests for `try { ... }` block expressions — ADR 15.5.26d
+//
+// Run with: tungsten test tests/try_block.tg
+// Or check-only: tungsten check tests/try_block.tg
+
+type Result<T, E> =
+    | Err(E)
+    | Ok(T)
+
+// ---- Basic try block ----
+
+fn test_try_block_basic() -> Result<Nat, String> {
+    try { 42 }
+}
+
+// ---- try block with ? ----
+
+fn fallible_ok() -> Result<Nat, String> {
+    Ok(10)
+}
+
+fn fallible_err() -> Result<Nat, String> {
+    Err("oops")
+}
+
+fn test_try_block_question_mark() -> Result<Nat, String> {
+    try {
+        let x = fallible_ok()?;
+        x + 1
+    }
+}
+
+// ---- try block in let binding ----
+
+fn test_try_block_let_binding() -> Nat {
+    let result: Result<Nat, String> = try { 42 };
+    match result {
+        Ok(v) => v,
+        Err(_) => 0
+    }
+}
+
+// ---- Type assertions (cost 3) ----
+
+fn test_try_block_type() -> Unit {
+    let r: Result<Nat, String> = try { 42 };
+    expect_type(r, "(String + Nat)");
+    ()
+}
+
+// ---- Error assertions ----
+
+// try block in infer mode should require annotation
+fn test_try_block_infer_error() -> Unit {
+    expect_error(try { 42 }, "E0011");
+    ()
+}
+
+// return inside try block should be rejected
+fn test_try_block_return_rejected() -> Unit {
+    expect_error(
+        {
+            let r: Result<Nat, String> = try { return Ok(42) };
+            r
+        },
+        "E0044"
+    );
+    ()
+}
+
+// ---- Nested try block ----
+
+fn test_try_block_nested() -> Result<Result<Nat, String>, String> {
+    try {
+        let inner: Result<Nat, String> = try { 42 };
+        inner
+    }
+}
+
+// ---- ? exits try boundary, not enclosing function ----
+
+fn test_try_block_question_mark_boundary() -> Nat {
+    let result: Result<Nat, String> = try { fallible_err()? };
+    match result {
+        Ok(v) => v,
+        Err(_) => 99
+    }
+}

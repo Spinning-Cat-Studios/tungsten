@@ -1,0 +1,8 @@
+// Golden test: return inside try block is rejected (ADR 15.5.26d)
+type Result<T, E> =
+    | Err(E)
+    | Ok(T)
+
+fn main() -> Result<Nat, String> {
+    try { return Ok(42) }
+}

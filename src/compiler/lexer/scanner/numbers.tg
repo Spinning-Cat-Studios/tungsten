@@ -1,0 +1,184 @@
+// Number literal scanning — decimal, hexadecimal, octal, and binary.
+
+use driver::ffi::string_char_at_internal;
+use lexer::span::span_new;
+use lexer::token::{Token, TokenKind, TokIntLit, TokError, token_new};
+use lexer::error::err_invalid_number;
+use lexer::scanner::chars::{
+    char_0, char_9, char_A, char_F, char_a, char_f,
+    char_x, char_X, char_o, char_O, char_b, char_B,
+    char_underscore,
+    scanner_is_digit, is_hex_digit, is_octal_digit, is_binary_digit
+};
+use lexer::scanner::state::{
+    LexerState, ScanResult,
+    lex_pos, lex_source, lex_file, lex_at_end, lex_peek, lex_peek_next,
+    lex_advance, lex_advance_n, lex_add_error, lex_slice, lex_span
+};
+
+pub fn scan_number(lex: LexerState) -> ScanResult {
+    let start = lex_pos(lex);
+    if lex_peek(lex) == char_0() {
+        let prefix = lex_peek_next(lex);
+        if prefix == char_x() || prefix == char_X() {
+            scan_hex_number(lex, start)
+        } else if prefix == char_o() || prefix == char_O() {
+            scan_octal_number(lex, start)
+        } else if prefix == char_b() || prefix == char_B() {
+            scan_binary_number(lex, start)
+        } else {
+            scan_decimal_number(lex, start)
+        }
+    } else {
+        scan_decimal_number(lex, start)
+    }
+}
+
+fn scan_decimal_number(lex: LexerState, start: Nat) -> ScanResult {
+    let lex2 = scan_digits(lex);
+    let text = lex_slice(lex2, start, lex_pos(lex2) - start);
+    let value = scanner_parse_nat(text);
+    let span = lex_span(lex2, start);
+    { token: token_new(TokIntLit(value), span), state: lex2 }
+}
+
+fn scan_hex_number(lex: LexerState, start: Nat) -> ScanResult {
+    let lex2 = lex_advance_n(lex, 2);
+    if lex_at_end(lex2) || !is_hex_digit(lex_peek(lex2)) {
+        let span = lex_span(lex2, start);
+        let text = lex_slice(lex2, start, lex_pos(lex2) - start);
+        let lex3 = lex_add_error(lex2, err_invalid_number(text, start, lex_file(lex)));
+        { token: token_new(TokError("invalid hex number"), span), state: lex3 }
+    } else {
+        let lex3 = scan_hex_digits(lex2);
+        let text = lex_slice(lex3, start + 2, lex_pos(lex3) - start - 2);
+        let value = parse_hex(text);
+        let span = lex_span(lex3, start);
+        { token: token_new(TokIntLit(value), span), state: lex3 }
+    }
+}
+
+fn scan_hex_digits(lex: LexerState) -> LexerState {
+    if lex_at_end(lex) { lex }
+    else if is_hex_digit(lex_peek(lex)) { scan_hex_digits(lex_advance(lex)) }
+    else if lex_peek(lex) == char_underscore() { scan_hex_digits(lex_advance(lex)) }
+    else { lex }
+}
+
+fn parse_hex(s: String) -> Nat {
+    parse_hex_acc(s, 0, 0)
+}
+
+fn parse_hex_acc(s: String, idx: Nat, acc: Nat) -> Nat {
+    if idx >= string_len(s) { acc }
+    else {
+        let ch = string_char_at_internal(s, idx);
+        if ch == char_underscore() { parse_hex_acc(s, idx + 1, acc) }
+        else {
+            let digit = hex_digit_value(ch);
+            parse_hex_acc(s, idx + 1, acc * 16 + digit)
+        }
+    }
+}
+
+fn hex_digit_value(ch: Nat) -> Nat {
+    if ch >= char_0() && ch <= char_9() { ch - char_0() }
+    else if ch >= char_A() && ch <= char_F() { ch - char_A() + 10 }
+    else { ch - char_a() + 10 }
+}
+
+fn scan_octal_number(lex: LexerState, start: Nat) -> ScanResult {
+    let lex2 = lex_advance_n(lex, 2);
+    if lex_at_end(lex2) || !is_octal_digit(lex_peek(lex2)) {
+        let span = lex_span(lex2, start);
+        let text = lex_slice(lex2, start, lex_pos(lex2) - start);
+        let lex3 = lex_add_error(lex2, err_invalid_number(text, start, lex_file(lex)));
+        { token: token_new(TokError("invalid octal number"), span), state: lex3 }
+    } else {
+        let lex3 = scan_octal_digits(lex2);
+        let text = lex_slice(lex3, start + 2, lex_pos(lex3) - start - 2);
+        let value = parse_octal(text);
+        let span = lex_span(lex3, start);
+        { token: token_new(TokIntLit(value), span), state: lex3 }
+    }
+}
+
+fn scan_octal_digits(lex: LexerState) -> LexerState {
+    if lex_at_end(lex) { lex }
+    else if is_octal_digit(lex_peek(lex)) { scan_octal_digits(lex_advance(lex)) }
+    else if lex_peek(lex) == char_underscore() { scan_octal_digits(lex_advance(lex)) }
+    else { lex }
+}
+
+fn parse_octal(s: String) -> Nat {
+    parse_octal_acc(s, 0, 0)
+}
+
+fn parse_octal_acc(s: String, idx: Nat, acc: Nat) -> Nat {
+    if idx >= string_len(s) { acc }
+    else {
+        let ch = string_char_at_internal(s, idx);
+        if ch == char_underscore() { parse_octal_acc(s, idx + 1, acc) }
+        else {
+            let digit = ch - char_0();
+            parse_octal_acc(s, idx + 1, acc * 8 + digit)
+        }
+    }
+}
+
+fn scan_binary_number(lex: LexerState, start: Nat) -> ScanResult {
+    let lex2 = lex_advance_n(lex, 2);
+    if lex_at_end(lex2) || !is_binary_digit(lex_peek(lex2)) {
+        let span = lex_span(lex2, start);
+        let text = lex_slice(lex2, start, lex_pos(lex2) - start);
+        let lex3 = lex_add_error(lex2, err_invalid_number(text, start, lex_file(lex)));
+        { token: token_new(TokError("invalid binary number"), span), state: lex3 }
+    } else {
+        let lex3 = scan_binary_digits(lex2);
+        let text = lex_slice(lex3, start + 2, lex_pos(lex3) - start - 2);
+        let value = parse_binary(text);
+        let span = lex_span(lex3, start);
+        { token: token_new(TokIntLit(value), span), state: lex3 }
+    }
+}
+
+fn scan_binary_digits(lex: LexerState) -> LexerState {
+    if lex_at_end(lex) { lex }
+    else if is_binary_digit(lex_peek(lex)) { scan_binary_digits(lex_advance(lex)) }
+    else if lex_peek(lex) == char_underscore() { scan_binary_digits(lex_advance(lex)) }
+    else { lex }
+}
+
+fn parse_binary(s: String) -> Nat {
+    parse_binary_acc(s, 0, 0)
+}
+
+fn parse_binary_acc(s: String, idx: Nat, acc: Nat) -> Nat {
+    if idx >= string_len(s) { acc }
+    else {
+        let ch = string_char_at_internal(s, idx);
+        if ch == char_underscore() { parse_binary_acc(s, idx + 1, acc) }
+        else {
+            let digit = ch - char_0();
+            parse_binary_acc(s, idx + 1, acc * 2 + digit)
+        }
+    }
+}
+
+pub fn scan_digits(lex: LexerState) -> LexerState {
+    if lex_at_end(lex) { lex }
+    else if scanner_is_digit(lex_peek(lex)) { scan_digits(lex_advance(lex)) }
+    else { lex }
+}
+
+pub fn scanner_parse_nat(s: String) -> Nat {
+    scanner_parse_nat_acc(s, 0, 0)
+}
+
+fn scanner_parse_nat_acc(s: String, idx: Nat, acc: Nat) -> Nat {
+    if idx >= string_len(s) { acc }
+    else {
+        let digit = string_char_at_internal(s, idx) - char_0();
+        scanner_parse_nat_acc(s, idx + 1, acc * 10 + digit)
+    }
+}

@@ -1,0 +1,14 @@
+// Test: record literal in tuple expression gets expected type from function return.
+// Regression test for ADR 4.5.26b — check_tuple must propagate expected type
+// into elements so record literals inside tuples are elaborated in check mode.
+
+type Span = { start: Nat, end: Nat }
+
+fn default_span() -> (Nat, Span) {
+    (0, { start: 0, end: 0 })
+}
+
+fn main() -> Nat {
+    let (n, s) = default_span();
+    s.start
+}

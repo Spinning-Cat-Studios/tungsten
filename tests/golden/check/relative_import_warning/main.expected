@@ -1,0 +1,5 @@
+warning: relative import `helper` resolved via child as `inner::helper` from `inner`
+  = help: use absolute import: `inner::helper`
+warning: relative import `helper` resolved via child as `inner::helper` from `inner`
+  = help: use absolute import: `inner::helper`
+✓ tests/golden/check/relative_import_warning/main.tg: 3 definition(s), all OK

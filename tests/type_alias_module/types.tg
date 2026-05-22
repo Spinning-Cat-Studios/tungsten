@@ -1,0 +1,12 @@
+// tests/type_alias_module/types.tg
+// Defines a public type alias for cross-module import (AC8)
+
+pub type Result<T, E> =
+    | Err(E)
+    | Ok(T)
+
+pub type ParseError = String
+
+pub type Cursor = Nat
+
+pub type ParseResult<T> = Result<(T, Cursor), ParseError>

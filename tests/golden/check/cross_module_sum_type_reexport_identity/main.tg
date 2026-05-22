@@ -1,0 +1,27 @@
+// Regression test: sum type with Option<String> constructor
+// defined in one module (importing Option from canonical source)
+// consumed in another (importing Option through re-export chain).
+//
+// Verifies that type identity is preserved across re-export chains
+// for sum types containing generic type parameters.
+//
+// Note: this pattern can cause E0010 "expected X, found X" in the
+// self-hosted compiler when Option is imported via different re-export
+// paths. The workaround is to avoid generic parameters in sum types
+// that cross module boundaries, or ensure all modules import generics
+// from the same canonical source.
+// See ADR 18.4.26f — ExplainOpts type identity split fix.
+
+pub mod core;
+pub mod middle;
+pub mod types;
+pub mod consumer;
+pub mod dispatch;
+
+use dispatch::dispatch;
+use types::{Opts};
+
+fn main() -> Nat {
+    let o: Opts = Alpha("hello");
+    dispatch(o)
+}

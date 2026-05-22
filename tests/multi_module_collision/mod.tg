@@ -1,0 +1,14 @@
+/// Multi-module collision test fixture (ADR 6.5.26c §5).
+///
+/// Tests cross-module function calls across separately compiled modules.
+
+pub mod alpha;
+pub mod beta;
+
+use alpha::compute;
+use beta::greet;
+
+fn main() -> Nat {
+    // Cross-module call: alpha::compute()
+    compute()
+}

@@ -1,0 +1,5 @@
+// Private type — its constructors inherit private visibility.
+
+type PrivToken =
+    | Secret
+    | Open

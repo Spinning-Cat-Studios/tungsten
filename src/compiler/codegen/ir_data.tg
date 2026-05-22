@@ -1,0 +1,81 @@
+// src/compiler/codegen/ir_data.tg
+// Product and record data type emission (M5).
+//
+// Provides typed pair construction/projection helpers that take
+// pre-evaluated SSA values and explicit LLVM type strings.
+// The CIR dispatch (ir_expr.tg) calls emit_expr on sub-expressions
+// first, then delegates to these builders — no circular import.
+//
+// ## LLVM IR Patterns
+//
+// Pair construction:
+//   %tmp = insertvalue { <A>, <B> } undef, <A> %a, 0
+//   %result = insertvalue { <A>, <B> } %tmp, <B> %b, 1
+//
+// First projection:
+//   %result = extractvalue { <A>, <B> } %pair, 0
+//
+// Second projection:
+//   %result = extractvalue { <A>, <B> } %pair, 1
+
+use codegen::ir_builder::{
+    IRState, fresh_name, emit_line
+};
+
+// ===========================================================================
+// TYPED PAIR CONSTRUCTION (from pre-evaluated SSA values)
+// ===========================================================================
+
+/// Build a pair struct from two SSA values with explicit LLVM type strings.
+///
+/// Called by ir_expr.tg after it has already emitted the sub-expressions.
+/// This avoids a circular import — ir_data never calls emit_expr.
+pub fn build_pair(
+    st: IRState,
+    a_val: String, b_val: String,
+    a_ty: String, b_ty: String
+) -> (String, IRState) {
+    let pair_ty = "{ " ++ a_ty ++ ", " ++ b_ty ++ " }";
+
+    let (tmp, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ tmp ++ " = insertvalue " ++ pair_ty ++ " undef, " ++ a_ty ++ " " ++ a_val ++ ", 0");
+
+    let (result, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ result ++ " = insertvalue " ++ pair_ty ++ " " ++ tmp ++ ", " ++ b_ty ++ " " ++ b_val ++ ", 1");
+
+    (result, st)
+}
+
+// ===========================================================================
+// TYPED PAIR PROJECTIONS (from pre-evaluated SSA values)
+// ===========================================================================
+
+/// Extract first element from a pair SSA value.
+pub fn extract_fst(
+    st: IRState,
+    pair_val: String,
+    a_ty: String, b_ty: String
+) -> (String, IRState) {
+    let pair_ty = "{ " ++ a_ty ++ ", " ++ b_ty ++ " }";
+
+    let (result, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ result ++ " = extractvalue " ++ pair_ty ++ " " ++ pair_val ++ ", 0");
+    (result, st)
+}
+
+/// Extract second element from a pair SSA value.
+pub fn extract_snd(
+    st: IRState,
+    pair_val: String,
+    a_ty: String, b_ty: String
+) -> (String, IRState) {
+    let pair_ty = "{ " ++ a_ty ++ ", " ++ b_ty ++ " }";
+
+    let (result, st) = fresh_name(st);
+    let st = emit_line(st,
+        "  " ++ result ++ " = extractvalue " ++ pair_ty ++ " " ++ pair_val ++ ", 1");
+    (result, st)
+}

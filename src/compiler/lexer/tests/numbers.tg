@@ -1,0 +1,112 @@
+// src/compiler/lexer/tests/numbers.tg
+// Hex, octal, and binary number lexing tests.
+
+use lexer::token::{TokenKind, Token, token_kind, TokIntLit};
+use lexer::scanner::{tokenize, lex_result_tokens, lex_result_errors};
+use driver::ffi::{List, Nil, Cons};
+use lexer::tests::{first_token_kind};
+use lexer::error::{has_errors};
+
+fn test_hex_number() -> Bool {
+    let result = tokenize("0xFF", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 255,
+        _ => false
+    }
+}
+
+fn test_hex_number_uppercase() -> Bool {
+    let result = tokenize("0X2A", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 42,
+        _ => false
+    }
+}
+
+fn test_hex_number_mixed_case() -> Bool {
+    let result = tokenize("0xDeadBeef", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 3735928559,
+        _ => false
+    }
+}
+
+fn test_hex_with_underscores() -> Bool {
+    let result = tokenize("0xFF_FF", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 65535,
+        _ => false
+    }
+}
+
+fn test_octal_number() -> Bool {
+    let result = tokenize("0o77", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 63,
+        _ => false
+    }
+}
+
+fn test_octal_number_uppercase() -> Bool {
+    let result = tokenize("0O52", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 42,
+        _ => false
+    }
+}
+
+fn test_binary_number() -> Bool {
+    let result = tokenize("0b1010", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 10,
+        _ => false
+    }
+}
+
+fn test_binary_number_uppercase() -> Bool {
+    let result = tokenize("0B11111111", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 255,
+        _ => false
+    }
+}
+
+fn test_binary_with_underscores() -> Bool {
+    let result = tokenize("0b1111_0000", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 240,
+        _ => false
+    }
+}
+
+fn test_invalid_hex_empty() -> Bool {
+    let result = tokenize("0x", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+fn test_invalid_octal_empty() -> Bool {
+    let result = tokenize("0o", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+fn test_invalid_binary_empty() -> Bool {
+    let result = tokenize("0b", "test.tg");
+    has_errors(lex_result_errors(result))
+}
+
+pub fn run_number_tests() -> Nat {
+    let passed = 0;
+    let passed = if test_hex_number() { passed + 1 } else { passed };
+    let passed = if test_hex_number_uppercase() { passed + 1 } else { passed };
+    let passed = if test_hex_number_mixed_case() { passed + 1 } else { passed };
+    let passed = if test_hex_with_underscores() { passed + 1 } else { passed };
+    let passed = if test_octal_number() { passed + 1 } else { passed };
+    let passed = if test_octal_number_uppercase() { passed + 1 } else { passed };
+    let passed = if test_binary_number() { passed + 1 } else { passed };
+    let passed = if test_binary_number_uppercase() { passed + 1 } else { passed };
+    let passed = if test_binary_with_underscores() { passed + 1 } else { passed };
+    let passed = if test_invalid_hex_empty() { passed + 1 } else { passed };
+    let passed = if test_invalid_octal_empty() { passed + 1 } else { passed };
+    let passed = if test_invalid_binary_empty() { passed + 1 } else { passed };
+    passed
+}

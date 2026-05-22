@@ -1,0 +1,132 @@
+name: Check Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      run-integration:
+        description: 'Run integration tests (slower, requires LLVM)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check (no codegen)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (no codegen)
+        run: cargo clippy -p tungsten_core -p tungsten_bootstrap --no-default-features -- -D warnings
+
+      - name: Test (no codegen)
+        run: cargo test -p tungsten_core -p tungsten_bootstrap --no-default-features
+
+  build-with-llvm:
+    name: Build with LLVM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM 18
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev clang-18 lld-18 zlib1g-dev libzstd-dev
+
+      - name: Build with codegen
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: cargo build --release
+
+      - name: Test with codegen
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: cargo test
+
+      - name: Test codegen crate
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: cargo test -p tungsten_codegen
+
+      - name: Upload binary
+        if: inputs.run-integration
+        uses: actions/upload-artifact@v4
+        with:
+          name: tungsten-binary
+          path: target/release/tungsten
+          retention-days: 1
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: build-with-llvm
+    if: inputs.run-integration
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install LLVM 18
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev clang-18 lld-18 zlib1g-dev libzstd-dev
+
+      - name: Build release
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: cargo build --release
+
+      - name: Golden tests
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: make check-golden
+
+      - name: Type-check examples
+        run: |
+          failed=0
+          for f in examples/*.tg; do
+            echo "Checking $f..."
+            rm -rf examples/.tungsten
+            if ! ./target/release/tungsten check "$f"; then
+              failed=$((failed + 1))
+            fi
+          done
+          if [ "$failed" -gt 0 ]; then
+            echo ""
+            echo "FAILED: $failed example(s) had errors"
+            exit 1
+          fi
+
+      - name: Compile smoke test
+        env:
+          LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+        run: |
+          ./target/release/tungsten compile examples/hello.tg -o hello_test -v
+          output=$(./hello_test)
+          echo "Output: $output"
+          if [ "$output" != "hello world" ]; then
+            echo "FAIL: expected 'hello world', got '$output'"
+            exit 1
+          fi
+          echo "PASS: compiled program produced correct output"

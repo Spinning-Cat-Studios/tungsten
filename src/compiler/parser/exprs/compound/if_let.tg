@@ -1,0 +1,96 @@
+// src/compiler/parser/exprs/compound/if_let.tg
+// `if let` parsing (ADR 14.5.26e, ADR 15.5.26d).
+
+use lexer::token::{TokenKind, TokLet, TokElse, TokEq, TokAmpAmp};
+use lexer::span::{Span, span_merge};
+use parser::error::ParseError;
+use parser::cursor::{Cursor, cursor_check, cursor_advance, cursor_expect};
+use driver::util::{Result, Ok, Err};
+use driver::ffi::{List, Nil, Cons};
+use parser::ast::nodes::{
+    Expr, ExprIfLet, ExprIfLetChain,
+    IfLetCondition, IfLetBind, IfLetGuard,
+    MaybeExpr, NoExpr, SomeExpr, expr_span
+};
+use parser::ast::pattern::Pattern;
+use parser::exprs::compound::blocks::parse_block;
+use parser::exprs::pratt::{parse_expr, parse_expr_prec};
+use parser::patterns::{parse_pattern};
+
+/// Parse `if let P = expr { body }` or `if let P = expr { body } else { fallback }`.
+/// Also handles `if let` chains with `&&`-separated conditions (ADR 15.5.26d).
+/// Called after `if` has been consumed. `cur` points at `let`.
+pub fn parse_if_let(cur: Cursor, start_span: Span) -> Result<(Expr, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokLet())?;
+    let (pat, cur3) = parse_pattern(cur2)?;
+    let (_, cur4) = cursor_expect(cur3, TokEq())?;
+    // Parse init at precedence above `&&` (prec 2) so `&&` remains as chain separator
+    let (init, cur5) = parse_expr_prec(cur4, 3)?;
+    // Check for chain continuation with `&&`
+    if cursor_check(cur5, TokAmpAmp()) {
+        parse_if_let_chain(cur5, pat, init, start_span)
+    } else {
+        parse_if_let_body(cur5, pat, init, start_span)
+    }
+}
+
+/// Parse the body block and optional else block for a simple `if let`.
+fn parse_if_let_body(cur: Cursor, pat: Pattern, init: Expr, start_span: Span) -> Result<(Expr, Cursor), ParseError> {
+    let (body, cur6) = parse_block(cur)?;
+    if cursor_check(cur6, TokElse()) {
+        let cur7 = cursor_advance(cur6);
+        let (fallback, cur8) = parse_block(cur7)?;
+        let span = span_merge(start_span, expr_span(fallback));
+        Ok((ExprIfLet(pat, init, body, SomeExpr(fallback), span), cur8))
+    } else {
+        let span = span_merge(start_span, expr_span(body));
+        Ok((ExprIfLet(pat, init, body, NoExpr(), span), cur6))
+    }
+}
+
+/// Parse an `if let` chain after detecting `&&` (ADR 15.5.26d).
+/// Collects remaining `&&`-separated conditions, then parses body and optional else.
+fn parse_if_let_chain(cur: Cursor, first_pat: Pattern, first_init: Expr, start_span: Span) -> Result<(Expr, Cursor), ParseError> {
+    let first_cond: IfLetCondition = IfLetBind(first_pat, first_init);
+    let (rest_conds, cur2) = parse_chain_conditions(cur)?;
+    let conditions: List<IfLetCondition> = Cons(first_cond, rest_conds);
+    let (body, cur3) = parse_block(cur2)?;
+    if cursor_check(cur3, TokElse()) {
+        let cur4 = cursor_advance(cur3);
+        let (fallback, cur5) = parse_block(cur4)?;
+        let span = span_merge(start_span, expr_span(fallback));
+        Ok((ExprIfLetChain(conditions, body, SomeExpr(fallback), span), cur5))
+    } else {
+        let span = span_merge(start_span, expr_span(body));
+        Ok((ExprIfLetChain(conditions, body, NoExpr(), span), cur3))
+    }
+}
+
+/// Parse `&&`-separated chain conditions.
+/// Each condition is either `let P = expr` or a boolean expression.
+fn parse_chain_conditions(cur: Cursor) -> Result<(List<IfLetCondition>, Cursor), ParseError> {
+    if cursor_check(cur, TokAmpAmp()) {
+        let cur2 = cursor_advance(cur);
+        let (cond, cur3) = parse_single_condition(cur2)?;
+        let (rest, cur4) = parse_chain_conditions(cur3)?;
+        Ok((Cons(cond, rest), cur4))
+    } else {
+        Ok((Nil(), cur))
+    }
+}
+
+/// Parse a single chain condition: either `let P = expr` or a boolean expression.
+fn parse_single_condition(cur: Cursor) -> Result<(IfLetCondition, Cursor), ParseError> {
+    if cursor_check(cur, TokLet()) {
+        let (_, cur2) = cursor_expect(cur, TokLet())?;
+        let (pat, cur3) = parse_pattern(cur2)?;
+        let (_, cur4) = cursor_expect(cur3, TokEq())?;
+        // Parse init at precedence above `&&` so next `&&` remains as chain separator
+        let (init, cur5) = parse_expr_prec(cur4, 3)?;
+        Ok((IfLetBind(pat, init), cur5))
+    } else {
+        // Boolean guard — also parse above `&&` precedence
+        let (guard, cur2) = parse_expr_prec(cur, 3)?;
+        Ok((IfLetGuard(guard), cur2))
+    }
+}

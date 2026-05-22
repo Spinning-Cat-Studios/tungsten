@@ -79,20 +79,25 @@ pub fn module_info_empty() -> ModuleInfo {
     }
 }
 
-/// Register a module in the info.
-pub fn module_info_register_module(
-    info: ModuleInfo,
+/// Bundled module registration parameters.
+pub type ModuleRegInfo = {
     path: ModulePath,
     contents: ModuleItemNames,
     visibility: Visibility,
-    parent: Option<ModulePath>,
+    parent: Option<ModulePath>
+}
+
+/// Register a module in the info.
+pub fn module_info_register_module(
+    info: ModuleInfo,
+    reg: ModuleRegInfo,
     file_path: String
 ) -> ModuleInfo {
     {
-        modules: Cons((path, contents), info.modules),
+        modules: Cons((reg.path, reg.contents), info.modules),
         item_modules: info.item_modules,
-        module_visibility: Cons((path, visibility, parent), info.module_visibility),
-        module_files: Cons((path, file_path), info.module_files)
+        module_visibility: Cons((reg.path, reg.visibility, reg.parent), info.module_visibility),
+        module_files: Cons((reg.path, file_path), info.module_files)
     }
 }
 

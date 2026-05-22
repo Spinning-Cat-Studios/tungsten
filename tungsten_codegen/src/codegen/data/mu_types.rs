@@ -1,7 +1,15 @@
 //! Shared helpers for μ-type (recursive type) handling.
 //!
 //! μ-types are represented as opaque pointers at the LLVM level.
-//! The underlying data is heap-allocated via malloc.
+//! The underlying data is heap-allocated via malloc (or stack-allocated
+//! via alloca when escape analysis proves the value is non-escaping).
+//!
+//! ADT construction uses a two-step allocation:
+//! 1. `AdtConstruct` → `alloca` (builds the struct payload on the stack)
+//! 2. `Fold` → `malloc` (wraps the μ-type; copies the struct to the heap)
+//!
+//! When escape analysis marks a fold as non-escaping, step 2 uses `alloca`
+//! instead of `malloc` (see `fold_to_stack`).
 //!
 //! - `fold` allocates the inner struct on the heap and returns a pointer
 //! - `unfold` dereferences the pointer to get the inner struct
@@ -9,7 +17,7 @@
 //! This module provides shared utilities used by both sums.rs and adt.rs
 //! to avoid code duplication.
 
-use crate::codegen::error::CodeGenError;
+use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValue, BasicValueEnum, PointerValue};
@@ -39,11 +47,8 @@ impl<'ctx> CodeGen<'ctx> {
         let i64_type = self.context.i64_type();
         let size_val = i64_type.const_int(size, false);
 
-        // Get malloc function
-        let malloc_fn = self
-            .module
-            .get_function("malloc")
-            .ok_or_else(|| CodeGenError::LlvmError("malloc not declared".to_string()))?;
+        // Get malloc function (uses profiling wrapper when --alloc-profile is enabled)
+        let malloc_fn = self.get_malloc();
 
         // Allocate on heap
         let ptr = self
@@ -56,6 +61,31 @@ impl<'ctx> CodeGen<'ctx> {
             .into_pointer_value();
 
         // Store the value with specified alignment
+        let store = self
+            .builder
+            .build_store(ptr, value)
+            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
+        let _ = store.set_alignment(alignment);
+
+        Ok(ptr)
+    }
+
+    /// Stack-allocate a value and return a pointer to it (ADR 8.5.26d).
+    ///
+    /// Same semantics as `fold_to_heap` but uses alloca instead of malloc.
+    /// Only safe when escape analysis proves the pointer does not outlive
+    /// the current stack frame.
+    pub(crate) fn fold_to_stack(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+        ty: BasicTypeEnum<'ctx>,
+        alignment: u32,
+    ) -> Result<PointerValue<'ctx>, CodeGenError> {
+        let ptr = self
+            .builder
+            .build_alloca(ty, "mu_stack")
+            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
+
         let store = self
             .builder
             .build_store(ptr, value)
@@ -106,12 +136,16 @@ impl<'ctx> CodeGen<'ctx> {
             Type::TyVar(v) if v == var => replacement.clone(),
             Type::TyVar(_) => ty.clone(),
 
-            // Terminal types
-            Type::Unit | Type::Bool | Type::Nat | Type::String | Type::Void | Type::Prop => {
-                ty.clone()
-            }
+            // Terminal types — no type variables to substitute
+            Type::Unit
+            | Type::Bool
+            | Type::Nat
+            | Type::String
+            | Type::Void
+            | Type::Prop
+            | Type::Error => ty.clone(),
 
-            // Composite types - recurse into components
+            // Composite binary types — recurse into both components
             Type::Arrow(a, b) => Type::Arrow(
                 Box::new(self.substitute_type(a, var, replacement)),
                 Box::new(self.substitute_type(b, var, replacement)),
@@ -125,13 +159,12 @@ impl<'ctx> CodeGen<'ctx> {
                 Box::new(self.substitute_type(b, var, replacement)),
             ),
 
-            // Binding forms - check for shadowing
-            Type::Forall(v, body) if v == var => ty.clone(),
+            // Binding forms — check for shadowing
+            Type::Forall(v, _) | Type::Mu(v, _) if v == var => ty.clone(),
             Type::Forall(v, body) => Type::Forall(
                 v.clone(),
                 Box::new(self.substitute_type(body, var, replacement)),
             ),
-            Type::Mu(v, body) if v == var => ty.clone(),
             Type::Mu(v, body) => Type::Mu(
                 v.clone(),
                 Box::new(self.substitute_type(body, var, replacement)),
@@ -144,7 +177,7 @@ impl<'ctx> CodeGen<'ctx> {
                 t2.clone(),
             ),
 
-            // Pointers and References
+            // Pointers and References — recurse into inner
             Type::Ptr(inner) => Type::Ptr(Box::new(self.substitute_type(inner, var, replacement))),
             Type::Ref(inner) => Type::Ref(Box::new(self.substitute_type(inner, var, replacement))),
 
@@ -178,12 +211,13 @@ impl<'ctx> CodeGen<'ctx> {
     /// For μ X. F[X], returns F[μ X. F[X]] (the unfolding).
     /// For non-μ types, returns the type unchanged.
     pub(crate) fn unwrap_mu_type(&self, ty: &Type) -> Type {
-        match ty {
-            Type::Mu(var, body) => {
-                // Substitute the μ-type itself for the bound variable
-                self.substitute_type(body, var, ty)
-            }
-            _ => ty.clone(),
+        // Unwrap all nested Mu binders. Mutually recursive types use
+        // nested Mu binders (one per SCC member), and all must be
+        // stripped to reach the inner structural type (e.g., Sum).
+        let mut current = ty.clone();
+        while let Type::Mu(ref var, ref body) = current {
+            current = self.substitute_type(body, var, &current);
         }
+        current
     }
 }

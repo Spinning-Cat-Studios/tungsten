@@ -1,0 +1,8 @@
+// Inner module that uses a relative import to trigger the warning
+mod helper;
+
+use helper::zero;
+
+pub fn get_zero() -> String {
+    zero()
+}

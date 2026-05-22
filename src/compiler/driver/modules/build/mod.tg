@@ -1,0 +1,266 @@
+// src/compiler/driver/modules/build/mod.tg
+// Building SourceMap and ModuleInfo from module trees.
+
+pub mod register;
+pub mod reexports;
+pub mod reexport_resolve;
+pub mod flatten;
+pub mod resolve;
+pub mod warn;
+
+use driver::ffi::{
+    List, Nil, Cons,
+    read_file, parent_directory,
+    string_len, string_char_at_internal, tg_string_append_char,
+    FfiResult, FfiOk, FfiErr
+};
+use driver::util::{Option, Some, None, unwrap_or, string_eq, ends_with};
+use parser::ast::common::{Visibility};
+use parser::ast::nodes::{
+    SourceFile, Item,
+    ItemFn, ItemType, ItemTypeAlias, ItemTheorem, ItemLemma,
+    ItemAxiom, ItemExtern, ItemMod, ItemUse, ItemError,
+    source_file_items, source_file_span, source_file_new
+};
+
+use driver::modules::path::{ModulePath, module_path_root, module_path_single, module_path_child};
+use driver::modules::source_map::{SourceMap, source_map_single, source_map_insert};
+use driver::modules::tree::parsed::{ParsedModule};
+use driver::modules::info::{
+    ModuleInfo, ModuleItemNames, ModuleRegInfo,
+    module_info_empty, module_item_names_empty,
+    module_info_register_module
+};
+use driver::modules::build::register::{index_type_decl, index_value_decl, index_type_constructors};
+use driver::modules::build::reexports::process_reexports;
+
+// ===========================================================================
+// SOURCE MAP BUILDING
+// ===========================================================================
+
+/// Build a SourceMap from a module tree.
+/// Reads all source files for multi-file error reporting.
+pub fn build_source_map(module: ParsedModule) -> SourceMap {
+    let content = match read_file(module.path) {
+        FfiOk(s) => s,
+        FfiErr(_) => ""
+    };
+    let initial = source_map_single(module.path, content);
+    build_source_map_recursive(module.submodules, initial)
+}
+
+fn build_source_map_recursive(
+    submodules: List<ParsedModule>,
+    sm: SourceMap
+) -> SourceMap {
+    match submodules {
+        Nil() => sm,
+        Cons(sub, rest) =>
+            let content = match read_file(sub.path) {
+                FfiOk(s) => s,
+                FfiErr(_) => ""
+            };
+            let sm2 = source_map_insert(sm, sub.path, content);
+            let sm3 = build_source_map_recursive(sub.submodules, sm2);
+            build_source_map_recursive(rest, sm3)
+    }
+}
+
+// ===========================================================================
+// MODULE INFO BUILDING
+// ===========================================================================
+
+/// Build ModuleInfo from a ParsedModule tree.
+///
+/// This walks the module tree in two passes:
+/// Pass 1: Register each module's own items (types, values, constructors)
+/// Pass 2: Process `pub use` re-exports to copy items into re-exporting modules
+pub fn build_module_info(module: ParsedModule) -> ModuleInfo {
+    let info = module_info_empty();
+    let root_path = module_path_root();
+    // Pass 1: register items
+    let info2 = build_module_info_recursive(module, root_path, None, info);
+    // Pass 2: process pub use re-exports
+    process_reexports(module, root_path, info2)
+}
+
+/// Build ModuleInfo for all workspace modules.
+pub fn build_workspace_module_info(modules: List<ParsedModule>) -> ModuleInfo {
+    let info = module_info_empty();
+    build_workspace_info_loop(modules, info)
+}
+
+fn build_workspace_info_loop(
+    modules: List<ParsedModule>,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match modules {
+        Nil() => info,
+        Cons(module, rest) =>
+            let module_name = get_module_name(module);
+            let module_path = module_path_single(module_name);
+            let info2 = build_module_info_recursive(module, module_path, None, info);
+            build_workspace_info_loop(rest, info2)
+    }
+}
+
+fn build_module_info_recursive(
+    module: ParsedModule,
+    current_path: ModulePath,
+    parent_path: Option<ModulePath>,
+    info: ModuleInfo
+) -> ModuleInfo {
+    // Register this module with empty contents first
+    let contents = module_item_names_empty();
+    let reg: ModuleRegInfo = { path: current_path, contents: contents, visibility: module.visibility, parent: parent_path };
+    let info2 = module_info_register_module(info, reg, module.path);
+    
+    // Process items in this module
+    let items = source_file_items(module.source_file);
+    let info3 = process_items(items, current_path, info2);
+    
+    // Process submodules
+    process_submodules(module.submodules, current_path, info3)
+}
+
+fn process_submodules(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match submodules {
+        Nil() => info,
+        Cons(sub, rest) =>
+            let module_name = get_module_name(sub);
+            let child_path = module_path_child(parent_path, module_name);
+            let info2 = build_module_info_recursive(
+                sub, child_path, Some(parent_path), info
+            );
+            process_submodules(rest, parent_path, info2)
+    }
+}
+
+fn process_items(
+    items: List<Item>,
+    module_path: ModulePath,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match items {
+        Nil() => info,
+        Cons(item, rest) =>
+            let info2 = process_item(item, module_path, info);
+            process_items(rest, module_path, info2)
+    }
+}
+
+fn process_item(
+    item: Item,
+    module_path: ModulePath,
+    info: ModuleInfo
+) -> ModuleInfo {
+    match item {
+        ItemFn(f) =>
+            // Register function name
+            let name = f.name.name;
+            index_value_decl(info, name, module_path),
+        ItemType(t) =>
+            // Register type name and constructors
+            let name = t.name.name;
+            let info2 = index_type_decl(info, name, module_path);
+            // Register constructors from sum types
+            index_type_constructors(info2, t.body, module_path),
+        ItemTypeAlias(t) =>
+            let name = t.name.name;
+            index_type_decl(info, name, module_path),
+        ItemTheorem(t) =>
+            let name = t.name.name;
+            index_value_decl(info, name, module_path),
+        ItemLemma(t) =>
+            let name = t.name.name;
+            index_value_decl(info, name, module_path),
+        ItemAxiom(a) =>
+            let name = a.name.name;
+            index_value_decl(info, name, module_path),
+        ItemExtern(e) =>
+            let name = e.name.name;
+            index_value_decl(info, name, module_path),
+        ItemMod(_) =>
+            // Skip mod declarations - handled by submodule processing
+            info,
+        ItemUse(_) =>
+            // Re-exports handled in pass 2 (reexports.tg)
+            info,
+        ItemError(_) =>
+            // Skip error items
+            info
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Get module name from a ParsedModule (filename without extension).
+pub fn get_module_name(module: ParsedModule) -> String {
+    extract_module_name(module.path)
+}
+
+/// Extract module name from a file path.
+/// For "foo.tg" returns "foo".
+/// For "foo/mod.tg" returns "foo" (the parent directory name).
+fn extract_module_name(path: String) -> String {
+    let filename = get_filename(path);
+    if string_eq(filename, "mod.tg") {
+        // It's a mod.tg file - use parent directory name
+        let parent = unwrap_or(parent_directory(path), ".");
+        get_filename(parent)
+    } else {
+        // Regular .tg file - strip extension
+        strip_tg_extension(filename)
+    }
+}
+
+/// Get the filename from a path.
+fn get_filename(path: String) -> String {
+    get_filename_find_slash(path, string_len(path), 0, 0)
+}
+
+fn get_filename_find_slash(path: String, len: Nat, i: Nat, last_slash: Nat) -> String {
+    if i >= len {
+        // Extract from last_slash to end
+        substring(path, last_slash, len)
+    } else {
+        let c = string_char_at_internal(path, i);
+        if c == 47 {
+            // '/' character
+            get_filename_find_slash(path, len, i + 1, i + 1)
+        } else {
+            get_filename_find_slash(path, len, i + 1, last_slash)
+        }
+    }
+}
+
+/// Strip .tg extension from filename.
+pub fn strip_tg_extension(filename: String) -> String {
+    let len = string_len(filename);
+    if len > 3 && ends_with(filename, ".tg") {
+        substring(filename, 0, len - 3)
+    } else {
+        filename
+    }
+}
+
+/// Extract substring from start to end indices.
+fn substring(s: String, start: Nat, end: Nat) -> String {
+    substring_loop(s, start, end, "")
+}
+
+fn substring_loop(s: String, i: Nat, end: Nat, acc: String) -> String {
+    if i >= end {
+        acc
+    } else {
+        let c = string_char_at_internal(s, i);
+        let acc2 = tg_string_append_char(acc, c);
+        substring_loop(s, i + 1, end, acc2)
+    }
+}

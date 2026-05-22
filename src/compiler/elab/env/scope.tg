@@ -101,9 +101,13 @@ pub fn scope_stack_lookup(stack: ScopeStack, name: String) -> MaybeLocalBinding 
     match stack {
         ScopeStackNil() => NoLocalBinding,
         ScopeStackCons(scope, rest) =>
-            match scope_lookup(scope, name) {
-                SomeLocalBinding(b) => SomeLocalBinding(b),
-                NoLocalBinding() => scope_stack_lookup(rest, name)
-            }
+            scope_stack_lookup_step(scope, rest, name)
+    }
+}
+
+fn scope_stack_lookup_step(scope: Scope, rest: ScopeStack, name: String) -> MaybeLocalBinding {
+    match scope_lookup(scope, name) {
+        SomeLocalBinding(b) => SomeLocalBinding(b),
+        NoLocalBinding() => scope_stack_lookup(rest, name)
     }
 }

@@ -1,0 +1,13 @@
+// Dispatcher module: pattern-matches Command and delegates to handler.
+// Mirrors driver::pipeline::mod dispatching CmdExplain(opts) to run_explain(opts).
+
+use cli::{Command, BetaOpts};
+use handler::handle_beta;
+
+pub fn dispatch(cmd: Command) -> Nat {
+    match cmd {
+        DoAlpha(_s) => 1,
+        DoBeta(opts) => handle_beta(opts),
+        DoHelp() => 0
+    }
+}

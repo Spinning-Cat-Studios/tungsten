@@ -1,0 +1,89 @@
+// tests/try_operator_source_order.tg
+// Regression test for ADR 19.5.26d §P3: ? operator with Ok-first source ordering.
+//
+// The bug: extract_success_type hardcoded tg_type_get_sum_right, assuming Ok
+// is always at index 1 (right/inr). But with source-ordered constructors,
+// Ok(T) | Err(E) puts Ok at index 0 (left/inl). This caused ? to extract
+// the error type instead of the success type.
+
+// Ok-first ordering: Ok = index 0 (left/inl), Err = index 1 (right/inr)
+type Result<T, E> =
+    | Ok(T)
+    | Err(E)
+
+// --- Helpers ---
+
+fn ok_nat() -> Result<Nat, String> {
+    Ok(42)
+}
+
+fn err_nat() -> Result<Nat, String> {
+    Err("fail")
+}
+
+// --- Type inference tests ---
+
+// Core regression: ? must extract Nat (Ok's payload), not String (Err's payload)
+fn try_extracts_success_type() -> Result<Nat, String> {
+    let x = ok_nat()?;
+    expect_type(x, "Nat");
+    Ok(x)
+}
+
+fn test_try_extracts_success_type() -> Unit {
+    let _ = try_extracts_success_type();
+    ()
+}
+
+// Chain: multiple ? operations with Ok-first ordering
+fn try_chain_ok_first() -> Result<Nat, String> {
+    let a = ok_nat()?;
+    let b = ok_nat()?;
+    expect_type(a, "Nat");
+    expect_type(b, "Nat");
+    Ok(a + b)
+}
+
+fn test_try_chain_ok_first() -> Unit {
+    let _ = try_chain_ok_first();
+    ()
+}
+
+// Error propagation: ? on Err must still produce the right error type
+fn try_err_propagation() -> Result<Nat, String> {
+    let x = err_nat()?;
+    Ok(x)
+}
+
+fn test_try_err_propagation() -> Unit {
+    let _ = try_err_propagation();
+    ()
+}
+
+// --- try block tests with Ok-first ordering ---
+
+// try { body } must wrap in Ok (inl when Ok is index 0)
+fn test_try_block_ok_first() -> Unit {
+    let _: Result<Nat, String> = try { 42 };
+    ()
+}
+
+// try block with ? inside
+fn try_block_with_question_mark() -> Result<Nat, String> {
+    try {
+        let x = ok_nat()?;
+        x + 1
+    }
+}
+
+fn test_try_block_with_question_mark() -> Unit {
+    let _ = try_block_with_question_mark();
+    ()
+}
+
+// Type assertion: Sum encoding with Ok-first should be (Nat + String)
+fn test_try_block_type_ok_first() -> Unit {
+    let r: Result<Nat, String> = try { 42 };
+    expect_type(r, "(Nat + String)");
+    ()
+}

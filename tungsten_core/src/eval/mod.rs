@@ -78,7 +78,7 @@ pub enum StepResult {
 /// For programs with global definitions, use [`eval_with_env`] instead.
 #[must_use]
 pub fn eval(term: &Term) -> Term {
-    let mut current = term.clone();
+    let mut current = term.strip_spans();
     loop {
         match step(&current) {
             StepResult::Stepped(next) => current = next,
@@ -93,7 +93,7 @@ pub fn eval(term: &Term) -> Term {
 /// Uses the environment-free evaluator.
 #[must_use]
 pub fn eval_with_limit(term: &Term, limit: usize) -> Option<Term> {
-    let mut current = term.clone();
+    let mut current = term.strip_spans();
     for _ in 0..limit {
         match step(&current) {
             StepResult::Stepped(next) => current = next,

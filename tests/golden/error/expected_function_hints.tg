@@ -1,0 +1,5 @@
+// Golden test: expected function error with diagnostic hints (ADR 21.4.26h)
+fn main() -> Nat {
+    let x: Nat = 42;
+    x(1)
+}

@@ -1,0 +1,191 @@
+// Test equality combinators: subst, sym, trans, cong.
+// ADR 21.5.26e — L2 parity (these tests run through L1).
+// ADR 21.5.26f — positive tests now use Eq<T, a, b> type annotations.
+//
+// Run with: tungsten test tests/equality_combinators.tg
+
+// ===========================================================================
+// PARSER ACCEPTANCE — verify keyword(args...) syntax parses
+// ===========================================================================
+
+/// subst(a, b, c) is syntactically valid (parser acceptance).
+pub fn test_parse_subst() -> Unit {
+    // If this compiles, the parser accepted the syntax.
+    // The elaborator error is expected (42 is not Eq).
+    expect_error(subst(42, 42, 42), "E0072");
+    ()
+}
+
+/// sym(x), trans(x, y), cong(f, x) are syntactically valid.
+pub fn test_parse_sym_trans_cong() -> Unit {
+    expect_error(sym(42), "E0072");
+    expect_error(trans(42, 43), "E0072");
+    expect_error(cong(42, true), "E0072");
+    ()
+}
+
+// ===========================================================================
+// POSITIVE CASES — combinators with real Eq type annotations (ADR 21.5.26f)
+// ===========================================================================
+
+/// refl checked against Eq<Nat, 0, 0> produces a valid equality proof.
+pub fn test_refl_eq_explicit() -> Unit {
+    let _: Eq<Nat, 0, 0> = refl;
+    ()
+}
+
+/// sym flips an equality proof: Eq<Nat, 0, 0> → Eq<Nat, 0, 0>.
+pub fn test_sym_positive() -> Unit {
+    let _: Eq<Nat, 0, 0> = sym((refl : Eq<Nat, 0, 0>));
+    ()
+}
+
+/// trans chains two equality proofs.
+pub fn test_trans_positive() -> Unit {
+    let _: Eq<Nat, 0, 0> = trans((refl : Eq<Nat, 0, 0>), (refl : Eq<Nat, 0, 0>));
+    ()
+}
+
+/// cong applies a function to both sides of an equality proof.
+/// Result type is Eq(Nat, f(0), f(0)) — not normalized, so we infer.
+pub fn test_cong_positive() -> Unit {
+    let _ = cong(|x: Nat| x, (refl : Eq<Nat, 0, 0>));
+    ()
+}
+
+/// subst substitutes through a motive using an equality proof.
+pub fn test_subst_positive() -> Unit {
+    let p: Eq<Nat, 0, 0> = refl;
+    let _: Nat = subst(p, |_: Nat| Nat, 42);
+    ()
+}
+
+/// Eq<Bool, true, true> works with a different base type.
+pub fn test_refl_eq_bool() -> Unit {
+    let _: Eq<Bool, true, true> = refl;
+    ()
+}
+
+/// Eq type annotation in parameter position.
+fn accept_eq_param(p: Eq<Nat, 0, 0>) -> Eq<Nat, 0, 0> {
+    p
+}
+
+pub fn test_eq_param() -> Unit {
+    let _: Eq<Nat, 0, 0> = accept_eq_param(refl);
+    ()
+}
+
+// ===========================================================================
+// NEGATIVE CASES — error detection
+// ===========================================================================
+
+/// subst with non-equality proof produces E0072 (SubstExpectedEquality).
+pub fn test_subst_non_equality() -> Unit {
+    expect_error(subst(42, refl, refl), "E0072");
+    ()
+}
+
+/// sym with non-equality proof produces E0072.
+pub fn test_sym_non_equality() -> Unit {
+    expect_error(sym(42), "E0072");
+    ()
+}
+
+/// trans with non-equality proofs produces E0072.
+pub fn test_trans_non_equality() -> Unit {
+    expect_error(trans(42, 43), "E0072");
+    ()
+}
+
+/// cong with non-equality args produces E0072.
+pub fn test_cong_non_equality_args() -> Unit {
+    expect_error(cong(42, true), "E0072");
+    ()
+}
+
+/// cong with function but non-equality second arg produces E0072.
+pub fn test_cong_function_non_equality() -> Unit {
+    expect_error(cong(|x: Nat| x, 42), "E0072");
+    ()
+}
+
+// ===========================================================================
+// ERROR-SPECIFIC CASES — previously blocked, now unblocked (ADR 21.5.26f)
+// ===========================================================================
+
+/// trans with mismatched endpoints produces E0073 (TransEndpointMismatch).
+/// h1 : Eq<Nat, 0, 0>, h2 : Eq<Nat, 1, 1> — h1's right (0) ≠ h2's left (1).
+pub fn test_trans_endpoint_mismatch() -> Unit {
+    expect_error(trans((refl : Eq<Nat, 0, 0>), (refl : Eq<Nat, 1, 1>)), "E0073");
+    ()
+}
+
+/// cong with non-function first arg and valid Eq proof produces E0074.
+pub fn test_cong_expected_function() -> Unit {
+    expect_error(cong(42, (refl : Eq<Nat, 0, 0>)), "E0074");
+    ()
+}
+
+// ===========================================================================
+// MOTIVE CHECKING — ADR 21.5.26g
+// ===========================================================================
+
+/// subst with non-lambda motive (plain expression) produces E0075 (MotiveNotPredicate).
+pub fn test_subst_motive_not_predicate() -> Unit {
+    let p: Eq<Nat, 0, 0> = refl;
+    expect_error(subst(p, 42, refl), "E0075");
+    ()
+}
+
+/// subst with motive body that is a term (not a type) produces E0077 (MotiveBodyNotType).
+pub fn test_subst_motive_body_not_type() -> Unit {
+    let p: Eq<Nat, 0, 0> = refl;
+    expect_error(subst(p, |x: Nat| x, refl), "E0077");
+    ()
+}
+
+/// subst with motive domain mismatch (Bool vs Nat) produces E0076 (MotiveDomainMismatch).
+pub fn test_subst_motive_domain_mismatch() -> Unit {
+    let p: Eq<Nat, 0, 0> = refl;
+    expect_error(subst(p, |x: Bool| Bool, refl), "E0076");
+    ()
+}
+
+/// subst with valid motive `|x: Nat| Nat` type-checks.
+pub fn test_subst_valid_motive() -> Unit {
+    let p: Eq<Nat, 0, 0> = refl;
+    let _: Nat = subst(p, |_: Nat| Nat, 42);
+    ()
+}
+
+/// subst with motive referencing Eq type (depends on 21.5.26f).
+pub fn test_subst_motive_eq_type() -> Unit {
+    let p: Eq<Nat, 0, 0> = refl;
+    let _: 0 == 0 = subst(p, |x: Nat| x == 0, refl);
+    ()
+}
+
+// ===========================================================================
+// == SUGAR — infix `expr == expr` in type position (ADR 21.5.26f P5)
+// ===========================================================================
+
+/// `0 == 0` in return type position desugars to Eq<Nat, 0, 0>.
+pub fn test_eq_sugar_int() -> Unit {
+    let _: 0 == 0 = refl;
+    ()
+}
+
+/// `true == true` in return type position.
+pub fn test_eq_sugar_bool() -> Unit {
+    let _: true == true = refl;
+    ()
+}
+
+/// `0 == 0` as function return type.
+fn refl_sugar() -> 0 == 0 { refl }
+
+pub fn test_eq_sugar_return_type() -> Unit {
+    let _: 0 == 0 = refl_sugar();
+    ()
+}

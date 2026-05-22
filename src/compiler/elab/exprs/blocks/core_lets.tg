@@ -1,0 +1,229 @@
+// src/compiler/elab/exprs/blocks/core_lets.tg
+// Block elaboration that builds Core Let terms for the evaluator.
+//
+// The standard block pipeline (mod.tg) only builds CIR chains for codegen.
+// This module provides an alternative that also constructs Core Let terms,
+// enabling correct evaluation via `tungsten run`.
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, ExprBlock,
+    Stmt, StmtLet, StmtLetElse, StmtExpr, StmtItem,
+    Pattern, PatTuple, PatVar, PatWildcard,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    MaybeExpr, NoExpr, SomeExpr,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_let, tg_string_to_cstr
+};
+use elab::env::{Env, env_bind_local};
+use elab::types::{elab_type, ElabTypeOk, ElabTypeErr};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, type_error_to_expr_error, pattern_to_name,
+    add_expected_because
+};
+use elab::error::ExpLetAnnotation;
+use elab::cir::{
+    CodegenIR, CIRLet, CIRStmtExpr,
+    ct_unit
+};
+use elab::exprs::{synth, check};
+use elab::exprs::blocks::tuple::bind_tuple_pattern_to_env;
+use elab::exprs::bind::{LetBindingInfo};
+
+// ===========================================================================
+// FINAL EXPRESSION MODE
+// ===========================================================================
+
+/// Controls how the final expression in a block is elaborated.
+pub type FinalMode =
+    | FinalSynth
+    | FinalCheck(TypeHandle)
+
+/// Continuation context for block elaboration.
+type BlockContext = {
+    rest: List<Stmt>,
+    final_expr: Expr,
+    mode: FinalMode,
+    block_span: Span
+}
+
+/// Bundled context for a let statement within a block.
+type LetStmtCtx = {
+    rhs: Expr,
+    bc: BlockContext,
+    stmt_span: Span
+}
+
+// ===========================================================================
+// BLOCK ELABORATION WITH CORE LET TERMS
+// ===========================================================================
+
+/// Elaborate block statements, building nested Core Let terms and CIR chains.
+///
+/// Unlike the collecting pipeline in mod.tg, this produces proper Core Let
+/// terms so that `tungsten run` (which uses the shared Rust evaluator) can
+/// correctly reduce let-bound variables.
+pub fn elab_block_with_lets(
+    env: Env,
+    stmts: List<Stmt>,
+    final_expr: Expr,
+    mode: FinalMode,
+    span: Span
+) -> ElabExprResult {
+    match stmts {
+        Nil() =>
+            match mode {
+                FinalSynth() => synth(env, final_expr),
+                FinalCheck(expected) => check(env, final_expr, expected)
+            },
+        Cons(stmt, rest) =>
+            let bc: BlockContext = { rest: rest, final_expr: final_expr, mode: mode, block_span: span };
+            elab_one_stmt_then_rest(env, stmt, bc)
+    }
+}
+
+// ===========================================================================
+// SINGLE STATEMENT DISPATCH
+// ===========================================================================
+
+fn elab_one_stmt_then_rest(env: Env, stmt: Stmt, bc: BlockContext) -> ElabExprResult {
+    match stmt {
+        StmtLet(pat, ty_annot, rhs, stmt_span) =>
+            let ctx: LetStmtCtx = { rhs: rhs, bc: bc, stmt_span: stmt_span };
+            elab_let_then_rest(env, pat, ty_annot, ctx),
+        StmtLetElse(pat, ty, value, else_expr, stmt_span) =>
+            let body = ExprBlock(bc.rest, SomeExpr(bc.final_expr), bc.block_span);
+            let match_expr = build_let_else_match(pat, value, else_expr, body, stmt_span);
+            match bc.mode {
+                FinalSynth() => synth(env, match_expr),
+                FinalCheck(expected) => check(env, match_expr, expected)
+            },
+        StmtExpr(e, stmt_span) =>
+            match synth(env, e) {
+                ElabExprErr(err) => ElabExprErr(err),
+                ElabExprOk(env2, _, _, _) =>
+                    elab_block_with_lets(env2, bc.rest, bc.final_expr, bc.mode, bc.block_span)
+            },
+        StmtItem(_) =>
+            ElabExprErr(elab_expr_error("nested items not yet implemented (3C-6)", bc.block_span))
+    }
+}
+
+// ===========================================================================
+// LET STATEMENT → CORE LET TERM
+// ===========================================================================
+
+fn elab_let_then_rest(
+    env: Env,
+    pat: Pattern,
+    ty_annot: MaybeTypeExpr,
+    ctx: LetStmtCtx
+) -> ElabExprResult {
+    match pat {
+        PatTuple(sub_pats, pat_span) =>
+            elab_tuple_let_then_rest(env, sub_pats, ty_annot, ctx),
+        _ =>
+            elab_simple_let_then_rest(env, pat, ty_annot, ctx)
+    }
+}
+
+/// Simple let binding (non-tuple): builds a Core Let term wrapping the body.
+fn elab_simple_let_then_rest(
+    env: Env,
+    pat: Pattern,
+    ty_annot: MaybeTypeExpr,
+    ctx: LetStmtCtx
+) -> ElabExprResult {
+    let bi: LetBindingInfo = { name: pattern_to_name(pat), name_ptr: tg_string_to_cstr(pattern_to_name(pat)) };
+    match ty_annot {
+        SomeTypeExpr(ty_expr) =>
+            elab_annotated_let(env, bi, ty_expr, ctx),
+        NoTypeExpr() =>
+            elab_inferred_let(env, bi, ctx.rhs, ctx.bc)
+    }
+}
+
+/// Let with type annotation: check RHS against annotation.
+fn elab_annotated_let(
+    env: Env,
+    bi: LetBindingInfo,
+    ty_expr: TypeExpr,
+    ctx: LetStmtCtx
+) -> ElabExprResult {
+    match elab_type(env, ty_expr) {
+        ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+        ElabTypeOk(expected_ty, expected_ct) =>
+            match check(env, ctx.rhs, expected_ty) {
+                ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpLetAnnotation(ctx.stmt_span))),
+                ElabExprOk(env2, rhs_term, _, rhs_cir) =>
+                    let env3 = env_bind_local(env2, bi.name, expected_ty);
+                    match elab_block_with_lets(env3, ctx.bc.rest, ctx.bc.final_expr, ctx.bc.mode, ctx.bc.block_span) {
+                        ElabExprErr(e) => ElabExprErr(e),
+                        ElabExprOk(env4, body_term, body_ty, body_cir) =>
+                            let let_term = tg_term_let(bi.name_ptr, expected_ty, rhs_term, body_term);
+                            let let_cir = CIRLet(bi.name, expected_ct, rhs_cir, body_cir);
+                            ElabExprOk(env4, let_term, body_ty, let_cir)
+                    }
+            }
+    }
+}
+
+/// Let without annotation: synthesize RHS type.
+fn elab_inferred_let(
+    env: Env,
+    bi: LetBindingInfo,
+    rhs: Expr,
+    bc: BlockContext
+) -> ElabExprResult {
+    match synth(env, rhs) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, rhs_term, rhs_ty, rhs_cir) =>
+            let env3 = env_bind_local(env2, bi.name, rhs_ty);
+            match elab_block_with_lets(env3, bc.rest, bc.final_expr, bc.mode, bc.block_span) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env4, body_term, body_ty, body_cir) =>
+                    let let_term = tg_term_let(bi.name_ptr, rhs_ty, rhs_term, body_term);
+                    let let_cir = CIRLet(bi.name, ct_unit(), rhs_cir, body_cir);
+                    ElabExprOk(env4, let_term, body_ty, let_cir)
+            }
+    }
+}
+
+// ===========================================================================
+// TUPLE LET (ENV-ONLY, NO CORE LET)
+// ===========================================================================
+
+/// Tuple destructuring: bind variables in env, continue without Core Let.
+fn elab_tuple_let_then_rest(
+    env: Env,
+    sub_pats: List<Pattern>,
+    ty_annot: MaybeTypeExpr,
+    ctx: LetStmtCtx
+) -> ElabExprResult {
+    match ty_annot {
+        SomeTypeExpr(_) =>
+            ElabExprErr(elab_expr_error(
+                "type annotations not supported on tuple patterns",
+                ctx.stmt_span
+            )),
+        NoTypeExpr() =>
+            match synth(env, ctx.rhs) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, _, ty, _) =>
+                    let env3 = bind_tuple_pattern_to_env(env2, sub_pats, ty);
+                    elab_block_with_lets(env3, ctx.bc.rest, ctx.bc.final_expr, ctx.bc.mode, ctx.bc.block_span)
+            }
+    }
+}
+
+// ===========================================================================
+// LET-ELSE STATEMENT (ADR 13.5.26f)
+// ===========================================================================
+
+use elab::exprs::control::let_else::build_let_else_match;
+

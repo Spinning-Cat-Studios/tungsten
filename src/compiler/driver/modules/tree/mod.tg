@@ -1,0 +1,5 @@
+// src/compiler/driver/modules/tree/mod.tg
+// Module tree construction: parsing module trees and the ParsedModule type.
+
+pub mod parsed;
+pub mod parse;

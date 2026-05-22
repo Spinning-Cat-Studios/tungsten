@@ -1,0 +1,55 @@
+// Test runner FFI declarations and safe wrappers.
+//
+// Provides assertion functions and test lifecycle management for `tungsten test`.
+
+use driver::ffi::types::{
+    CString,
+    string_to_cstring, string_len,
+    tg_free_string
+};
+
+// --- Raw FFI Declarations ---
+
+extern "C" fn tg_test_begin(name: CString, len: Nat) -> Unit
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+extern "C" fn tg_assert_eq_string(left: CString, left_len: Nat, right: CString, right_len: Nat) -> Unit
+extern "C" fn tg_assert_eq_bool(left: Nat, right: Nat) -> Unit
+extern "C" fn tg_test_check_failure() -> Nat
+
+// --- Safe Wrappers ---
+
+/// Begin a new test — resets failure flag and stores the test name.
+pub fn test_begin(name: String) -> Unit {
+    let c = string_to_cstring(name);
+    let len = string_len(name);
+    tg_test_begin(c, len);
+    tg_free_string(c)
+}
+
+/// Assert that two Nat values are equal.
+pub fn assert_eq_nat(left: Nat, right: Nat) -> Unit {
+    tg_assert_eq_nat(left, right)
+}
+
+/// Assert that two String values are equal.
+pub fn assert_eq_string(left: String, right: String) -> Unit {
+    let lc = string_to_cstring(left);
+    let ll = string_len(left);
+    let rc = string_to_cstring(right);
+    let rl = string_len(right);
+    tg_assert_eq_string(lc, ll, rc, rl);
+    tg_free_string(lc);
+    tg_free_string(rc)
+}
+
+/// Assert that two Bool values are equal.
+pub fn assert_eq_bool(left: Bool, right: Bool) -> Unit {
+    let l = if left { 1 } else { 0 };
+    let r = if right { 1 } else { 0 };
+    tg_assert_eq_bool(l, r)
+}
+
+/// Check whether the current test has failed (returns 1 if failed, 0 if passed).
+pub fn test_check_failure() -> Nat {
+    tg_test_check_failure()
+}

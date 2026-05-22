@@ -1,0 +1,9 @@
+[E0016] Error: function `private_fn` is private (defined in `helper`) and cannot be accessed from `<root>`
+   ╭─[tests/golden/error/private_fn_access/main.tg:6:5]
+   │
+ 6 │     helper::private_fn()
+   │     ─────────┬────────  
+   │              ╰────────── 
+───╯
+
+error: aborting due to 1 error

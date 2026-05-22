@@ -20,10 +20,11 @@ use parser::error::{ParseError, parse_errors_empty, parse_errors_push, parse_err
 pub use parser::error::{ParseErrors, NoParseErrors, ConsParseError};
 use parser::ast::nodes::{Item, SourceFile, source_file_new};
 use parser::items::dispatch::{parse_item};
-use parser::items::result::{ParseResultItem, ParseOkItem, ParseErrItem, item_list_reverse};
+use parser::items::result::{item_list_reverse};
 use parser::items::recovery::{synchronize};
 use parser::option::{Option, None, Some};
 use driver::ffi::{List, Nil, Cons, eprintln};
+use driver::util::{Result, Ok, Err};
 
 // ===========================================================================
 // FILE PARSE RESULT
@@ -174,11 +175,11 @@ fn parse_items_with_recovery(cur: Cursor, items: List<Item>, errors: ParseErrors
         (items, errors, cur)
     } else {
         match parse_item(cur) {
-            ParseOkItem(item, cur2) => {
+            Ok((item, cur2)) => {
                 // Successfully parsed an item
                 parse_items_with_recovery(cur2, Cons(item, items), errors)
             },
-            ParseErrItem(err) => {
+            Err(err) => {
                 // Record error and synchronize to next item boundary
                 let new_errors = ConsParseError(err, errors);
                 let cur2 = synchronize(cur);

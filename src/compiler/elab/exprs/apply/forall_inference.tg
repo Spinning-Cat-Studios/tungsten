@@ -1,0 +1,185 @@
+// src/compiler/elab/exprs/apply/forall_inference.tg
+// Type argument inference for polymorphic function application.
+// Extracted from apply_args_aux to keep function bodies under 50 lines.
+
+use lexer::span::Span;
+use parser::ast::{Expr};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle, INVALID_HANDLE,
+    tg_term_app, tg_term_type_app,
+    tg_type_is_arrow, tg_type_get_arrow_codomain, tg_type_get_arrow_domain,
+    tg_type_is_forall, tg_type_get_forall_body, tg_type_get_forall_var,
+    tg_type_forall,
+    tg_type_var,
+    tg_type_substitute
+};
+use elab::env::Env;
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error,
+    TermInfo
+};
+use elab::cir::{
+    CIRApp, CIRTypeApp, CTUnit,
+    type_handle_to_codegen_type
+};
+use elab::exprs::{synth};
+use elab::exprs::apply::app::{apply_args_aux};
+use elab::exprs::apply::app::type_inference::{
+    strip_foralls, infer_type_param,
+    get_nested_arrow_domain, tyvar_occurs_in_type
+};
+
+// ===========================================================================
+// PARAMETER BUNDLE RECORDS
+// ===========================================================================
+
+/// Context for the current application: the argument being applied and
+/// the remaining work (rest of args, span for errors, argument counter).
+pub type ApplyCtx = { arg: Expr, rest: List<Expr>, span: Span, arg_num: Nat }
+
+/// Decomposed forall type: the quantified variable, its body, and the
+/// effective argument type (with outer foralls stripped).
+type ForallParts = { var: Nat, body: TypeHandle, arg_ty: TypeHandle }
+
+/// Result of synthesizing the current argument expression.
+type SynthArg = { term: TermHandle, cir: CodegenIR }
+
+// ===========================================================================
+// FORALL TYPE ARGUMENT INFERENCE
+// ===========================================================================
+
+/// Handle application of a value argument to a forall-typed function.
+/// Synthesizes the argument, then dispatches based on the forall body shape.
+pub fn apply_forall_arg(
+    env: Env,
+    func: TermInfo,
+    ctx: ApplyCtx
+) -> ElabExprResult {
+    match synth(env, ctx.arg) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, arg_term, arg_ty, arg_cir) => {
+            let parts: ForallParts = {
+                var: tg_type_get_forall_var(func.ty),
+                body: tg_type_get_forall_body(func.ty),
+                arg_ty: strip_foralls(arg_ty)
+            };
+            let sa: SynthArg = { term: arg_term, cir: arg_cir };
+
+            if tg_type_is_arrow(parts.body) {
+                apply_forall_arrow_body(env2, func, parts, sa, ctx)
+            } else if tg_type_is_forall(parts.body) {
+                apply_forall_nested_body(env2, func, parts, sa, ctx)
+            } else {
+                apply_forall_direct_body(env2, func, parts, sa, ctx)
+            }
+        }
+    }
+}
+
+/// Handle forall with arrow body: `forall T. ParamTy -> ResultTy`.
+/// If T appears in ParamTy, infer it from the argument; otherwise defer.
+fn apply_forall_arrow_body(
+    env: Env,
+    func: TermInfo,
+    parts: ForallParts,
+    sa: SynthArg,
+    ctx: ApplyCtx
+) -> ElabExprResult {
+    let param_ty = tg_type_get_arrow_domain(parts.body);
+    let codomain = tg_type_get_arrow_codomain(parts.body);
+
+    if tyvar_occurs_in_type(param_ty, parts.var) {
+        // T appears in domain — infer and instantiate
+        let inferred_ty = infer_type_param(param_ty, parts.arg_ty, parts.var);
+        let type_app_term = tg_term_type_app(func.term, inferred_ty);
+        let type_app_cir = CIRTypeApp(func.cir, CTUnit());
+        let instantiated_ty = tg_type_substitute(parts.body, parts.var, inferred_ty);
+
+        if tg_type_is_arrow(instantiated_ty) {
+            let inst_domain = tg_type_get_arrow_domain(instantiated_ty);
+            let result_ty = tg_type_get_arrow_codomain(instantiated_ty);
+            let arg_ct = type_handle_to_codegen_type(inst_domain);
+            let ret_ct = type_handle_to_codegen_type(result_ty);
+            let next: TermInfo = { term: tg_term_app(type_app_term, sa.term), ty: result_ty, cir: CIRApp(type_app_cir, sa.cir, arg_ct, ret_ct) };
+            apply_args_aux(env, next, ctx.rest, ctx.span, ctx.arg_num + 1)
+        } else {
+            ElabExprErr(elab_expr_error("expected function type after type instantiation", ctx.span))
+        }
+    } else {
+        // T does NOT appear in domain — defer to try_instantiate_forall
+        let arg_ct = type_handle_to_codegen_type(parts.arg_ty);
+        let ret_ct = type_handle_to_codegen_type(codomain);
+        let next: TermInfo = { term: tg_term_app(func.term, sa.term), ty: tg_type_forall(parts.var, codomain), cir: CIRApp(func.cir, sa.cir, arg_ct, ret_ct) };
+        apply_args_aux(env, next, ctx.rest, ctx.span, ctx.arg_num + 1)
+    }
+}
+
+/// Handle forall with nested forall body: `forall T. forall U. ...`.
+/// Multi-param generic — check if T appears in the eventual arrow domain.
+fn apply_forall_nested_body(
+    env: Env,
+    func: TermInfo,
+    parts: ForallParts,
+    sa: SynthArg,
+    ctx: ApplyCtx
+) -> ElabExprResult {
+    let inner_domain = get_nested_arrow_domain(parts.body);
+
+    if inner_domain != INVALID_HANDLE && tyvar_occurs_in_type(inner_domain, parts.var) {
+        // Forall var IS in the nested arrow domain — infer it
+        let inferred_ty = infer_type_param(inner_domain, parts.arg_ty, parts.var);
+        let type_app_term = tg_term_type_app(func.term, inferred_ty);
+        let type_app_cir = CIRTypeApp(func.cir, CTUnit());
+        let instantiated_ty = tg_type_substitute(parts.body, parts.var, inferred_ty);
+
+        if tg_type_is_arrow(instantiated_ty) {
+            let inst_domain = tg_type_get_arrow_domain(instantiated_ty);
+            let result_ty = tg_type_get_arrow_codomain(instantiated_ty);
+            let arg_ct = type_handle_to_codegen_type(inst_domain);
+            let ret_ct = type_handle_to_codegen_type(result_ty);
+            let next: TermInfo = { term: tg_term_app(type_app_term, sa.term), ty: result_ty, cir: CIRApp(type_app_cir, sa.cir, arg_ct, ret_ct) };
+            apply_args_aux(env, next, ctx.rest, ctx.span, ctx.arg_num + 1)
+        } else if tg_type_is_forall(instantiated_ty) {
+            // Still a forall — re-enter so next layer can infer
+            let next: TermInfo = { term: type_app_term, ty: instantiated_ty, cir: type_app_cir };
+            apply_args_aux(env, next, Cons(ctx.arg, ctx.rest), ctx.span, ctx.arg_num)
+        } else {
+            ElabExprErr(elab_expr_error("expected function type after type instantiation", ctx.span))
+        }
+    } else {
+        // Phantom type param — defer by peeling outer forall
+        let deferred: TermInfo = { term: tg_term_type_app(func.term, tg_type_var(parts.var)), ty: parts.body, cir: CIRTypeApp(func.cir, CTUnit()) };
+        match apply_args_aux(env, deferred, Cons(ctx.arg, ctx.rest), ctx.span, ctx.arg_num) {
+            ElabExprErr(e) => ElabExprErr(e),
+            ElabExprOk(env2, result_term, result_ty, result_cir) =>
+                ElabExprOk(env2, result_term, tg_type_forall(parts.var, result_ty), result_cir)
+        }
+    }
+}
+
+/// Handle forall with non-arrow, non-forall body.
+/// Use the argument type directly as the type argument.
+fn apply_forall_direct_body(
+    env: Env,
+    func: TermInfo,
+    parts: ForallParts,
+    sa: SynthArg,
+    ctx: ApplyCtx
+) -> ElabExprResult {
+    let type_app_term = tg_term_type_app(func.term, parts.arg_ty);
+    let type_app_cir = CIRTypeApp(func.cir, CTUnit());
+    let instantiated_ty = tg_type_substitute(parts.body, parts.var, parts.arg_ty);
+
+    if tg_type_is_arrow(instantiated_ty) {
+        let inst_domain = tg_type_get_arrow_domain(instantiated_ty);
+        let result_ty = tg_type_get_arrow_codomain(instantiated_ty);
+        let arg_ct = type_handle_to_codegen_type(inst_domain);
+        let ret_ct = type_handle_to_codegen_type(result_ty);
+        let next: TermInfo = { term: tg_term_app(type_app_term, sa.term), ty: result_ty, cir: CIRApp(type_app_cir, sa.cir, arg_ct, ret_ct) };
+        apply_args_aux(env, next, ctx.rest, ctx.span, ctx.arg_num + 1)
+    } else {
+        ElabExprErr(elab_expr_error("expected function type after type instantiation", ctx.span))
+    }
+}

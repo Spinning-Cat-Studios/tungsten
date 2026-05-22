@@ -1,0 +1,90 @@
+// Character code constants and classification functions for the lexer.
+
+// ---------------------------------------------------------------------------
+// CHARACTER CODES
+// ---------------------------------------------------------------------------
+pub fn char_space() -> Nat { 32 }
+pub fn char_tab() -> Nat { 9 }
+pub fn char_newline() -> Nat { 10 }
+pub fn char_carriage_return() -> Nat { 13 }
+pub fn char_0() -> Nat { 48 }
+pub fn char_9() -> Nat { 57 }
+pub fn char_A() -> Nat { 65 }
+pub fn char_Z() -> Nat { 90 }
+pub fn char_a() -> Nat { 97 }
+pub fn char_z() -> Nat { 122 }
+pub fn char_underscore() -> Nat { 95 }
+pub fn char_lparen() -> Nat { 40 }
+pub fn char_rparen() -> Nat { 41 }
+pub fn char_lbrace() -> Nat { 123 }
+pub fn char_rbrace() -> Nat { 125 }
+pub fn char_lbracket() -> Nat { 91 }
+pub fn char_rbracket() -> Nat { 93 }
+pub fn char_langle() -> Nat { 60 }
+pub fn char_rangle() -> Nat { 62 }
+pub fn char_comma() -> Nat { 44 }
+pub fn char_semicolon() -> Nat { 59 }
+pub fn char_colon() -> Nat { 58 }
+pub fn char_dot() -> Nat { 46 }
+pub fn char_at_sign() -> Nat { 64 }
+pub fn char_hash() -> Nat { 35 }
+pub fn char_question() -> Nat { 63 }
+pub fn char_eq() -> Nat { 61 }
+pub fn char_bang() -> Nat { 33 }
+pub fn char_plus() -> Nat { 43 }
+pub fn char_minus() -> Nat { 45 }
+pub fn char_star() -> Nat { 42 }
+pub fn char_slash() -> Nat { 47 }
+pub fn char_percent() -> Nat { 37 }
+pub fn char_amp() -> Nat { 38 }
+pub fn char_pipe() -> Nat { 124 }
+pub fn char_caret() -> Nat { 94 }
+pub fn char_tilde() -> Nat { 126 }
+pub fn char_double_quote() -> Nat { 34 }
+pub fn char_single_quote() -> Nat { 39 }
+pub fn char_backslash() -> Nat { 92 }
+pub fn char_x() -> Nat { 120 }
+pub fn char_X() -> Nat { 88 }
+pub fn char_o() -> Nat { 111 }
+pub fn char_O() -> Nat { 79 }
+pub fn char_b() -> Nat { 98 }
+pub fn char_B() -> Nat { 66 }
+pub fn char_f() -> Nat { 102 }
+pub fn char_F() -> Nat { 70 }
+pub fn char_u() -> Nat { 117 }
+
+// ---------------------------------------------------------------------------
+// CHARACTER CLASSIFICATION
+// ---------------------------------------------------------------------------
+pub fn is_whitespace(ch: Nat) -> Bool {
+    ch == char_space() || ch == char_tab() ||
+    ch == char_newline() || ch == char_carriage_return()
+}
+
+pub fn scanner_is_digit(ch: Nat) -> Bool {
+    ch >= char_0() && ch <= char_9()
+}
+
+pub fn is_ident_start(ch: Nat) -> Bool {
+    (ch >= char_A() && ch <= char_Z()) ||
+    (ch >= char_a() && ch <= char_z()) ||
+    ch == char_underscore()
+}
+
+pub fn is_ident_continue(ch: Nat) -> Bool {
+    is_ident_start(ch) || scanner_is_digit(ch)
+}
+
+pub fn is_hex_digit(ch: Nat) -> Bool {
+    scanner_is_digit(ch) ||
+    (ch >= char_A() && ch <= char_F()) ||
+    (ch >= char_a() && ch <= char_f())
+}
+
+pub fn is_octal_digit(ch: Nat) -> Bool {
+    ch >= char_0() && ch <= char_0() + 7
+}
+
+pub fn is_binary_digit(ch: Nat) -> Bool {
+    ch == char_0() || ch == char_0() + 1
+}

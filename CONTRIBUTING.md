@@ -2,11 +2,11 @@
 
 Thank you for your interest in Tungsten.
 
-## Current Status (v1.0)
+## Current Status (v1.5)
 
-Tungsten v1.0 is focused on stabilizing the self-hosted compiler and establishing the release pipeline. Development is currently single-maintainer.
+Tungsten is under active single-maintainer development. The v1.5 release focused on compiler architecture, performance, and language ergonomics.
 
-**Pull requests are not being accepted for v1.0.** This is a bandwidth decision — the project is at a stage where reviewing and integrating external changes would slow down core stabilisation work. Community contributions will open in v1.5 once the upstream workflow and CI are in place.
+**Pull requests are not being accepted at this time.** This is a bandwidth decision — the project is at a stage where reviewing and integrating external changes would slow down core development work. A structured contribution workflow (CI for external PRs, review process, contributor guidelines) is planned for v2.0.
 
 ## What's Welcome Now
 
@@ -18,9 +18,9 @@ Bug reports, questions, and feedback are genuinely appreciated:
 
 These help improve the project and are always welcome.
 
-## v1.5 and Beyond
+## v2.0 and Beyond
 
-Starting with v1.5, Tungsten will accept community contributions through a structured process. Contribution guidelines, CI for external PRs, and a workflow for integrating changes will be documented before then.
+Starting with v2.0, Tungsten will accept community contributions through a structured process. Contribution guidelines, CI for external PRs, and a workflow for integrating changes will be documented before then.
 
 If you have ideas you'd like to discuss in the meantime, opening an issue is the right path.
 

@@ -1,0 +1,258 @@
+// Match expression elaboration.
+//
+// This module handles elaboration of match expressions, including:
+// - Bool matches (desugared to if-then-else)
+// - ADT matches (using case expressions)
+// - Catch-all patterns (variable or wildcard)
+//
+// ## Module Structure
+//
+// - patterns.tg:    Pattern helpers, binding, type navigation
+// - arm_reorder.tg: Arm reordering by constructor index, padding
+// - adt_match.tg:   ADT match dispatch, binary match, catch-all
+// - multi_arm.tg:   Multi-arm (>2) match elaboration
+
+pub mod patterns;
+pub mod arm_reorder;
+pub mod adt_match;
+pub mod multi_arm;
+pub mod desugar;
+
+// Re-export submodule public API so external imports via matches::item still work
+pub use elab::exprs::matches::patterns::{
+    is_catch_all_pattern, is_newtype_unwrap,
+    bind_pattern_in_scope, get_arm_binding_type,
+    pattern_to_var_name, pattern_constructor_name,
+    is_bool_type, get_variant_payload
+};
+pub use elab::exprs::matches::arm_reorder::{
+    reorder_arms_by_constructor, count_sum_variants, maybe_pad_arms
+};
+pub use elab::exprs::matches::adt_match::{
+    elab_adt_match, elab_adt_match_checked
+};
+pub use elab::exprs::matches::multi_arm::{
+    elab_multi_arm_match, elab_multi_arm_match_checked
+};
+pub use elab::exprs::matches::desugar::{
+    desugar_nested_arms, DesugarResult, DesugarOk, DesugarErr
+};
+
+// Re-export ScrutInfo for submodules
+pub use elab::exprs::matches::{ScrutInfo};
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, Pattern, PatLiteral, PatLitBool,
+    MatchArm,
+    MaybeExpr, NoExpr, SomeExpr
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_if,
+    tg_type_is_mu, tg_type_is_sum,
+    tg_type_is_product,
+    tg_type_bool, tg_types_equal
+};
+use elab::env::{
+    Env,
+    MaybeSpan, NoSpan, SomeSpan
+};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr};
+use elab::exprs::forms::result::{elab_expr_error, add_expected_because};
+use elab::error::ExpMatchBranch;
+use elab::cir::{CodegenIR, CIRIf};
+
+// Import synth/check from parent module for mutual recursion
+use elab::exprs::{synth, check};
+
+// ===========================================================================
+// SHARED RECORD TYPES
+// ===========================================================================
+
+/// Elaborated scrutinee: term, type, and codegen IR travel together.
+pub type ScrutInfo = {
+    term: TermHandle,
+    ty: TypeHandle,
+    cir: CodegenIR
+}
+
+/// Accumulator for Bool arm extraction.
+type BoolArmAcc = {
+    true_body: MaybeExpr,
+    false_body: MaybeExpr,
+    true_span: MaybeSpan,
+    false_span: MaybeSpan
+}
+
+// ===========================================================================
+// MATCH ELABORATION
+// ===========================================================================
+
+/// Synthesize a match expression.
+pub fn synth_match(env: Env, scrutinee: Expr, arms: List<MatchArm>, span: Span) -> ElabExprResult {
+    match synth(env, scrutinee) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, scrut_term, scrut_ty, scrut_cir) =>
+            let scrut: ScrutInfo = { term: scrut_term, ty: scrut_ty, cir: scrut_cir };
+            dispatch_match(env2, scrut, arms, span)
+    }
+}
+
+/// Check a match expression against an expected type.
+pub fn check_match(
+    env: Env,
+    scrutinee: Expr,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match synth(env, scrutinee) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, scrut_term, scrut_ty, scrut_cir) =>
+            let scrut: ScrutInfo = { term: scrut_term, ty: scrut_ty, cir: scrut_cir };
+            dispatch_match_checked(env2, scrut, arms, expected, span)
+    }
+}
+
+/// Dispatch to appropriate match handler based on scrutinee type.
+fn dispatch_match(env: Env, scrut: ScrutInfo, arms: List<MatchArm>, span: Span) -> ElabExprResult {
+    if is_bool_type(scrut.ty) {
+        elab_bool_match(env, scrut, arms, span)
+    } else if tg_type_is_mu(scrut.ty) || tg_type_is_sum(scrut.ty) || tg_type_is_product(scrut.ty) {
+        elab_adt_match(env, scrut, arms, span)
+    } else {
+        ElabExprErr(elab_expr_error("cannot match on this type", span))
+    }
+}
+
+/// Dispatch match with expected type.
+fn dispatch_match_checked(
+    env: Env,
+    scrut: ScrutInfo,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    if is_bool_type(scrut.ty) {
+        elab_bool_match_checked(env, scrut, arms, expected, span)
+    } else if tg_type_is_mu(scrut.ty) || tg_type_is_sum(scrut.ty) || tg_type_is_product(scrut.ty) {
+        elab_adt_match_checked(env, scrut, arms, expected, span)
+    } else {
+        ElabExprErr(elab_expr_error("cannot match on this type", span))
+    }
+}
+
+// ===========================================================================
+// BOOL MATCH (Desugar to if-then-else)
+// ===========================================================================
+
+/// Elaborate a match on Bool, transforming to if-then-else.
+fn elab_bool_match(env: Env, scrut: ScrutInfo, arms: List<MatchArm>, span: Span) -> ElabExprResult {
+    match extract_bool_arms(arms, span) {
+        ExtractBoolErr(msg) => ElabExprErr(elab_expr_error(msg, span)),
+        ExtractBoolOk(true_body, false_body, true_span, false_span) =>
+            match synth(env, true_body) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, true_term, result_ty, true_cir) =>
+                    match check(env2, false_body, result_ty) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(true_span))),
+                        ElabExprOk(env3, false_term, _, false_cir) =>
+                            let term = tg_term_if(scrut.term, true_term, false_term);
+                            let cir = CIRIf(scrut.cir, true_cir, false_cir);
+                            ElabExprOk(env3, term, result_ty, cir)
+                    }
+            }
+    }
+}
+
+/// Elaborate Bool match with expected type.
+fn elab_bool_match_checked(
+    env: Env,
+    scrut: ScrutInfo,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match extract_bool_arms(arms, span) {
+        ExtractBoolErr(msg) => ElabExprErr(elab_expr_error(msg, span)),
+        ExtractBoolOk(true_body, false_body, true_span, false_span) =>
+            match check(env, true_body, expected) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, true_term, _, true_cir) =>
+                    match check(env2, false_body, expected) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(true_span))),
+                        ElabExprOk(env3, false_term, _, false_cir) =>
+                            let term = tg_term_if(scrut.term, true_term, false_term);
+                            let cir = CIRIf(scrut.cir, true_cir, false_cir);
+                            ElabExprOk(env3, term, expected, cir)
+                    }
+            }
+    }
+}
+
+/// Result of extracting Bool arms.
+type ExtractBoolResult =
+    | ExtractBoolOk(Expr, Expr, Span, Span)  // (true_body, false_body, true_span, false_span)
+    | ExtractBoolErr(String)
+
+/// Extract true and false arms from a Bool match.
+fn extract_bool_arms(arms: List<MatchArm>, span: Span) -> ExtractBoolResult {
+    let acc: BoolArmAcc = { true_body: NoExpr, false_body: NoExpr, true_span: NoSpan, false_span: NoSpan };
+    extract_bool_arms_helper(arms, acc, span)
+}
+
+/// Build the final ExtractBoolResult from accumulated true/false bodies and spans.
+fn build_bool_result(acc: BoolArmAcc, span: Span) -> ExtractBoolResult {
+    match acc.true_body {
+        NoExpr() => ExtractBoolErr("missing `true` pattern in Bool match"),
+        SomeExpr(tb) =>
+            match acc.false_body {
+                NoExpr() => ExtractBoolErr("missing `false` pattern in Bool match"),
+                SomeExpr(fb) =>
+                    let ts = resolve_span(acc.true_span, span);
+                    let fs = resolve_span(acc.false_span, span);
+                    ExtractBoolOk(tb, fb, ts, fs)
+            }
+    }
+}
+
+/// Resolve an optional span, falling back to a default.
+fn resolve_span(maybe: MaybeSpan, default: Span) -> Span {
+    match maybe {
+        SomeSpan(s) => s,
+        NoSpan() => default
+    }
+}
+
+fn extract_bool_arms_helper(arms: List<MatchArm>, acc: BoolArmAcc, span: Span) -> ExtractBoolResult {
+    match arms {
+        Nil() => build_bool_result(acc, span),
+        Cons(arm, rest) =>
+            let arm_span = arm.span;
+            match arm.pattern {
+                PatLiteral(lit, _) =>
+                    match lit {
+                        PatLitBool(b) =>
+                            if b {
+                                match acc.true_body {
+                                    SomeExpr(_) => ExtractBoolErr("duplicate `true` pattern"),
+                                    NoExpr() =>
+                                        let next: BoolArmAcc = { true_body: SomeExpr(arm.body), false_body: acc.false_body, true_span: SomeSpan(arm_span), false_span: acc.false_span };
+                                        extract_bool_arms_helper(rest, next, span)
+                                }
+                            } else {
+                                match acc.false_body {
+                                    SomeExpr(_) => ExtractBoolErr("duplicate `false` pattern"),
+                                    NoExpr() =>
+                                        let next: BoolArmAcc = { true_body: acc.true_body, false_body: SomeExpr(arm.body), true_span: acc.true_span, false_span: SomeSpan(arm_span) };
+                                        extract_bool_arms_helper(rest, next, span)
+                                }
+                            },
+                        _ => ExtractBoolErr("non-Bool literal in Bool match")
+                    },
+                _ => ExtractBoolErr("non-literal pattern in Bool match; use `true` or `false`")
+            }
+    }
+}

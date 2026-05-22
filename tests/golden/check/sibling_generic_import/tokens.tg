@@ -1,0 +1,8 @@
+// Tokens module — defines a generic Container<T> type.
+pub type Container<T> =
+    | Empty
+    | Holding(T)
+
+pub fn wrap(value: Nat) -> Container<Nat> {
+    Holding(value)
+}

@@ -1,0 +1,104 @@
+// src/compiler/parser/items/functions.tg
+// Function definition parsing.
+
+use lexer::token::{TokenKind, TokFn, TokArrow, TokLBrace, TokRBrace};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use driver::util::{Result, Ok, Err};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, Visibility};
+use parser::ast::nodes::{Item, ItemFn, TypeExpr, type_expr_span, Expr, expr_span, TypeParam, Param};
+use driver::ffi::{List};
+use parser::items::shared::type_params::{parse_optional_type_params};
+use parser::items::shared::params::{parse_params};
+use parser::types::{parse_type};
+use parser::exprs::{parse_block};
+
+// ===========================================================================
+// FUNCTION PARSING
+// ===========================================================================
+
+/// Accumulated function header context threaded through parsing stages.
+type FnParts = { vis: Visibility, start_span: Span, name: String, name_span: Span }
+
+/// Parse a function definition.
+///
+/// Grammar:
+///   Fn = "fn" IDENT TypeParams? Params ("->" Type)? "{" Expr "}"
+pub fn parse_fn(cur: Cursor, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    // Consume "fn" keyword
+    let cur2 = cursor_advance(cur);
+    
+    // Parse function name
+    match cursor_eat_ident(cur2) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur2) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            Err(parse_error_expected("function name", found, cursor_peek_span(cur2)))
+        },
+        SomeIdentResult(name, cur3) => {
+            let fp: FnParts = { vis: vis, start_span: start_span, name: name, name_span: cursor_peek_span(cur2) };
+            parse_fn_signature(cur3, fp)
+        }
+    }
+}
+
+/// Parse function signature and body after the name.
+/// Handles: TypeParams? Params ("->" Type)? "{" Expr "}"
+fn parse_fn_signature(cur: Cursor, fp: FnParts) -> Result<(Item, Cursor), ParseError> {
+    // Parse optional type parameters
+    let (type_params, cur2) = parse_optional_type_params(cur)?;
+    parse_fn_params(cur2, fp, type_params)
+}
+
+/// Parse function parameters, return type, and body.
+fn parse_fn_params(cur: Cursor, fp: FnParts,
+                   type_params: List<TypeParam>) -> Result<(Item, Cursor), ParseError> {
+    let (params, cur2) = parse_params(cur)?;
+    parse_fn_return_and_body(cur2, fp, type_params, params)
+}
+
+/// Parse optional return type and body.
+fn parse_fn_return_and_body(cur: Cursor, fp: FnParts,
+                            type_params: List<TypeParam>,
+                            params: List<Param>) -> Result<(Item, Cursor), ParseError> {
+    let (ret_type, cur2) = parse_optional_return_type(cur)?;
+    parse_fn_body(cur2, fp, type_params, params, ret_type)
+}
+
+/// Parse function body and build the final item.
+fn parse_fn_body(cur: Cursor, fp: FnParts,
+                 type_params: List<TypeParam>,
+                 params: List<Param>, ret_type: MaybeTypeExpr) -> Result<(Item, Cursor), ParseError> {
+    let (body, cur2) = parse_block(cur)?;
+    let fn_def: FunctionDef = {
+        vis: fp.vis,
+        name: ident_new(fp.name, fp.name_span),
+        type_params: type_params,
+        params: params,
+        return_type: ret_type,
+        body: body,
+        span: span_merge(fp.start_span, expr_span(body))
+    };
+    Ok((ItemFn(fn_def), cur2))
+}
+
+// ===========================================================================
+// RETURN TYPE PARSING
+// ===========================================================================
+
+/// Parse an optional return type: `-> Type`.
+fn parse_optional_return_type(cur: Cursor) -> Result<(MaybeTypeExpr, Cursor), ParseError> {
+    if cursor_check(cur, TokArrow()) {
+        let cur2 = cursor_advance(cur);
+        let (ty, cur3) = parse_type(cur2)?;
+        Ok((SomeTypeExpr(ty), cur3))
+    } else {
+        Ok((NoTypeExpr(), cur))
+    }
+}

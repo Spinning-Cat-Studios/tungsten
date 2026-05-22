@@ -1,0 +1,87 @@
+// src/compiler/elab/exprs/control/return_expr.tg
+// Return elaboration (ADR 13.5.26d).
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_unit,
+    tg_term_return,
+    tg_type_unit,
+    tg_type_void,
+    tg_types_equal
+};
+use elab::env::{Env, env_return_type, env_get_fn_span, MaybeTypeHandle, NoTypeHandle, SomeTypeHandle, TryBlockTypeHandle, MaybeSpan, NoSpan, SomeSpan};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, elab_expr_return_type_error, add_expected_because
+};
+use elab::error::{ExpFunctionReturn};
+use elab::cir::{CodegenIR, CIRUnit};
+
+// Import check from parent module for mutual recursion
+use elab::exprs::{check};
+
+/// Synthesize return expression.
+/// Uses the return type from the environment (set when entering a function body).
+pub fn synth_return(
+    env: Env,
+    value: Expr,
+    span: Span
+) -> ElabExprResult {
+    match env_return_type(env) {
+        NoTypeHandle() =>
+            ElabExprErr(elab_expr_error(
+                "return statement outside of function body",
+                span
+            )),
+        TryBlockTypeHandle(_) =>
+            ElabExprErr(elab_expr_error(
+                "`return` inside `try` block is not allowed; use `?` to propagate errors",
+                span
+            )),
+        SomeTypeHandle(return_ty) =>
+            synth_return_value(env, value, return_ty, span)
+    }
+}
+
+fn synth_return_value(env: Env, value: Expr, return_ty: TypeHandle, span: Span) -> ElabExprResult {
+    let fn_span = match env_get_fn_span(env) {
+        NoSpan() => span,
+        SomeSpan(s) => s
+    };
+    match check(env, value, return_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpFunctionReturn(fn_span))),
+        ElabExprOk(env2, term, _, cir) =>
+            ElabExprOk(env2, tg_term_return(term), tg_type_void(), cir)
+    }
+}
+
+/// Synthesize return expression without a value (return;).
+/// Checks that the expected return type is Unit.
+pub fn synth_return_unit(env: Env, span: Span) -> ElabExprResult {
+    match env_return_type(env) {
+        NoTypeHandle() =>
+            ElabExprErr(elab_expr_error(
+                "return statement outside of function body",
+                span
+            )),
+        TryBlockTypeHandle(_) =>
+            ElabExprErr(elab_expr_error(
+                "`return` inside `try` block is not allowed; use `?` to propagate errors",
+                span
+            )),
+        SomeTypeHandle(return_ty) =>
+            let unit_ty = tg_type_unit();
+            if tg_types_equal(return_ty, unit_ty) {
+                // Return type is Unit, return unit value wrapped in Return — ADR 13.5.26d
+                ElabExprOk(env, tg_term_return(tg_term_unit()), tg_type_void(), CIRUnit)
+            } else {
+                // Return type is not Unit, need a value
+                ElabExprErr(elab_expr_error(
+                    "return without value requires Unit return type",
+                    span
+                ))
+            }
+    }
+}

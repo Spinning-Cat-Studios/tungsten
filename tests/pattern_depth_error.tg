@@ -1,5 +1,6 @@
 // Test: Pattern depth limit (should fail with E0103)
 // This file tests that deeply nested patterns are rejected.
+// Run: tungsten check tests/pattern_depth_error.tg  → expects E0103 error
 
 // Define types in reverse order (dependencies first)
 type D = MkD(Nat)

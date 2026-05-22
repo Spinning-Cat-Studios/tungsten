@@ -2,12 +2,12 @@
 
 use std::ffi::{c_char, CStr, CString};
 
-use super::files::{tg_file_exists, tg_is_directory, tg_path_join};
-use super::process::{tg_exec_process, tg_getenv, tg_stderr_is_tty, tg_stdout_is_tty};
-use super::strings::{
+use super::console::{tg_exec_process, tg_getenv, tg_stderr_is_tty, tg_stdout_is_tty};
+use super::io::{
     tg_cstring_to_string, tg_string_append_char, tg_string_drop, tg_string_slice,
     tg_string_to_cstring, TgString,
 };
+use super::io::{tg_file_exists, tg_is_directory, tg_path_join};
 use super::tg_free_string;
 
 #[test]
@@ -220,4 +220,92 @@ fn test_getenv_not_set() {
     let name = CString::new("TUNGSTEN_TEST_NONEXISTENT_VAR_12345").unwrap();
     let result = tg_getenv(name.as_ptr());
     assert!(result.is_null());
+}
+
+// ============================================================================
+// Cache FFI tests (ADR 19.5.26e)
+// ============================================================================
+
+use super::io::{tg_free_bytes, tg_mkdir_p, tg_read_file_bytes, tg_sha256, tg_write_file_bytes};
+
+#[test]
+fn test_sha256_known_value() {
+    // SHA-256 of empty string is well-known
+    let data = CString::new("").unwrap();
+    let result = tg_sha256(data.as_ptr());
+    assert!(!result.is_null());
+    let hex = unsafe { CStr::from_ptr(result) }.to_str().unwrap();
+    assert_eq!(
+        hex,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    tg_free_string(result);
+}
+
+#[test]
+fn test_sha256_hello() {
+    let data = CString::new("hello").unwrap();
+    let result = tg_sha256(data.as_ptr());
+    assert!(!result.is_null());
+    let hex = unsafe { CStr::from_ptr(result) }.to_str().unwrap();
+    assert_eq!(
+        hex,
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    assert_eq!(hex.len(), 64);
+    tg_free_string(result);
+}
+
+#[test]
+fn test_sha256_null() {
+    let result = tg_sha256(std::ptr::null());
+    assert!(result.is_null());
+}
+
+#[test]
+fn test_mkdir_p_and_binary_roundtrip() {
+    let dir = std::env::temp_dir().join("tungsten_test_cache_ffi");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let dir_cstr = CString::new(dir.to_str().unwrap()).unwrap();
+    assert_eq!(tg_mkdir_p(dir_cstr.as_ptr()), 0);
+    assert!(dir.exists());
+
+    // Write binary data
+    let file_path = dir.join("test.bin");
+    let file_cstr = CString::new(file_path.to_str().unwrap()).unwrap();
+    let data: Vec<u8> = vec![0x00, 0x01, 0xFF, 0xFE, 0x42];
+    assert_eq!(
+        tg_write_file_bytes(file_cstr.as_ptr(), data.as_ptr(), data.len() as u64),
+        0
+    );
+
+    // Read it back
+    let mut out_data: *mut u8 = std::ptr::null_mut();
+    let mut out_len: u64 = 0;
+    assert_eq!(
+        tg_read_file_bytes(file_cstr.as_ptr(), &mut out_data, &mut out_len),
+        0
+    );
+    assert!(!out_data.is_null());
+    assert_eq!(out_len, 5);
+
+    let read_back = unsafe { std::slice::from_raw_parts(out_data, out_len as usize) };
+    assert_eq!(read_back, &[0x00, 0x01, 0xFF, 0xFE, 0x42]);
+
+    tg_free_bytes(out_data, out_len);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_read_file_bytes_nonexistent() {
+    let path = CString::new("/tmp/tungsten_test_nonexistent_12345.bin").unwrap();
+    let mut out_data: *mut u8 = std::ptr::null_mut();
+    let mut out_len: u64 = 0;
+    assert_eq!(
+        tg_read_file_bytes(path.as_ptr(), &mut out_data, &mut out_len),
+        -1
+    );
+    assert!(out_data.is_null());
+    assert_eq!(out_len, 0);
 }

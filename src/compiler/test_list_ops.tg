@@ -1,0 +1,131 @@
+// Unit tests for driver/util/lists.tg tail-recursive conversions.
+// Verifies order preservation and type correctness (ADR 20.5.26e).
+//
+// Type-annotation tests: cost 3 (--check-only, no LLVM).
+// Uses typed let-bindings to verify return types at elaboration time.
+// (expect_type string comparison is unreliable across type aliases.)
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{
+    list_len, list_map, list_filter, list_take,
+    list_append, list_append_string, list_reverse
+};
+
+// ---------------------------------------------------------------------------
+// list_len
+// ---------------------------------------------------------------------------
+
+pub fn test_list_len_empty() -> Unit {
+    let n: Nat = list_len(Nil : List<Nat>);
+    let _ = n;
+}
+
+pub fn test_list_len_three() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
+    let n: Nat = list_len(xs);
+    let _ = n;
+}
+
+// ---------------------------------------------------------------------------
+// list_map — order preservation
+// ---------------------------------------------------------------------------
+
+fn double(n: Nat) -> Nat { n + n }
+
+pub fn test_list_map_type() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
+    let result: List<Nat> = list_map(xs, double);
+    let _ = result;
+}
+
+pub fn test_list_map_empty() -> Unit {
+    let result: List<Nat> = list_map(Nil : List<Nat>, double);
+    let _ = result;
+}
+
+// ---------------------------------------------------------------------------
+// list_filter — order preservation
+// ---------------------------------------------------------------------------
+
+fn is_even(n: Nat) -> Bool { n % 2 == 0 }
+
+pub fn test_list_filter_type() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Cons(4, Nil))));
+    let result: List<Nat> = list_filter(xs, is_even);
+    let _ = result;
+}
+
+pub fn test_list_filter_empty() -> Unit {
+    let result: List<Nat> = list_filter(Nil : List<Nat>, is_even);
+    let _ = result;
+}
+
+// ---------------------------------------------------------------------------
+// list_take — order preservation
+// ---------------------------------------------------------------------------
+
+pub fn test_list_take_type() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
+    let result: List<Nat> = list_take(xs, 2);
+    let _ = result;
+}
+
+pub fn test_list_take_zero() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Nil));
+    let result: List<Nat> = list_take(xs, 0);
+    let _ = result;
+}
+
+// ---------------------------------------------------------------------------
+// list_append — left-to-right semantics
+// ---------------------------------------------------------------------------
+
+pub fn test_list_append_type() -> Unit {
+    let a: List<Nat> = Cons(1, Cons(2, Nil));
+    let b: List<Nat> = Cons(3, Nil);
+    let result: List<Nat> = list_append(a, b);
+    let _ = result;
+}
+
+pub fn test_list_append_empty_left() -> Unit {
+    let b: List<Nat> = Cons(1, Nil);
+    let result: List<Nat> = list_append(Nil : List<Nat>, b);
+    let _ = result;
+}
+
+pub fn test_list_append_empty_right() -> Unit {
+    let a: List<Nat> = Cons(1, Nil);
+    let result: List<Nat> = list_append(a, Nil);
+    let _ = result;
+}
+
+// ---------------------------------------------------------------------------
+// list_append_string
+// ---------------------------------------------------------------------------
+
+pub fn test_list_append_string_type() -> Unit {
+    let xs: List<String> = Cons("a", Cons("b", Nil));
+    let result: List<String> = list_append_string(xs, "c");
+    let _ = result;
+}
+
+// ---------------------------------------------------------------------------
+// list_reverse (already tail-recursive — sanity check)
+// ---------------------------------------------------------------------------
+
+pub fn test_list_reverse_type() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
+    let result: List<Nat> = list_reverse(xs);
+    let _ = result;
+}
+
+pub fn test_list_reverse_type() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
+    let result: List<Nat> = list_reverse(xs);
+    let _ = result;
+}

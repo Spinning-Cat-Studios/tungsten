@@ -1,0 +1,6 @@
+// W1 regression test: Bool elimination via if-then-else
+// Verifies that if/else evaluates and displays Bool correctly
+
+pub fn main() -> Bool {
+    if true { false } else { true }
+}

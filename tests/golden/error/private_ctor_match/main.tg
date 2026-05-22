@@ -1,0 +1,15 @@
+// AC3: Private constructor in pattern match from another module produces E0016.
+// PrivToken is private, so its constructors can't be matched externally.
+
+mod helper;
+
+fn check(x: Nat) -> Nat {
+    match x {
+        helper::Secret => 1,
+        _ => 0
+    }
+}
+
+fn main() -> Nat {
+    check(0)
+}

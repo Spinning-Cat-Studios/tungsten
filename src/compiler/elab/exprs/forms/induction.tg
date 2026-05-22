@@ -1,0 +1,202 @@
+// src/compiler/elab/exprs/forms/induction.tg
+// Natural number induction and recursion elaboration (ADR 22.5.26a).
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span, Motive, MotiveLambda, MotiveExpr, LambdaParam, TypeExpr,
+    MaybeTypeExpr, SomeTypeExpr, NoTypeExpr};
+use parser::ast::pattern::{Pattern, PatVar, PatWildcard};
+use parser::ast::common::{Ident, ident_name};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_natind, tg_term_natrec,
+    tg_type_nat, tg_type_arrow, tg_types_equal
+};
+use elab::env::Env;
+use elab::env::ops::env_bind_local;
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error_coded
+};
+use elab::types::{elab_type};
+use elab::types::result_types::{ElabTypeResult, ElabTypeOk, ElabTypeErr};
+use elab::cir::{CodegenIR, CIRRefl, CIRUnit, ct_unit};
+use elab::exprs::synth;
+
+// ===========================================================================
+// NATIND ELABORATION
+// ===========================================================================
+
+/// Synthesize `natind(motive, base, step, n)`.
+pub fn synth_natind(env: Env, motive: Motive, base: Expr, step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    match motive {
+        MotiveLambda(param, body, motive_span) =>
+            synth_natind_lambda(env, param, body, motive_span, base, step, n, span),
+        MotiveExpr(_) =>
+            ElabExprErr(elab_expr_error_coded(
+                "natind motive must be a predicate lambda |k: Nat| <type>, not a plain expression",
+                span,
+                "E0078"
+            ))
+    }
+}
+
+fn synth_natind_lambda(env: Env, param: LambdaParam, body: TypeExpr, motive_span: Span,
+                        base: Expr, step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    match param.ty {
+        SomeTypeExpr(param_ty_expr) =>
+            synth_natind_check_domain(env, param, param_ty_expr, body, motive_span, base, step, n, span),
+        NoTypeExpr() =>
+            ElabExprErr(elab_expr_error_coded(
+                "natind motive parameter must have a type annotation",
+                motive_span,
+                "E0078"
+            ))
+    }
+}
+
+fn synth_natind_check_domain(env: Env, param: LambdaParam, param_ty_expr: TypeExpr, body: TypeExpr,
+                              motive_span: Span, base: Expr, step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    match elab_type(env, param_ty_expr) {
+        ElabTypeErr(e) => ElabExprErr(elab_expr_error_coded(
+            "natind motive parameter type is invalid", motive_span, "E0078"
+        )),
+        ElabTypeOk(param_ty_h, _) =>
+            if !tg_types_equal(param_ty_h, tg_type_nat()) {
+                ElabExprErr(elab_expr_error_coded(
+                    "natind motive parameter must have type Nat", motive_span, "E0078"
+                ))
+            } else {
+                synth_natind_body(env, param, param_ty_h, body, motive_span, base, step, n, span)
+            }
+    }
+}
+
+fn synth_natind_body(env: Env, param: LambdaParam, param_ty_h: TypeHandle, body: TypeExpr,
+                      motive_span: Span, base: Expr, step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    let var_name = natind_param_name(param);
+    let env2 = env_bind_local(env, var_name, param_ty_h);
+    match elab_type(env2, body) {
+        ElabTypeErr(e) => ElabExprErr(elab_expr_error_coded(
+            "natind motive body is not a valid type", motive_span, "E0078"
+        )),
+        ElabTypeOk(body_ty, _) =>
+            synth_natind_base(env, body_ty, base, step, n, span)
+    }
+}
+
+fn synth_natind_base(env: Env, motive_body: TypeHandle, base: Expr, step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    match synth(env, base) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, base_term, base_ty, _) =>
+            if !tg_types_equal(base_ty, motive_body) {
+                ElabExprErr(elab_expr_error_coded(
+                    "natind base case type does not match motive body type", span, "E0010"
+                ))
+            } else {
+                synth_natind_step(env2, motive_body, base_term, step, n, span)
+            }
+    }
+}
+
+fn synth_natind_step(env: Env, motive_body: TypeHandle, base_term: TermHandle,
+                      step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    let step_ty = tg_type_arrow(tg_type_nat(), tg_type_arrow(motive_body, motive_body));
+    match synth(env, step) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, step_term, step_actual_ty, _) =>
+            if !tg_types_equal(step_actual_ty, step_ty) {
+                ElabExprErr(elab_expr_error_coded(
+                    "natind step case type does not match Nat -> P -> P", span, "E0010"
+                ))
+            } else {
+                synth_natind_n(env2, motive_body, base_term, step_term, n, span)
+            }
+    }
+}
+
+fn synth_natind_n(env: Env, motive_body: TypeHandle, base_term: TermHandle, step_term: TermHandle,
+                   n: Expr, span: Span) -> ElabExprResult {
+    match synth(env, n) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, n_term, n_ty, _) =>
+            if !tg_types_equal(n_ty, tg_type_nat()) {
+                ElabExprErr(elab_expr_error_coded(
+                    "natind target must be Nat", span, "E0010"
+                ))
+            } else {
+                let motive_type = tg_type_arrow(tg_type_nat(), motive_body);
+                let term = tg_term_natind(motive_type, base_term, step_term, n_term);
+                let cir = CIRRefl(ct_unit(), CIRUnit);
+                ElabExprOk(env2, term, motive_body, cir)
+            }
+    }
+}
+
+fn natind_param_name(param: LambdaParam) -> String {
+    match param.pattern {
+        PatVar(ident) => ident_name(ident),
+        PatWildcard(_) => "_",
+        _ => "_"
+    }
+}
+
+// ===========================================================================
+// NATREC ELABORATION
+// ===========================================================================
+
+/// Synthesize `natrec(type, base, step, n)`.
+pub fn synth_natrec(env: Env, ty_expr: TypeExpr, base: Expr, step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    match elab_type(env, ty_expr) {
+        ElabTypeErr(e) => ElabExprErr(elab_expr_error_coded(
+            "natrec result type is not valid", span, "E0010"
+        )),
+        ElabTypeOk(result_ty, _) =>
+            synth_natrec_base(env, result_ty, base, step, n, span)
+    }
+}
+
+fn synth_natrec_base(env: Env, result_ty: TypeHandle, base: Expr, step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    match synth(env, base) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, base_term, base_ty, _) =>
+            if !tg_types_equal(base_ty, result_ty) {
+                ElabExprErr(elab_expr_error_coded(
+                    "natrec base case type does not match result type", span, "E0010"
+                ))
+            } else {
+                synth_natrec_step(env2, result_ty, base_term, step, n, span)
+            }
+    }
+}
+
+fn synth_natrec_step(env: Env, result_ty: TypeHandle, base_term: TermHandle,
+                      step: Expr, n: Expr, span: Span) -> ElabExprResult {
+    let step_ty = tg_type_arrow(tg_type_nat(), tg_type_arrow(result_ty, result_ty));
+    match synth(env, step) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, step_term, step_actual_ty, _) =>
+            if !tg_types_equal(step_actual_ty, step_ty) {
+                ElabExprErr(elab_expr_error_coded(
+                    "natrec step case type does not match Nat -> T -> T", span, "E0010"
+                ))
+            } else {
+                synth_natrec_n(env2, result_ty, base_term, step_term, n, span)
+            }
+    }
+}
+
+fn synth_natrec_n(env: Env, result_ty: TypeHandle, base_term: TermHandle, step_term: TermHandle,
+                   n: Expr, span: Span) -> ElabExprResult {
+    match synth(env, n) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, n_term, n_ty, _) =>
+            if !tg_types_equal(n_ty, tg_type_nat()) {
+                ElabExprErr(elab_expr_error_coded(
+                    "natrec target must be Nat", span, "E0010"
+                ))
+            } else {
+                let term = tg_term_natrec(result_ty, base_term, step_term, n_term);
+                let cir = CIRRefl(ct_unit(), CIRUnit);
+                ElabExprOk(env2, term, result_ty, cir)
+            }
+    }
+}

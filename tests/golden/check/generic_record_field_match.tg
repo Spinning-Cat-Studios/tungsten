@@ -1,0 +1,37 @@
+// Test: pattern matching on a generic ADT accessed via record field.
+// Regression test for ADR 20.4.26b (E0010: bare List instead of List<T>).
+//
+// The bug: record fields store types as App("List", [Token]) from Phase 1c,
+// but pattern match elaboration needs μ-encoded form. Constructor field
+// types use TyVar("List") for recursive references, which wasn't being
+// resolved when adt_type was App form (only Mu was handled).
+
+pub type List<T> = | Nil | Cons(T, List<T>)
+
+pub type Cursor = { items: List<Nat>, pos: Nat }
+
+pub fn cursor_advance(c: Cursor) -> Cursor {
+    match c.items {
+        Nil() => c,
+        Cons(_, rest) => {
+            let result: Cursor = { items: rest, pos: c.pos + 1 };
+            result
+        }
+    }
+}
+
+pub fn list_len<T>(xs: List<T>) -> Nat {
+    match xs {
+        Nil() => 0,
+        Cons(_, rest) => 1 + list_len(rest)
+    }
+}
+
+pub fn count_items(c: Cursor) -> Nat {
+    list_len(c.items)
+}
+
+pub fn main() -> Nat {
+    let c: Cursor = { items: Cons(1, Cons(2, Cons(3, Nil))), pos: 0 };
+    count_items(c)
+}

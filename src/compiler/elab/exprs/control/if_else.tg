@@ -1,0 +1,120 @@
+// src/compiler/elab/exprs/control/if_else.tg
+// If-then-else elaboration.
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_if,
+    tg_type_bool,
+    tg_types_equal
+};
+use elab::env::{Env};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, elab_expr_if_cond_error, elab_expr_if_branch_error,
+    add_expected_because
+};
+use elab::error::{ExpIfCondition, ExpIfBranch};
+use elab::cir::{CodegenIR, CIRIf};
+
+// Import synth/check from parent module for mutual recursion
+use elab::exprs::{synth, check};
+
+/// Bundled if-then-else branches.
+pub type IfBranches = {
+    cond: Expr,
+    then_e: Expr,
+    else_e: Expr
+}
+
+/// Elaborated condition result.
+type IfCondInfo = { term: TermHandle, cir: CodegenIR }
+
+/// Elaborated branch result (for synth/check continuation).
+type IfBranchResult = { term: TermHandle, ty: TypeHandle, cir: CodegenIR, span: Span }
+
+/// Synthesize if-then-else.
+pub fn synth_if(
+    env: Env,
+    cond: Expr,
+    then_e: Expr,
+    else_e: Expr,
+    span: Span
+) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, cond, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpIfCondition(span))),
+        ElabExprOk(env2, cond_term, _, cond_cir) =>
+            let ci: IfCondInfo = { term: cond_term, cir: cond_cir };
+            synth_if_then(env2, ci, then_e, else_e, span)
+    }
+}
+
+fn synth_if_then(
+    env: Env, ci: IfCondInfo,
+    then_e: Expr, else_e: Expr, span: Span
+) -> ElabExprResult {
+    let then_span = expr_span(then_e);
+    match synth(env, then_e) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, then_term, then_ty, then_cir) =>
+            let br: IfBranchResult = { term: then_term, ty: then_ty, cir: then_cir, span: then_span };
+            synth_if_else(env2, ci, br, else_e)
+    }
+}
+
+fn synth_if_else(
+    env: Env, ci: IfCondInfo, br: IfBranchResult,
+    else_e: Expr
+) -> ElabExprResult {
+    match check(env, else_e, br.ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpIfBranch(br.span))),
+        ElabExprOk(env2, else_term, _, else_cir) =>
+            let if_term = tg_term_if(ci.term, br.term, else_term);
+            let if_cir = CIRIf(ci.cir, br.cir, else_cir);
+            ElabExprOk(env2, if_term, br.ty, if_cir)
+    }
+}
+
+/// Check if-then-else against expected type.
+pub fn check_if(
+    env: Env,
+    branches: IfBranches,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, branches.cond, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpIfCondition(span))),
+        ElabExprOk(env2, cond_term, _, cond_cir) =>
+            let ci: IfCondInfo = { term: cond_term, cir: cond_cir };
+            check_if_then(env2, ci, branches.then_e, branches.else_e, expected)
+    }
+}
+
+fn check_if_then(
+    env: Env, ci: IfCondInfo,
+    then_e: Expr, else_e: Expr, expected: TypeHandle
+) -> ElabExprResult {
+    let then_span = expr_span(then_e);
+    match check(env, then_e, expected) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, then_term, _, then_cir) =>
+            let br: IfBranchResult = { term: then_term, ty: expected, cir: then_cir, span: then_span };
+            check_if_else(env2, ci, br, else_e, expected)
+    }
+}
+
+fn check_if_else(
+    env: Env, ci: IfCondInfo, br: IfBranchResult,
+    else_e: Expr, expected: TypeHandle
+) -> ElabExprResult {
+    match check(env, else_e, expected) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpIfBranch(br.span))),
+        ElabExprOk(env2, else_term, _, else_cir) =>
+            let if_term = tg_term_if(ci.term, br.term, else_term);
+            let if_cir = CIRIf(ci.cir, br.cir, else_cir);
+            ElabExprOk(env2, if_term, expected, if_cir)
+    }
+}

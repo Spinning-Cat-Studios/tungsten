@@ -1,0 +1,5 @@
+// Child module with public and private items.
+
+pub type PublicType = Nat
+
+type PrivateType = Bool

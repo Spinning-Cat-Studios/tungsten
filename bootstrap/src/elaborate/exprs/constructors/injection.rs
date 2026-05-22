@@ -44,11 +44,17 @@ impl<'a> Elaborator<'a> {
         // is Type::App("SomeType", []) from a cross-module reference.
         let normalized_adt = self.normalize_for_comparison(adt_type);
 
-        // Get the unfolded type (if μ-type, get the body)
-        let sum_type = match &normalized_adt {
-            Type::Mu(_, body) => (**body).clone(),
+        // Get the unfolded type (if μ-type, substitute the mu-variable to avoid
+        // leaking TyVar("α_Name") into codegen)
+        let mut sum_type = match &normalized_adt {
+            Type::Mu(var, body) => body.substitute(var, &normalized_adt),
             _ => normalized_adt.clone(),
         };
+
+        // Handle nested Mu from mutual recursion (ADR 18.4.26i).
+        // Mutually recursive types have nested Mu binders for each group member.
+        // Resolve each by substituting with its cached encoding.
+        sum_type = self.unfold_inner_mu_layers(sum_type);
 
         // Build from inside out for right-nested sum: A + (B + (C + D))
         // index 0 (A): inl(value)                            at type A + (B + (C + D))

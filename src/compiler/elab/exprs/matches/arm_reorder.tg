@@ -1,0 +1,176 @@
+// Arm reordering for match elaboration.
+//
+// Reorders match arms by constructor index so they align with
+// the sum type structure. Also handles arm padding for partial matches.
+
+use parser::ast::{
+    Pattern, PatVar, PatWildcard, PatConstructor, MatchArm,
+    Ident, ident_name, Path, MkPath
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
+use elab::ffi::{
+    TypeHandle,
+    tg_type_is_sum, tg_type_get_sum_right
+};
+use elab::env::{Env, env_resolve_value, env_count_constructors};
+use elab::env::defs::{
+    MaybeResolvedValue, NoResolvedValue, SomeResolvedValue,
+    ResolvedValue, ResolvedConstructor
+};
+use elab::exprs::matches::patterns::{
+    is_catch_all_pattern, pattern_constructor_name
+};
+
+// ===========================================================================
+// ARM REORDERING BY CONSTRUCTOR INDEX
+// ===========================================================================
+
+/// Get the constructor index for a match arm's pattern.
+/// Returns 999999 for non-constructor patterns (catch-all, wildcard, etc.)
+/// so they sort to the end.
+fn get_arm_constructor_index(env: Env, arm: MatchArm) -> Nat {
+    if is_catch_all_pattern(arm.pattern) {
+        999999
+    } else {
+        let ctor_name = pattern_constructor_name(arm.pattern);
+        if ctor_name == "" {
+            999999
+        } else {
+            get_resolved_constructor_index(env, ctor_name)
+        }
+    }
+}
+
+fn get_resolved_constructor_index(env: Env, ctor_name: String) -> Nat {
+    match env_resolve_value(env, ctor_name) {
+        NoResolvedValue() => 999999,
+        SomeResolvedValue(resolved) =>
+            get_resolved_index(resolved)
+    }
+}
+
+fn get_resolved_index(resolved: ResolvedValue) -> Nat {
+    match resolved {
+        ResolvedConstructor(info) => info.index,
+        _ => 999999
+    }
+}
+
+/// Reorder match arms by their constructor index.
+/// This ensures arms are processed in the same order as the
+/// constructors appear in the type definition, which matches
+/// the sum type structure (left-nested sums).
+pub fn reorder_arms_by_constructor(env: Env, arms: List<MatchArm>) -> List<MatchArm> {
+    insertion_sort_arms(env, arms, Nil())
+}
+
+fn insertion_sort_arms(env: Env, remaining: List<MatchArm>, sorted: List<MatchArm>) -> List<MatchArm> {
+    match remaining {
+        Nil() => sorted,
+        Cons(arm, rest) =>
+            let idx = get_arm_constructor_index(env, arm);
+            let new_sorted = insert_arm_by_index(env, arm, idx, sorted);
+            insertion_sort_arms(env, rest, new_sorted)
+    }
+}
+
+fn insert_arm_by_index(env: Env, arm: MatchArm, idx: Nat, sorted: List<MatchArm>) -> List<MatchArm> {
+    match sorted {
+        Nil() => Cons(arm, Nil()),
+        Cons(head, rest) =>
+            let head_idx = get_arm_constructor_index(env, head);
+            if idx <= head_idx {
+                Cons(arm, sorted)
+            } else {
+                Cons(head, insert_arm_by_index(env, arm, idx, rest))
+            }
+    }
+}
+
+// ===========================================================================
+// ARM PADDING
+// ===========================================================================
+
+/// Count the number of variants in a sum type.
+/// Sum(A, Sum(B, C)) has 3 variants.
+pub fn count_sum_variants(ty: TypeHandle) -> Nat {
+    if tg_type_is_sum(ty) {
+        1 + count_sum_variants(tg_type_get_sum_right(ty))
+    } else {
+        1
+    }
+}
+
+/// Check if the last arm in a sorted list is a catch-all.
+/// Returns true if the list ends with a catch-all pattern.
+fn has_catch_all_arm(arms: List<MatchArm>) -> Bool {
+    match arms {
+        Nil() => false,
+        Cons(arm, rest) =>
+            if list_is_empty(rest) {
+                is_catch_all_pattern(arm.pattern)
+            } else {
+                has_catch_all_arm(rest)
+            }
+    }
+}
+
+/// Get the last arm from a sorted list (the catch-all).
+fn get_last_arm(arms: List<MatchArm>) -> MatchArm {
+    match arms {
+        Nil() => get_last_arm(arms),  // unreachable: caller ensures non-empty
+        Cons(arm, rest) =>
+            if list_is_empty(rest) {
+                arm
+            } else {
+                get_last_arm(rest)
+            }
+    }
+}
+
+/// Pad sorted arms so every constructor index 0..total-1 has an arm.
+/// Fills gaps with the catch-all arm. The catch-all (index 999999) in the
+/// sorted list is consumed and used to fill gaps and remaining indices.
+fn pad_sorted_arms(
+    env: Env,
+    sorted_arms: List<MatchArm>,
+    current_index: Nat,
+    total: Nat,
+    catch_all: MatchArm
+) -> List<MatchArm> {
+    if current_index >= total {
+        Nil()
+    } else {
+        match sorted_arms {
+            Nil() =>
+                // No more explicit arms — fill remaining with catch-all
+                Cons(catch_all, pad_sorted_arms(env, Nil(), current_index + 1, total, catch_all)),
+            Cons(arm, rest) => {
+                let arm_index = get_arm_constructor_index(env, arm);
+                if arm_index >= 999999 {
+                    // Reached catch-all — fill this and all remaining with it
+                    Cons(catch_all, pad_sorted_arms(env, sorted_arms, current_index + 1, total, catch_all))
+                } else if arm_index == current_index {
+                    // Arm matches this index — use it
+                    Cons(arm, pad_sorted_arms(env, rest, current_index + 1, total, catch_all))
+                } else {
+                    // Gap: arm_index > current_index — insert catch-all for this index
+                    Cons(catch_all, pad_sorted_arms(env, sorted_arms, current_index + 1, total, catch_all))
+                }
+            }
+        }
+    }
+}
+
+/// Pad sorted arms if needed. Only pads when there are gaps in constructor
+/// indices (i.e., fewer explicit arms than sum variants) and a catch-all exists.
+pub fn maybe_pad_arms(env: Env, sorted_arms: List<MatchArm>, sum_ty: TypeHandle) -> List<MatchArm> {
+    let total = count_sum_variants(sum_ty);
+    if has_catch_all_arm(sorted_arms) {
+        let catch_all = get_last_arm(sorted_arms);
+        pad_sorted_arms(env, sorted_arms, 0, total, catch_all)
+    } else {
+        sorted_arms
+    }
+}

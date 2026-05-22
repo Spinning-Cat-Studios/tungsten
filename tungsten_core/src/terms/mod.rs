@@ -12,7 +12,12 @@
 
 mod analysis;
 mod constructors;
+mod constructors_arith;
+mod constructors_data;
+mod constructors_native;
+mod display;
 mod substitution;
+mod traversal;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -21,6 +26,74 @@ use crate::types::{TyVar, Type};
 
 /// A term variable name (e.g., x, y, f)
 pub type Var = String;
+
+/// A byte-offset source span for debug locations (ADR 17.4.26a §3.1).
+///
+/// Half-open interval `[start, end)`. Mirrors `bootstrap::Span` but lives in
+/// `tungsten_core` so that `SpannedTerm` has no cross-crate dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct TermSpan {
+    /// Start byte offset (inclusive)
+    pub start: u32,
+    /// End byte offset (exclusive)
+    pub end: u32,
+}
+
+impl TermSpan {
+    /// Create a new span from start and end byte offsets.
+    #[must_use]
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+}
+
+/// A term wrapped with an optional source span (ADR 17.4.26a §3.1, Approach B).
+///
+/// Provides sub-expression debug locations without modifying the `Term` enum.
+/// `span` is `None` for compiler-generated terms (desugaring, monomorphization).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpannedTerm {
+    /// The underlying term (unchanged)
+    pub term: Term,
+    /// Source span, if this term originated from user source code
+    pub span: Option<TermSpan>,
+}
+
+impl SpannedTerm {
+    /// Wrap a term with a known source span.
+    #[must_use]
+    pub fn new(term: Term, span: TermSpan) -> Self {
+        Self {
+            term,
+            span: Some(span),
+        }
+    }
+
+    /// Wrap a compiler-generated term (no source span).
+    #[must_use]
+    pub fn generated(term: Term) -> Self {
+        Self { term, span: None }
+    }
+}
+
+impl std::ops::Deref for SpannedTerm {
+    type Target = Term;
+    fn deref(&self) -> &Term {
+        &self.term
+    }
+}
+
+impl fmt::Display for SpannedTerm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.term.fmt(f)
+    }
+}
+
+impl PartialEq<Term> for SpannedTerm {
+    fn eq(&self, other: &Term) -> bool {
+        self.term == *other
+    }
+}
 
 /// Phase 1 Core Terms
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -233,161 +306,19 @@ pub enum Term {
     ///
     /// Generated as LLVM switch instruction for O(1) dispatch.
     AdtMatch(Box<Term>, Vec<(usize, Var, Box<Term>)>),
-}
 
-impl fmt::Display for Term {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Term::Var(v) => write!(f, "{v}"),
-            Term::Global(name) => write!(f, "global:{name}"),
-            Term::Lambda(x, ty, body) => write!(f, "(λ{x}:{ty}. {body})"),
-            Term::App(t1, t2) => write!(f, "({t1} {t2})"),
-            Term::Let(x, ty, def, body) => write!(f, "(let {x} : {ty} = {def} in {body})"),
-            Term::True => write!(f, "true"),
-            Term::False => write!(f, "false"),
-            Term::If(c, t, e) => write!(f, "(if {c} then {t} else {e})"),
-            Term::Unit => write!(f, "()"),
-            Term::Absurd(ty, t) => write!(f, "(absurd [{ty}] {t})"),
-            Term::Zero => write!(f, "zero"),
-            Term::Succ(t) => write!(f, "(succ {t})"),
-            Term::NatLit(n) => write!(f, "{n}"),
-            Term::NatRec(ty, z, s, n) => write!(f, "(natrec [{ty}] {z} {s} {n})"),
-            Term::NatInd(p, z, s, n) => write!(f, "(natind [{p}] {z} {s} {n})"),
-            // Phase 2A
-            Term::StringLit(s) => write!(f, "\"{s}\""),
-            Term::StrConcat(t1, t2) => write!(f, "(strconcat {t1} {t2})"),
-            Term::StrLen(t) => write!(f, "(strlen {t})"),
-            Term::StrEq(t1, t2) => write!(f, "(streq {t1} {t2})"),
-            Term::Pair(t1, t2) => write!(f, "({t1}, {t2})"),
-            Term::Fst(t) => write!(f, "(fst {t})"),
-            Term::Snd(t) => write!(f, "(snd {t})"),
-            Term::Inl(ty, t) => write!(f, "(inl [{ty}] {t})"),
-            Term::Inr(ty, t) => write!(f, "(inr [{ty}] {t})"),
-            Term::Case(scrut, x, t1, y, t2) => {
-                write!(f, "(case {scrut} of inl {x} => {t1} | inr {y} => {t2})")
-            }
-            Term::TyAbs(alpha, body) => write!(f, "(Λ{alpha}. {body})"),
-            Term::TyApp(t, ty) => write!(f, "({t} [{ty}])"),
-            Term::Refl(ty, t) => write!(f, "(refl [{ty}] {t})"),
-            Term::Subst(ty, p, eq, proof) => write!(f, "(subst [{ty}] [{p}] {eq} {proof})"),
-            // Phase 2A
-            Term::Fix(f_var, ty, body) => write!(f, "(fix {f_var}:{ty}. {body})"),
-            Term::Fold(ty, t) => write!(f, "(fold [{ty}] {t})"),
-            Term::Unfold(ty, t) => write!(f, "(unfold [{ty}] {t})"),
-            Term::Annot(t, ty) => write!(f, "({t} : {ty})"),
-            Term::Sorry => write!(f, "sorry"),
-            // Phase 3C arithmetic
-            Term::NatAdd(t1, t2) => write!(f, "({t1} + {t2})"),
-            Term::NatSub(t1, t2) => write!(f, "({t1} - {t2})"),
-            Term::NatMul(t1, t2) => write!(f, "({t1} * {t2})"),
-            Term::NatDiv(t1, t2) => write!(f, "({t1} / {t2})"),
-            Term::NatMod(t1, t2) => write!(f, "({t1} % {t2})"),
-            Term::NatEq(t1, t2) => write!(f, "({t1} == {t2})"),
-            // Phase 3-Prep comparisons
-            Term::NatLt(t1, t2) => write!(f, "({t1} < {t2})"),
-            Term::NatLe(t1, t2) => write!(f, "({t1} <= {t2})"),
-            Term::NatGt(t1, t2) => write!(f, "({t1} > {t2})"),
-            Term::NatGe(t1, t2) => write!(f, "({t1} >= {t2})"),
-            // Phase 3C boolean
-            Term::BoolAnd(t1, t2) => write!(f, "({t1} && {t2})"),
-            Term::BoolOr(t1, t2) => write!(f, "({t1} || {t2})"),
-            Term::BoolNot(t) => write!(f, "(!{t})"),
-            // Phase 3-Prep strings
-            Term::StrCharAt(s, idx) => write!(f, "(char_at {s} {idx})"),
-            Term::StrSubstring(s, start, len) => write!(f, "(substring {s} {start} {len})"),
-            Term::ExternCall(name, args) => {
-                write!(f, "(extern_call {name} ")?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    write!(f, "{arg}")?;
-                }
-                write!(f, ")")
-            }
-            Term::RefNew(t) => write!(f, "(ref {t})"),
-            Term::RefGet(t) => write!(f, "(ref_get {t})"),
-            Term::RefSet(r, v) => write!(f, "(ref_set {r} {v})"),
-            // Phase 2B: Flat ADT
-            Term::AdtConstruct(adt_ty, idx, payload) => {
-                write!(f, "(adt_construct [{adt_ty}] {idx} {payload})")
-            }
-            Term::AdtMatch(scrut, arms) => {
-                write!(f, "(adt_match {scrut} [")?;
-                for (i, (idx, var, body)) in arms.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " | ")?;
-                    }
-                    write!(f, "{idx} {var} => {body}")?;
-                }
-                write!(f, "])")
-            }
-        }
-    }
+    // === Control Flow ===
+    /// Early return: return e
+    /// Type rule: Γ ⊢ e : T, T = declared return type ⟹ Γ ⊢ return e : ⊥
+    Return(Box<Term>),
+
+    // === Span Wrapper (ADR 17.4.26a §3.1) ===
+    /// Source span wrapper for sub-expression debug locations.
+    ///
+    /// Transparent to semantics (evaluation, typing, substitution) —
+    /// codegen sets `set_current_debug_location()` on encountering this.
+    Spanned(Box<Term>, TermSpan),
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_nat_literal() {
-        assert_eq!(Term::nat(0), Term::Zero);
-        assert_eq!(Term::nat(1), Term::succ(Term::Zero));
-        assert_eq!(Term::nat(2), Term::succ(Term::succ(Term::Zero)));
-    }
-
-    #[test]
-    fn test_is_value() {
-        assert!(Term::lambda("x", Type::Nat, Term::var("x")).is_value());
-        assert!(Term::True.is_value());
-        assert!(Term::False.is_value());
-        assert!(Term::Zero.is_value());
-        assert!(Term::succ(Term::Zero).is_value());
-        assert!(Term::Unit.is_value());
-        assert!(Term::pair(Term::Zero, Term::True).is_value());
-        assert!(!Term::app(Term::var("f"), Term::var("x")).is_value());
-        assert!(!Term::fst(Term::pair(Term::Zero, Term::True)).is_value());
-    }
-
-    #[test]
-    fn test_term_substitution() {
-        // (λx. x) → (λx. x) (no change, x is bound)
-        let id = Term::lambda("x", Type::Nat, Term::var("x"));
-        let result = id.substitute("x", &Term::Zero);
-        assert_eq!(result, id);
-
-        // y[y := zero] = zero
-        let y = Term::var("y");
-        let result = y.substitute("y", &Term::Zero);
-        assert_eq!(result, Term::Zero);
-
-        // (λx. y)[y := zero] = λx. zero
-        let term = Term::lambda("x", Type::Nat, Term::var("y"));
-        let result = term.substitute("y", &Term::Zero);
-        assert_eq!(result, Term::lambda("x", Type::Nat, Term::Zero));
-    }
-
-    #[test]
-    fn test_free_vars() {
-        let id = Term::lambda("x", Type::Nat, Term::var("x"));
-        assert!(id.free_vars().is_empty());
-
-        let open = Term::lambda("x", Type::Nat, Term::var("y"));
-        assert!(open.free_vars().contains("y"));
-        assert!(!open.free_vars().contains("x"));
-
-        let app = Term::app(Term::var("f"), Term::var("x"));
-        assert!(app.free_vars().contains("f"));
-        assert!(app.free_vars().contains("x"));
-    }
-
-    #[test]
-    fn test_display() {
-        let id = Term::lambda("x", Type::Nat, Term::var("x"));
-        assert_eq!(id.to_string(), "(λx:Nat. x)");
-
-        let app = Term::app(Term::var("f"), Term::Zero);
-        assert_eq!(app.to_string(), "(f zero)");
-    }
-}
+mod tests;

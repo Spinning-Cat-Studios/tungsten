@@ -1,0 +1,11 @@
+// Regression test: let-bound variable from function call resolves correctly
+// Bug #1: tg_term_var(index) created Var("$0") instead of Var("greeting")
+
+pub fn greet(name: String) -> String {
+    "Hello, " ++ name ++ "!"
+}
+
+pub fn main() -> String {
+    let greeting = greet("World");
+    greeting
+}

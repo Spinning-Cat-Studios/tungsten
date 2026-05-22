@@ -1,0 +1,257 @@
+// Collection phase for item elaboration.
+//
+// ## Pipeline Overview
+//
+// Items flow from parsed modules through to elaborated definitions:
+//
+// +---------------------------------------------------------------------+
+// |  ParsedModule                                                       |
+// |    v flatten_module_items (driver/modules/build/flatten.tg)        |
+// |  List<Item> (combined source)                                       |
+// |    v elaborate_file (elab/items/mod.tg)                            |
+// |    v collect_items (elab/items/collect/mod.tg)  <-- YOU ARE HERE   |
+// |      +-- Phase 1a: index type stubs (name + arity)                 |
+// |      +-- Phase 1b: process imports (use declarations)              |
+// |      +-- Phase 1c: elaborate type bodies (ADTs, records, aliases)  |
+// |      +-- Phase 1d: resolve deferred type refs (@-prefixed TyVars)  |
+// |      +-- Phase 1e: cache type encodings (for error messages)       |
+// |      +-- Phase 2:  collect value signatures (fn, theorem, extern)  |
+// |    v elaborate_item_bodies (elab/items/elaborate.tg)               |
+// |  ElabResult                                                         |
+// +---------------------------------------------------------------------+
+//
+// ## Phase Contracts
+//
+// Phase 1a — Requires: parsed items. Guarantees: all type names visible
+//             in env (as stubs) so Phase 1b can resolve forward refs.
+//
+// Phase 1b — Requires: Phase 1a complete. Guarantees: all use-imported
+//             names in env so Phase 1c can resolve cross-module types.
+//
+// Phase 1c — Requires: Phases 1a + 1b complete. Guarantees: type bodies
+//             fully elaborated; recursive refs use @-prefixed TyVars.
+//
+// Phase 1d — Requires: Phase 1c complete. Guarantees: all @-prefixed
+//             TyVars resolved to their final μ-type encodings.
+//
+// Phase 1e — Requires: Phase 1d complete. Guarantees: all type encodings
+//             cached in env for use during error reporting.
+//
+// Phase 2  — Requires: Phases 1a–1e complete. Guarantees: all value
+//             signatures (types) registered in env; bodies deferred to
+//             elaborate_item_bodies.
+//
+// The order is a hard dependency: each phase reads results from all prior
+// phases. See copilot-instructions.md § Elaboration Pipeline for context.
+//
+// ## Module Structure
+//
+// - types.tg:  Phase 1c type body elaboration (ADTs, records, aliases)
+// - values.tg: Phase 2 value signature collection
+
+pub mod types;
+pub mod values;
+
+// Submodule items are accessible via elab::items::collect::types::* and ::values::*
+use elab::items::collect::types::{
+    preregister_type_vars, collect_phase_1c,
+    collect_phase_1c_records_only, collect_phase_1c_aliases_only
+};
+use elab::items::collect::values::collect_phase_2;
+
+use lexer::span::Span;
+use parser::ast::{
+    Item, ItemFn, ItemType, ItemTypeAlias, ItemTheorem, ItemLemma,
+    ItemAxiom, ItemExtern, ItemMod, ItemUse, ItemError,
+    TypeDef, TypeAliasDef,
+    TypeParam,
+    Visibility, VisPrivate, VisCrate, VisPublic,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_len;
+use elab::ffi::{
+    TypeHandle, INVALID_HANDLE
+};
+use elab::env::{
+    Env,
+    env_register_type, env_lookup_type_def,
+    TypeDefInfo, type_def_info_new, TypeDefCore, TypeDefMeta,
+    MaybeTypeDef, NoTypeDef, SomeTypeDef,
+    type_def_is_stub
+};
+use elab::items::result::{
+    ElabContext, elab_context_with_env, elab_context_add_error,
+    CollectResult, CollectOk, CollectErr
+};
+use elab::items::imports::process_use_decl;
+use elab::error::elab_error_duplicate;
+
+// ===========================================================================
+// COLLECTION ENTRY POINT
+// ===========================================================================
+
+/// Run the full collection phase on a list of items.
+/// Returns the updated context with all types and value signatures collected.
+pub fn collect_items(ctx: ElabContext, items: List<Item>) -> CollectResult {
+    // Phase 1a: Register type names as stubs
+    let ctx1 = collect_phase_1a(ctx, items);
+    
+    // Phase 1b: Process imports
+    let ctx2 = collect_phase_1b(ctx1, items);
+    
+    // Phase 1c: Elaborate type bodies
+    // First, pre-register μ-variable placeholders for ALL types so that
+    // forward references and self-references can resolve during body elaboration.
+    let ctx2b = preregister_type_vars(ctx2, items);
+    let ctx3 = collect_phase_1c(ctx2b, items);
+    
+    // Phase 1c fixup 1: Re-elaborate type alias bodies FIRST.
+    // Aliases like VisibilityEntry = (A, B, Option<C>) may have partial encodings
+    // because Option hadn't been fully elaborated on the first pass.
+    // Aliases must be fixed before records because record fields may reference aliases.
+    let ctx3b = collect_phase_1c_aliases_only(ctx3, items);
+    
+    // Phase 1c fixup 2: Re-elaborate record type bodies.
+    // Record fields may reference type aliases that were just fixed in the alias pass.
+    // This pass ensures record encodings use the correct alias encodings.
+    let ctx3c = collect_phase_1c_records_only(ctx3b, items);
+    
+    // Phase 1d: Resolve deferred type references
+    let ctx4 = collect_phase_1d(ctx3c);
+    
+    // Phase 1e: Cache type encodings
+    let ctx5 = collect_phase_1e(ctx4);
+    
+    // Phase 2: Collect value signatures
+    let ctx6 = collect_phase_2(ctx5, items);
+    
+    CollectOk(ctx6)
+}
+
+// ===========================================================================
+// PHASE 1a: REGISTER TYPE NAMES
+// ===========================================================================
+
+/// Register all type names as stubs (with arity but no body).
+/// This allows imports and forward references to resolve type names.
+fn collect_phase_1a(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = register_type_name(ctx, item);
+            collect_phase_1a(ctx2, rest)
+    }
+}
+
+/// Register a type name from an item (if it defines a type).
+fn register_type_name(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemType(def) =>
+            register_type_stub(ctx, def.name, def.type_params, def.vis, def.span),
+        ItemTypeAlias(def) =>
+            register_type_stub(ctx, def.name, def.type_params, def.vis, def.span),
+        _ => ctx  // Not a type definition
+    }
+}
+
+/// Register a type as a stub (name and arity only).
+fn register_type_stub(
+    ctx: ElabContext,
+    name: Ident,
+    type_params: List<TypeParam>,
+    vis: Visibility,
+    span: Span
+) -> ElabContext {
+    let type_name = ident_name(name);
+    let arity = list_len(type_params);
+    let params = extract_type_param_names(type_params);
+    
+    // Check for duplicate — allow replacing stubs and seeded global exports
+    // (from populate_module_info or seed_global_exports, ADR 5.5.26c)
+    match env_lookup_type_def(ctx.env, type_name) {
+        SomeTypeDef(existing) =>
+            // Always allow replacing — Phase B re-collects types that were
+            // seeded from Phase A.5 global exports. The re-registration is
+            // authoritative for this module. (L1 checks defining_module.is_none()
+            // which has the same effect since seeded exports lack defining_module.)
+            let core: TypeDefCore = { name: type_name, arity: arity, params: params };
+            let meta: TypeDefMeta = { kind: INVALID_HANDLE, vis: vis, span: span, encoded_type: INVALID_HANDLE };
+            let stub_info = type_def_info_new(core, meta);
+            let env2 = env_register_type(ctx.env, stub_info);
+            elab_context_with_env(ctx, env2),
+        NoTypeDef() =>
+            // Create stub with placeholder type handle
+            let core: TypeDefCore = { name: type_name, arity: arity, params: params };
+            let meta: TypeDefMeta = { kind: INVALID_HANDLE, vis: vis, span: span, encoded_type: INVALID_HANDLE };
+            let stub_info = type_def_info_new(
+                core,
+                meta
+            );
+            let env2 = env_register_type(ctx.env, stub_info);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+/// Extract type parameter names from a list of TypeParam.
+fn extract_type_param_names(params: List<TypeParam>) -> List<String> {
+    match params {
+        Nil() => Nil,
+        Cons(param, rest) =>
+            Cons(ident_name(param.name), extract_type_param_names(rest))
+    }
+}
+
+// ===========================================================================
+// PHASE 1b: PROCESS IMPORTS
+// ===========================================================================
+
+/// Process all use declarations.
+/// Imports can now reference type names registered in phase 1a.
+fn collect_phase_1b(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => ctx,
+        Cons(item, rest) =>
+            let ctx2 = process_use_item(ctx, item);
+            collect_phase_1b(ctx2, rest)
+    }
+}
+
+/// Process a use declaration (if the item is a use).
+fn process_use_item(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemUse(decl) =>
+            // Delegate to imports module
+            process_import(ctx, decl),
+        _ => ctx  // Not a use declaration
+    }
+}
+
+/// Process an import declaration.
+fn process_import(ctx: ElabContext, decl: UseDecl) -> ElabContext {
+    process_use_decl(ctx, decl)
+}
+
+// ===========================================================================
+// PHASE 1d: RESOLVE DEFERRED TYPE REFERENCES
+// ===========================================================================
+
+/// Resolve any deferred type references created during phase 1c.
+/// Forward references to types that came later in the file are now resolvable.
+fn collect_phase_1d(ctx: ElabContext) -> ElabContext {
+    // TODO: Walk through all type encodings and resolve TyVar placeholders
+    // For now, return ctx unchanged (most cases don't need this)
+    ctx
+}
+
+// ===========================================================================
+// PHASE 1e: CACHE TYPE ENCODINGS
+// ===========================================================================
+
+/// Cache type encodings for reverse lookup (type → name).
+/// This enables user-friendly error messages like "Color" instead of "μX.(1+1+1)".
+fn collect_phase_1e(ctx: ElabContext) -> ElabContext {
+    // TODO: Build reverse mapping from encoded types to names
+    // For now, return ctx unchanged
+    ctx
+}

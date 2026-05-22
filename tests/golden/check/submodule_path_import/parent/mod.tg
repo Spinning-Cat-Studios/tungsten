@@ -1,0 +1,3 @@
+// Parent module with a pub mod submodule.
+
+pub mod child;

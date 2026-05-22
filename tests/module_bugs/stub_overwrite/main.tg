@@ -1,0 +1,17 @@
+// Test: Stub overwrite during per-module elaboration.
+//
+// When child1 is elaborated first, its types become stubs in child2's
+// module info (via populate_type_stubs with kind=0). When child2
+// is then elaborated, the collection pass must detect these stubs
+// (via type_def_is_stub) and overwrite them with full definitions.
+//
+// This test exercises both record types and sum types to ensure
+// both stub sentinel values (kind=0 and kind=INVALID_HANDLE) are
+// handled correctly.
+
+mod types;
+mod consumer;
+
+fn main() -> Nat {
+    consumer::run()
+}

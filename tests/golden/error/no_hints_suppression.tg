@@ -1,0 +1,4 @@
+// Golden test: --no-hints suppresses diagnostic hints (ADR 21.4.26h)
+fn main() -> Nat {
+    42 + "hello"
+}

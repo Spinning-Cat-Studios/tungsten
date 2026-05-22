@@ -1,0 +1,145 @@
+// src/compiler/driver/util/mod.tg
+// Shared utility functions for the driver.
+//
+// String manipulation, list operations, parsing helpers, and common types.
+
+pub mod strings;
+pub mod lists;
+
+pub use driver::util::strings::*;
+pub use driver::util::lists::*;
+
+use driver::ffi::{List, Nil, Cons, string_len, string_char_at_internal, string_append_char};
+
+// Import and re-export Option from parser (canonical location)
+pub use parser::option::{Option, Some, None, is_some, is_none, unwrap_or};
+
+// ===========================================================================
+// TYPE ALIASES
+// ===========================================================================
+
+/// Char type alias for FFI interop (used in *Char pointer types).
+/// Characters are represented as their Unicode code points.
+pub type Char = Nat
+
+// ===========================================================================
+// BOOLEAN HELPERS
+// ===========================================================================
+
+/// Boolean negation.
+pub fn not(b: Bool) -> Bool {
+    match b {
+        true => false,
+        false => true
+    }
+}
+
+// ===========================================================================
+// OPTION EXTENSIONS (additional functions beyond parser::option)
+// ===========================================================================
+
+/// Map a function over an Option.
+pub fn option_map<A, B>(opt: Option<A>, f: A -> B) -> Option<B> {
+    match opt {
+        Some(x) => Some(f(x)),
+        None() => None
+    }
+}
+
+/// Get the value or a default (alias for unwrap_or).
+pub fn option_unwrap_or<T>(opt: Option<T>, default: T) -> T {
+    match opt {
+        Some(x) => x,
+        None() => default
+    }
+}
+
+/// Chain computation that may fail.
+pub fn option_and_then<A, B>(opt: Option<A>, f: A -> Option<B>) -> Option<B> {
+    match opt {
+        Some(x) => f(x),
+        None() => None
+    }
+}
+
+// ===========================================================================
+// RESULT TYPE
+// ===========================================================================
+
+/// Result of a computation that may fail.
+/// Ok(value) for success, Err(error) for failure.
+pub type Result<T, E> =
+    | Ok(T)
+    | Err(E)
+
+/// Map a function over the success value.
+pub fn result_map<A, B, E>(res: Result<A, E>, f: A -> B) -> Result<B, E> {
+    match res {
+        Ok(x) => Ok(f(x)),
+        Err(e) => Err(e)
+    }
+}
+
+/// Map a function over the error value.
+pub fn result_map_err<T, E1, E2>(res: Result<T, E1>, f: E1 -> E2) -> Result<T, E2> {
+    match res {
+        Ok(x) => Ok(x),
+        Err(e) => Err(f(e))
+    }
+}
+
+/// Chain computation that may fail.
+pub fn result_and_then<A, B, E>(res: Result<A, E>, f: A -> Result<B, E>) -> Result<B, E> {
+    match res {
+        Ok(x) => f(x),
+        Err(e) => Err(e)
+    }
+}
+
+/// Get the success value or a default.
+pub fn result_unwrap_or<T, E>(res: Result<T, E>, default: T) -> T {
+    match res {
+        Ok(x) => x,
+        Err(_) => default
+    }
+}
+
+/// Get the success value or compute from error.
+pub fn result_unwrap_or_else<T, E>(res: Result<T, E>, f: E -> T) -> T {
+    match res {
+        Ok(x) => x,
+        Err(e) => f(e)
+    }
+}
+
+/// Check if Result is Ok.
+pub fn is_ok<T, E>(res: Result<T, E>) -> Bool {
+    match res {
+        Ok(_) => true,
+        Err(_) => false
+    }
+}
+
+/// Check if Result is Err.
+pub fn is_err<T, E>(res: Result<T, E>) -> Bool {
+    match res {
+        Ok(_) => false,
+        Err(_) => true
+    }
+}
+
+/// Convert Result to Option, discarding error.
+pub fn result_ok<T, E>(res: Result<T, E>) -> Option<T> {
+    match res {
+        Ok(x) => Some(x),
+        Err(_) => None
+    }
+}
+
+/// Convert Result to Option of error, discarding success.
+pub fn result_err<T, E>(res: Result<T, E>) -> Option<E> {
+    match res {
+        Ok(_) => None,
+        Err(e) => Some(e)
+    }
+}

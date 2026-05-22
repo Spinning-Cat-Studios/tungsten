@@ -1,0 +1,156 @@
+// Equality types and type list elaboration for the generic type pipeline.
+
+use lexer::span::Span;
+use parser::ast::{Expr, TypeExpr};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle, TermHandle,
+    tg_types_equal, tg_type_eq
+};
+use elab::env::Env;
+use elab::cir::{
+    CodegenIR, CodegenType,
+    ct_nat, ct_eq
+};
+use elab::exprs::{synth, check, ElabExprResult, ElabExprOk, ElabExprErr};
+use elab::exprs::forms::result::TermInfo;
+use elab::types::result_types::{ElabTypeResult, ElabTypeOk, ElabTypeErr, ElabTypeError, elab_type_error};
+use elab::types::{elab_type};
+
+// ===========================================================================
+// EQUALITY TYPES
+// ===========================================================================
+
+pub fn elab_type_eq(env: Env, left: Expr, right: Expr, span: Span) -> ElabTypeResult {
+    match synth(env, left) {
+        ElabExprErr(e) =>
+            ElabTypeErr(elab_type_error(e.message, span)),
+        ElabExprOk(env1, left_term, left_ty, left_cir) =>
+            let left: TermInfo = { term: left_term, ty: left_ty, cir: left_cir };
+            elab_type_eq_right(env1, left, right, span)
+    }
+}
+
+fn elab_type_eq_right(
+    env: Env,
+    left: TermInfo,
+    right: Expr,
+    span: Span
+) -> ElabTypeResult {
+    match synth(env, right) {
+        ElabExprErr(e) =>
+            ElabTypeErr(elab_type_error(e.message, span)),
+        ElabExprOk(env2, right_term, right_ty, right_cir) =>
+            if tg_types_equal(left.ty, right_ty) {
+                let cir_ty = ct_nat();
+                ElabTypeOk(
+                    tg_type_eq(left.ty, left.term, right_term),
+                    ct_eq(cir_ty, left.cir, right_cir)
+                )
+            } else {
+                ElabTypeErr(elab_type_error(
+                    "equality type requires both sides to have the same type",
+                    span
+                ))
+            }
+    }
+}
+
+// ===========================================================================
+// EXPLICIT EQUALITY TYPES: Eq<T, a, b>
+// ===========================================================================
+
+/// Bundled result of elaborating the type argument in Eq<T, a, b>.
+type EqBaseType =
+    | MkEqBaseType(TypeHandle, CodegenType)
+
+/// Elaborate `Eq<T, a, b>` with an explicit type argument.
+pub fn elab_type_eq_explicit(
+    env: Env,
+    ty_expr: TypeExpr,
+    left: Expr,
+    right: Expr,
+    span: Span
+) -> ElabTypeResult {
+    match elab_type(env, ty_expr) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(base_ty, base_cir) =>
+            elab_type_eq_explicit_left(env, MkEqBaseType(base_ty, base_cir), left, right, span)
+    }
+}
+
+fn elab_type_eq_explicit_left(
+    env: Env,
+    base: EqBaseType,
+    left: Expr,
+    right: Expr,
+    span: Span
+) -> ElabTypeResult {
+    match base {
+        MkEqBaseType(base_ty, base_cir) =>
+            match check(env, left, base_ty) {
+                ElabExprErr(e) =>
+                    ElabTypeErr(elab_type_error(e.message, span)),
+                ElabExprOk(env2, left_term, left_ty, left_cir) =>
+                    let left_info: TermInfo = { term: left_term, ty: left_ty, cir: left_cir };
+                    elab_type_eq_explicit_right(env2, base, left_info, right, span)
+            }
+    }
+}
+
+fn elab_type_eq_explicit_right(
+    env: Env,
+    base: EqBaseType,
+    left: TermInfo,
+    right: Expr,
+    span: Span
+) -> ElabTypeResult {
+    match base {
+        MkEqBaseType(base_ty, base_cir) =>
+            match check(env, right, base_ty) {
+                ElabExprErr(e) =>
+                    ElabTypeErr(elab_type_error(e.message, span)),
+                ElabExprOk(env3, right_term, right_ty, right_cir) =>
+                    ElabTypeOk(
+                        tg_type_eq(base_ty, left.term, right_term),
+                        ct_eq(base_cir, left.cir, right_cir)
+                    )
+            }
+    }
+}
+
+// ===========================================================================// TYPE LIST ELABORATION
+// ===========================================================================
+
+pub fn elab_type_list(env: Env, types: List<TypeExpr>) -> ElabTypeListResult {
+    match types {
+        Nil() => ElabTypeListOk(Nil(), Nil()),
+        Cons(ty, rest) =>
+            elab_type_list_head(env, ty, rest)
+    }
+}
+
+fn elab_type_list_head(env: Env, ty: TypeExpr, rest: List<TypeExpr>) -> ElabTypeListResult {
+    match elab_type(env, ty) {
+        ElabTypeErr(e) => ElabTypeListErr(e),
+        ElabTypeOk(h, ct) =>
+            elab_type_list_rest(env, h, ct, rest)
+    }
+}
+
+fn elab_type_list_rest(
+    env: Env,
+    h: TypeHandle,
+    ct: CodegenType,
+    rest: List<TypeExpr>
+) -> ElabTypeListResult {
+    match elab_type_list(env, rest) {
+        ElabTypeListErr(e) => ElabTypeListErr(e),
+        ElabTypeListOk(hs, cts) =>
+            ElabTypeListOk(Cons(h, hs), Cons(ct, cts))
+    }
+}
+
+pub type ElabTypeListResult =
+    | ElabTypeListOk(List<TypeHandle>, List<CodegenType>)
+    | ElabTypeListErr(ElabTypeError)

@@ -1,0 +1,99 @@
+// src/compiler/elab/items/collect/types/adt/sum.tg
+// Sum type variant elaboration.
+
+use lexer::span::Span;
+use parser::ast::{
+    Variant, TypeExpr,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use elab::ffi::{TypeHandle, tg_type_var, tg_string_to_cstr, type_error_handle};
+use elab::adt::AdtVariant;
+use elab::types::{ElabTypeResult, ElabTypeOk, ElabTypeErr, elab_type};
+use elab::items::result::{ElabContext, elab_context_add_error};
+use elab::error::elab_error_simple;
+use elab::items::collect::types::helpers::{type_is_self_ref, type_references_self};
+
+// ===========================================================================
+// SUM TYPE ELABORATION
+// ===========================================================================
+
+/// Elaborate sum type variants.
+pub fn elaborate_sum_body(
+    ctx: ElabContext,
+    variants: List<Variant>,
+    type_name: String
+) -> (ElabContext, List<AdtVariant>, Bool) {
+    elaborate_variants(ctx, variants, type_name, Nil(), false)
+}
+
+/// Elaborate variants recursively.
+fn elaborate_variants(
+    ctx: ElabContext,
+    variants: List<Variant>,
+    type_name: String,
+    acc: List<AdtVariant>,
+    is_recursive: Bool
+) -> (ElabContext, List<AdtVariant>, Bool) {
+    match variants {
+        Nil() => (ctx, list_reverse(acc), is_recursive),
+        Cons(variant, rest) =>
+            let (ctx2, adt_variant, self_ref) = elaborate_variant(ctx, variant, type_name);
+            let new_acc = Cons(adt_variant, acc);
+            let new_recursive = is_recursive || self_ref;
+            elaborate_variants(ctx2, rest, type_name, new_acc, new_recursive)
+    }
+}
+
+/// Elaborate a single variant.
+fn elaborate_variant(
+    ctx: ElabContext,
+    variant: Variant,
+    type_name: String
+) -> (ElabContext, AdtVariant, Bool) {
+    let ctor_name = ident_name(variant.name);
+    let (ctx2, fields, has_self_ref) = elaborate_field_types(ctx, variant.fields, type_name);
+    let adt_variant: AdtVariant = { name: ctor_name, fields: fields };
+    (ctx2, adt_variant, has_self_ref)
+}
+
+/// Elaborate field types in a variant.
+fn elaborate_field_types(
+    ctx: ElabContext,
+    fields: List<TypeExpr>,
+    type_name: String
+) -> (ElabContext, List<TypeHandle>, Bool) {
+    elaborate_fields_rec(ctx, fields, type_name, Nil(), false)
+}
+
+/// Recursive field type elaboration.
+fn elaborate_fields_rec(
+    ctx: ElabContext,
+    fields: List<TypeExpr>,
+    type_name: String,
+    acc: List<TypeHandle>,
+    has_self_ref: Bool
+) -> (ElabContext, List<TypeHandle>, Bool) {
+    match fields {
+        Nil() => (ctx, list_reverse(acc), has_self_ref),
+        Cons(ty, rest) =>
+            if type_is_self_ref(ty, type_name) {
+                let mu_var = tg_type_var(tg_string_to_cstr(type_name));
+                let new_acc = Cons(mu_var, acc);
+                elaborate_fields_rec(ctx, rest, type_name, new_acc, true)
+            } else {
+                match elab_type(ctx.env, ty) {
+                    ElabTypeErr(err) =>
+                        let elab_err = elab_error_simple(err.message, err.span);
+                        let ctx2 = elab_context_add_error(ctx, elab_err);
+                        let new_acc = Cons(type_error_handle(), acc);
+                        elaborate_fields_rec(ctx2, rest, type_name, new_acc, has_self_ref),
+                    ElabTypeOk(ty_handle, _) =>
+                        let self_ref = has_self_ref || type_references_self(ty, type_name);
+                        let new_acc = Cons(ty_handle, acc);
+                        elaborate_fields_rec(ctx, rest, type_name, new_acc, self_ref)
+                }
+            }
+    }
+}

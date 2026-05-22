@@ -1,0 +1,199 @@
+// Phase A.5: Combined AST collection for global signatures.
+//
+// Flattens all module items into a single combined list and runs the
+// collection pass (Phases 1a–2) to extract full type bodies and value
+// signatures globally. Body elaboration is NOT run — that happens in
+// Phase B per-module.
+//
+// Constructor lifecycle across phases:
+//   Phase A  → stubs.tg creates ConstructorInfo with INVALID_HANDLE for
+//              field_types and result_type (placeholder, not real types).
+//   Phase A.5 → stubs seeded into env (inject.tg seed_ctors_into_env),
+//              then collection (Phase 1c) registers real constructors
+//              with proper type handles. Both stubs and reals coexist.
+//   Export   → extract_global_exports deduplicates by (name, parent_type),
+//              keeping only the first (real) constructor per identity.
+//   Phase B  → exports seeded into each module's env; only real
+//              constructors are present.
+//
+// Mirrors L1's `build_combined_ast` + `collect_definitions_with_exports`
+// (ADR 5.5.26c).
+// See ADR 6.5.26e §2.2.
+
+mod dedup;
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_reverse};
+use driver::modules::path::{ModulePath, module_path_root, module_path_child};
+use driver::modules::tree::parsed::{ParsedModule};
+use driver::modules::info::{ModuleInfo};
+use driver::modules::build::{get_module_name};
+use driver::modules::build::flatten::{filter_mod_decls};
+use driver::modules::build::resolve::{resolve_use_paths};
+use parser::ast::nodes::{Item, source_file_items};
+use elab::env::{Env, env_new, populate_module_info};
+use elab::env::types::{ElabMode, env_with_elab_mode, env_current_module_contents};
+use elab::items::result::{
+    ElabContext, elab_context_new, collect_result_context
+};
+use elab::items::collect::{collect_items};
+use elab::items::per_module::types::{
+    ValueSigExport,
+    wrap_type_exports, wrap_value_exports, wrap_ctor_exports
+};
+use elab::items::per_module::stubs::{StubExports};
+use elab::items::per_module::inject::{
+    seed_types_into_env, seed_ctors_into_env
+};
+use elab::items::per_module::combined::dedup::{dedup_types, dedup_constructors};
+
+// ===========================================================================
+// GLOBAL EXPORTS
+// ===========================================================================
+
+/// Output of Phase A.5: full type defs, value sigs, and constructors.
+pub type GlobalExports = {
+    types: List<TypeDefExport>,
+    constructors: List<ConstructorExport>,
+    values: List<ValueSigExport>
+}
+
+/// Create empty global exports.
+pub fn global_exports_empty() -> GlobalExports {
+    { types: Nil, constructors: Nil, values: Nil }
+}
+
+// ===========================================================================
+// MAIN ENTRY POINT
+// ===========================================================================
+
+/// Phase A.5: Build combined items from all modules and run the collection
+/// pass to extract global type bodies and value signatures.
+///
+/// This runs Phases 1a–2 on the combined AST but does NOT elaborate bodies.
+/// The result provides cross-branch visibility for Phase B.
+pub fn collect_global_signatures(
+    module: ParsedModule,
+    module_info: ModuleInfo,
+    elab_mode: ElabMode,
+    stubs: StubExports
+) -> GlobalExports {
+    // 1. Build combined items (all modules flattened, mod decls excluded)
+    let root_path = module_path_root();
+    let items = build_combined_items(module, root_path, module_info);
+
+    // 2. Create env with module info + Phase A stubs
+    let env = env_new();
+    let env = env_with_elab_mode(env, elab_mode);
+    let env = populate_module_info(env, module_info);
+    let env = seed_phase_a_stubs(env, stubs);
+
+    // 3. Run collection pass (Phases 1a–2, no body elaboration)
+    let ctx = elab_context_new(env);
+    let collect_result = collect_items(ctx, items);
+    let ctx2 = collect_result_context(collect_result);
+
+    // 4. Extract exports from the root module contents
+    extract_global_exports(ctx2.env)
+}
+
+// ===========================================================================
+// BUILD COMBINED ITEMS
+// ===========================================================================
+
+/// Flatten all module items into a combined list.
+/// Submodules are processed first (post-order). Mod declarations are
+/// excluded. Use paths are resolved to absolute.
+pub fn build_combined_items(
+    module: ParsedModule,
+    current_path: ModulePath,
+    info: ModuleInfo
+) -> List<Item> {
+    let sub_items = build_combined_from_submodules(
+        module.submodules, current_path, info
+    );
+    let this_items = filter_mod_decls(source_file_items(module.source_file));
+    let resolved = resolve_use_paths(this_items, current_path, info);
+    append_items(sub_items, resolved)
+}
+
+/// Flatten items from a list of submodules.
+fn build_combined_from_submodules(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath,
+    info: ModuleInfo
+) -> List<Item> {
+    build_combined_from_submodules_acc(submodules, parent_path, info, Nil)
+}
+
+fn build_combined_from_submodules_acc(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath,
+    info: ModuleInfo,
+    acc: List<Item>
+) -> List<Item> {
+    match submodules {
+        Nil() => acc,
+        Cons(sub, rest) =>
+            let name = get_module_name(sub);
+            let child_path = module_path_child(parent_path, name);
+            let sub_items = build_combined_items(sub, child_path, info);
+            build_combined_from_submodules_acc(
+                rest, parent_path, info,
+                append_items(acc, sub_items)
+            )
+    }
+}
+
+// ===========================================================================
+// PHASE A STUB SEEDING
+// ===========================================================================
+
+/// Inject Phase A stubs into the env's root scope.
+/// This overwrites arity-0 stubs from populate_module_info with
+/// correct-arity stubs, so the collection pass can resolve generics.
+fn seed_phase_a_stubs(env: Env, stubs: StubExports) -> Env {
+    let env = seed_types_into_env(env, stubs.types);
+    let env = seed_ctors_into_env(env, stubs.constructors);
+    env
+}
+
+// ===========================================================================
+// EXPORT EXTRACTION
+// ===========================================================================
+
+/// Extract types, values, and constructors from the root module contents
+/// after the combined collection pass.
+fn extract_global_exports(env: Env) -> GlobalExports {
+    let contents = env_current_module_contents(env);
+    let root = module_path_root();
+    // Deduplicate types: Phase A stubs may still be in the list
+    // alongside real types from Phase A.5 collection. Keep only the
+    // first (most recent) entry per name — the real entry is registered
+    // after the stub, so it appears first in the Cons-prepended list.
+    let deduped_types = dedup_types(contents.types);
+    let types = wrap_type_exports(deduped_types, root);
+    let values = wrap_value_exports(contents.values, root);
+    // Deduplicate constructors: Phase A stubs may still be in the list
+    // alongside real constructors from Phase A.5 collection. Keep only the
+    // first (most recent) entry per (name, parent_type) pair.
+    let deduped = dedup_constructors(contents.constructors);
+    let ctors = wrap_ctor_exports(deduped, root);
+    { types: types, constructors: ctors, values: values }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Append two item lists.
+fn append_items(a: List<Item>, b: List<Item>) -> List<Item> {
+    append_items_acc(list_reverse(a), b)
+}
+
+fn append_items_acc(reversed_a: List<Item>, b: List<Item>) -> List<Item> {
+    match reversed_a {
+        Nil() => b,
+        Cons(item, rest) => append_items_acc(rest, Cons(item, b))
+    }
+}

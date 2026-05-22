@@ -1,0 +1,8 @@
+// Another file that also glob-imports source.
+// In the self-hosted compiler, this shares the same flat import list as main.
+
+use source::*;
+
+fn helper() -> Nat {
+    shared_fn(2)
+}

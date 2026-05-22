@@ -1,0 +1,23 @@
+// src/compiler/driver/ffi/mod.tg
+// Driver FFI declarations and safe wrappers.
+//
+// This module provides the Tungsten-side bindings for driver operations:
+// - Core types and string primitives [types.tg]
+// - File I/O (read, write, exists, directories) [io.tg]
+// - CLI arguments and console output [process.tg]
+// - Process control (exit, exec) [process.tg]
+// - Evaluator bridge (for `run` command) [eval.tg]
+
+pub mod types;
+pub mod io;
+pub mod process;
+pub mod eval;
+pub mod diagnostics;
+pub mod test;
+
+pub use driver::ffi::types::*;
+pub use driver::ffi::io::*;
+pub use driver::ffi::process::*;
+pub use driver::ffi::eval::*;
+pub use driver::ffi::diagnostics::*;
+pub use driver::ffi::test::*;

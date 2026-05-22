@@ -2,9 +2,9 @@
 //!
 //! Handles compilation of:
 //! - Global references (top-level functions and thunks)
-//! - ExternCall (foreign function calls)
+//! - `ExternCall` (foreign function calls)
 
-use crate::codegen::error::CodeGenError;
+use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
@@ -22,19 +22,20 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
         // Check if this name was remapped (extern wrappers are renamed)
         let lookup_name = self
+            .defs
             .extern_name_map
             .get(name)
-            .map(|s| s.as_str())
-            .unwrap_or(name);
+            .map_or(name, std::string::String::as_str);
 
         // Check for top-level function
         if let Some(func) = self.module.get_function(lookup_name) {
             // Check the type to determine if this is a function or a thunk
             // Use original name for type lookup since def_types uses original names
             if let Some(ty) = self
+                .defs
                 .def_types
                 .get(lookup_name)
-                .or_else(|| self.def_types.get(name))
+                .or_else(|| self.defs.def_types.get(name))
             {
                 if !matches!(ty, Type::Arrow(_, _)) {
                     // Non-function (thunk): call it immediately with null env
@@ -77,8 +78,7 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
         Err(CodeGenError::Unsupported(format!(
-            "global '{}' not found (global variables not yet supported in codegen)",
-            name
+            "global '{name}' not found (global variables not yet supported in codegen)"
         )))
     }
 
@@ -92,11 +92,7 @@ impl<'ctx> CodeGen<'ctx> {
         ret_llvm: inkwell::types::BasicTypeEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
         // Get the real C symbol name (strip __c_ prefix if present)
-        let real_symbol = if symbol.starts_with("__c_") {
-            &symbol[4..]
-        } else {
-            symbol
-        };
+        let real_symbol = symbol.strip_prefix("__c_").unwrap_or(symbol);
 
         // Look up or declare the external function
         let func = if let Some(f) = self.module.get_function(symbol) {
@@ -135,13 +131,12 @@ impl<'ctx> CodeGen<'ctx> {
             .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
 
         // Return value or unit if void
-        match call.try_as_basic_value().left() {
-            Some(val) => self.materialize_call_result(val),
-            None => {
-                // Void return - return unit
-                let unit_type = self.context.struct_type(&[], false);
-                Ok(unit_type.const_named_struct(&[]).into())
-            }
+        if let Some(val) = call.try_as_basic_value().left() {
+            self.materialize_call_result(val)
+        } else {
+            // Void return - return unit
+            let unit_type = self.context.struct_type(&[], false);
+            Ok(unit_type.const_named_struct(&[]).into())
         }
     }
 
@@ -150,16 +145,9 @@ impl<'ctx> CodeGen<'ctx> {
     /// First checks local environment, then top-level functions.
     pub(crate) fn compile_var(&mut self, x: &str) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
         // First check local environment
-        if let Some((v, _)) = self.env.get(x) {
+        if let Some((v, _)) = self.compilation.env.get(x) {
             return Ok(*v);
         }
-
-        // Debug: print what's in env when we fail
-        eprintln!(
-            "DEBUG: Unbound var '{}', env contains: {:?}",
-            x,
-            self.env.keys().collect::<Vec<_>>()
-        );
 
         // Then check for top-level functions (need to wrap in closure)
         if let Some(func) = self.module.get_function(x) {
@@ -206,7 +194,7 @@ mod tests {
         let function = codegen.module.add_function("test_fn", fn_type, None);
         let entry = context.append_basic_block(function, "entry");
         codegen.builder.position_at_end(entry);
-        codegen.current_fn = Some(function);
+        codegen.compilation.current_fn = Some(function);
 
         codegen
     }
@@ -218,7 +206,7 @@ mod tests {
 
         // Add a variable to the environment
         let val = context.i64_type().const_int(42, false);
-        codegen.env.insert(
+        codegen.compilation.env.insert(
             "x".to_string(),
             (val.into(), tungsten_core::types::Type::Nat),
         );
@@ -253,6 +241,7 @@ mod tests {
         let fn_type = context.i64_type().fn_type(&[ptr_type.into()], false);
         codegen.module.add_function("my_func", fn_type, None);
         codegen
+            .defs
             .def_types
             .insert("my_func".to_string(), Type::arrow(Type::Nat, Type::Nat));
 
@@ -273,6 +262,7 @@ mod tests {
         let fn_type = context.i64_type().fn_type(&[ptr_type.into()], false);
         codegen.module.add_function("global_fn", fn_type, None);
         codegen
+            .defs
             .def_types
             .insert("global_fn".to_string(), Type::arrow(Type::Nat, Type::Nat));
 

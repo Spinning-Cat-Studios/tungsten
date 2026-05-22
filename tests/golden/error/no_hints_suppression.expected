@@ -1,0 +1,12 @@
+[E0010] Error: expected `Nat`, found `String`
+   ╭─[tests/golden/error/no_hints_suppression.tg:3:10]
+   │
+ 2 │ fn main() -> Nat {
+   │              ─┬─  
+   │               ╰─── expected due to return type
+ 3 │     42 + "hello"
+   │          ───┬───  
+   │             ╰───── expected `Nat`, found `String`
+───╯
+
+error: aborting due to 1 error

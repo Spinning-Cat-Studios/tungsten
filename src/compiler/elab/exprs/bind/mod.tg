@@ -1,0 +1,51 @@
+// src/compiler/elab/exprs/bind/mod.tg
+// Binding elaboration: let bindings, lambdas, and variable lookup.
+
+use lexer::span::Span;
+use parser::ast::Expr;
+use elab::ffi::{TermHandle, TypeHandle};
+use elab::cir::{CodegenIR, CodegenType};
+
+pub mod synth_let;
+pub mod tuple_let;
+pub mod lambda;
+pub mod let_check;
+pub mod vars;
+
+// ===========================================================================
+// SHARED RECORD TYPES
+// ===========================================================================
+
+/// Variable name info extracted from a pattern.
+pub type LetBindingInfo = {
+    name: String,
+    name_ptr: Nat
+}
+
+/// Elaborated RHS of a let binding.
+pub type ElabRhsInfo = {
+    term: TermHandle,
+    ty: TypeHandle,
+    cir: CodegenIR,
+    ct: CodegenType
+}
+
+/// Elaborated type annotation result.
+pub type AnnotInfo = {
+    ty: TypeHandle,
+    ct: CodegenType,
+    span: Span
+}
+
+/// Continuation for check-mode let: body + expected type + span.
+pub type CheckLetCont = {
+    body: Expr,
+    expected: TypeHandle,
+    span: Span
+}
+
+/// Continuation for synth-mode let: body + span.
+pub type SynthLetCont = {
+    body: Expr,
+    span: Span
+}

@@ -1,0 +1,157 @@
+// src/compiler/elab/exprs/apply/expect_type.tg
+// Handler for the expect_type(expr, "TypeString") builtin.
+//
+// expect_type is a compile-time type assertion (ADR 4.5.26g):
+// - In test mode:    elaborate expr, compare inferred type display vs expected string
+// - In check mode:   elaborate expr, skip comparison, return Unit
+// - In compile mode: emit error (not allowed)
+//
+// Also exports shared helpers for builtin special forms:
+// - is_simple_path_named: check if an Expr is a simple path with a given name
+// - validate_builtin_string_args: validate 2 args (expr, string literal) for builtins
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, ExprStringLit, expr_span,
+    Path, MkPath, Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons, cstring_to_string};
+use elab::ffi::{
+    TypeHandle, tg_term_unit, tg_type_unit, tg_type_format_display
+};
+use elab::env::{Env};
+use elab::env::types::{ElabMode, ElabCheck, ElabTest, ElabCompile};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    ElabExprError, elab_expr_error
+};
+use elab::exprs::{synth};
+use elab::cir::{CIRUnit};
+
+// ===========================================================================
+// SHARED BUILTIN HELPERS
+// ===========================================================================
+
+/// Check if an Expr is a simple (single-segment) path with the given name.
+/// Used to recognize builtin special forms like expect_type and expect_error.
+pub fn is_simple_path_named(func: Expr, name: String) -> Bool {
+    match func {
+        ExprPath(path) =>
+            match path {
+                MkPath(segments, _) =>
+                    match segments {
+                        Cons(id, rest) =>
+                            match rest {
+                                Nil() => ident_name(id) == name,
+                                _ => false
+                            },
+                        Nil() => false
+                    }
+            },
+        _ => false
+    }
+}
+
+/// Result of validating builtin arguments: (expr, string) pair or error.
+pub type BuiltinArgsParsed =
+    | BuiltinArgsOk(Expr, String)
+    | BuiltinArgsErr(ElabExprError)
+
+/// Validate that a builtin received exactly 2 arguments where the second
+/// is a string literal. Returns the (expr, string) pair or an error.
+/// Used by expect_type and expect_error.
+pub fn validate_builtin_string_args(args: List<Expr>, builtin_name: String, span: Span) -> BuiltinArgsParsed {
+    match args {
+        Cons(expr_arg, rest1) =>
+            match rest1 {
+                Cons(str_arg, rest2) =>
+                    match rest2 {
+                        Nil() =>
+                            match str_arg {
+                                ExprStringLit(s, _) => BuiltinArgsOk(expr_arg, s),
+                                _ => BuiltinArgsErr(elab_expr_error(
+                                    builtin_name ++ ": second argument must be a string literal",
+                                    span
+                                ))
+                            },
+                        _ => BuiltinArgsErr(elab_expr_error(
+                            builtin_name ++ ": expected 2 arguments, found more",
+                            span
+                        ))
+                    },
+                Nil() => BuiltinArgsErr(elab_expr_error(
+                    builtin_name ++ ": expected 2 arguments, found 1",
+                    span
+                ))
+            },
+        Nil() => BuiltinArgsErr(elab_expr_error(
+            builtin_name ++ ": expected 2 arguments, found 0",
+            span
+        ))
+    }
+}
+
+// ===========================================================================
+// EXPECT_TYPE HANDLER
+// ===========================================================================
+
+/// Handle an expect_type(expr, "TypeString") call.
+///
+/// Validates arity and argument types, then dispatches based on elab_mode:
+/// - ElabTest:    compare inferred type vs expected string
+/// - ElabCheck:   elaborate expr, skip comparison, return Unit
+/// - ElabCompile: emit error
+pub fn handle_expect_type(env: Env, args: List<Expr>, span: Span) -> ElabExprResult {
+    match env.elab_mode {
+        ElabCompile() =>
+            ElabExprErr(elab_expr_error(
+                "expect_type is not allowed in compile/run mode (use `tungsten test` or `tungsten check`)",
+                span
+            )),
+        _ =>
+            handle_expect_type_validated(env, args, span)
+    }
+}
+
+/// Validate arity and arg types, then elaborate.
+fn handle_expect_type_validated(env: Env, args: List<Expr>, span: Span) -> ElabExprResult {
+    match validate_builtin_string_args(args, "expect_type", span) {
+        BuiltinArgsOk(expr_arg, expected_str) =>
+            elaborate_expect_type(env, expr_arg, expected_str, span),
+        BuiltinArgsErr(err) => ElabExprErr(err)
+    }
+}
+
+/// Elaborate the expression, get its type, and optionally compare.
+fn elaborate_expect_type(env: Env, expr: Expr, expected_str: String, span: Span) -> ElabExprResult {
+    match synth(env, expr) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, _term, inferred_ty, _cir) =>
+            // In test mode: compare type display string
+            match env2.elab_mode {
+                ElabTest() =>
+                    compare_type_display(env2, inferred_ty, expected_str, span),
+                _ =>
+                    // Check mode: skip comparison, return Unit
+                    ElabExprOk(env2, tg_term_unit(), tg_type_unit(), CIRUnit)
+            }
+    }
+}
+
+/// Compare the inferred type's display string against the expected string.
+fn compare_type_display(env: Env, inferred_ty: TypeHandle, expected_str: String, span: Span) -> ElabExprResult {
+    let display_ptr = tg_type_format_display(inferred_ty);
+    if display_ptr == 0 {
+        ElabExprErr(elab_expr_error("expect_type: could not format inferred type", span))
+    } else {
+        let actual_str = cstring_to_string(display_ptr);
+        if actual_str == expected_str {
+            ElabExprOk(env, tg_term_unit(), tg_type_unit(), CIRUnit)
+        } else {
+            ElabExprErr(elab_expr_error(
+                "type assertion failed: expected `" ++ expected_str ++ "`, found `" ++ actual_str ++ "`",
+                span
+            ))
+        }
+    }
+}

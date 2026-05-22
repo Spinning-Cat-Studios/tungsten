@@ -1,0 +1,43 @@
+// Regression test: recursiveness consistency across all call sites (ADR 21.4.26c).
+//
+// Exercises all 5 call sites of adt_is_recursive with mutually recursive types:
+//   1. types/encoding.rs        — ADT encoding (type Tree, type Forest)
+//   2. types/normalize/adt.rs   — normalization during fold wrapping
+//   3. exprs/constructors/context.rs — constructor usage (Leaf, Branch, etc.)
+//   4. exprs/adt_match/resolution.rs — match on Tree and Forest
+//   5. exprs/patterns/wrapping.rs    — nested pattern destructuring
+//
+// If any call site disagrees about recursiveness, the debug assertion fires.
+// If fold/unfold is missing, the program will SIGSEGV at runtime.
+
+pub type Tree =
+    | Leaf(Nat)
+    | Branch(Forest)
+
+pub type Forest =
+    | Empty
+    | Cons(Tree, Forest)
+
+pub fn tree_sum(t: Tree) -> Nat {
+    match t {
+        Leaf(n) => n,
+        Branch(f) => forest_sum(f),
+    }
+}
+
+pub fn forest_sum(f: Forest) -> Nat {
+    match f {
+        Empty() => 0,
+        Cons(t, rest) => tree_sum(t) + forest_sum(rest),
+    }
+}
+
+pub fn main() -> Nat {
+    // Build: Branch(Cons(Leaf(10), Cons(Leaf(20), Cons(Leaf(12), Empty))))
+    let t1 = Leaf(10);
+    let t2 = Leaf(20);
+    let t3 = Leaf(12);
+    let f = Cons(t1, Cons(t2, Cons(t3, Empty())));
+    let tree = Branch(f);
+    tree_sum(tree)
+}

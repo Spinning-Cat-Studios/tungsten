@@ -1,0 +1,4 @@
+// Golden test: undefined variable with diagnostic hints (ADR 21.4.26h)
+fn main() -> Nat {
+    x
+}

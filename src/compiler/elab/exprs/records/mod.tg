@@ -1,0 +1,295 @@
+// src/compiler/elab/exprs/records/mod.tg
+// Record expression elaboration.
+//
+// Handles record literals, field access, and record spread.
+// Records are elaborated to nested pairs.
+
+pub mod deep_eq;
+pub mod named;
+pub mod spread;
+
+pub use elab::exprs::records::deep_eq::*;
+pub use elab::exprs::records::named::synth_named_record;
+pub use elab::exprs::records::spread::synth_named_spread;
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, Ident, ident_name,
+    FieldInit,
+    MaybeExpr, NoExpr, SomeExpr
+};
+use driver::ffi::{List, Nil, Cons, string_len, string_char_at_internal, cstring_to_string};
+use elab::ffi::{
+    TermHandle, TypeHandle, INVALID_HANDLE,
+    tg_term_pair, tg_term_fst, tg_term_snd, tg_term_unit,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_product,
+    tg_type_is_tyvar, tg_type_get_tyvar_name,
+    tg_type_is_app, tg_type_get_app_name,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right, tg_type_sum,
+    tg_type_is_arrow, tg_type_get_arrow_domain, tg_type_get_arrow_codomain, tg_type_arrow,
+    tg_type_is_mu, tg_type_get_mu_body, tg_type_get_mu_var, tg_type_mu,
+    tg_type_is_forall, tg_type_get_forall_body, tg_type_get_forall_var, tg_type_forall,
+    tg_string_to_cstr,
+    tg_types_equal,
+    tg_cstr_eq
+};
+use elab::env::{
+    Env, env_lookup_type_def, env_global_lookup_type_def, env_is_type_var,
+    TypeDefInfo,
+    MaybeTypeDef, NoTypeDef, SomeTypeDef,
+    MaybeRecordFields, NoRecordFields, SomeRecordFields,
+    MaybeRecordField, NoRecordField, SomeRecordField,
+    RecordFieldInfo,
+    record_field_lookup
+};
+use driver::util::{list_contains_string};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error,
+    add_expected_because, TermInfo
+};
+use elab::error::ExpFieldType;
+use elab::cir::{CodegenIR, CIRUnit, CIRPair, CIRFst, CIRSnd};
+use elab::exprs::{synth, check};
+use elab::exprs::records::deep_eq::{synth_record_update, check_record_update, check_record_fields, is_numeric_string, parse_field_index};
+
+// ===========================================================================
+// RECORD LITERAL ELABORATION
+// ===========================================================================
+
+pub fn synth_record_lit(
+    env: Env,
+    spread: MaybeExpr,
+    fields: List<FieldInit>,
+    span: Span
+) -> ElabExprResult {
+    match spread {
+        SomeExpr(base) =>
+            synth_record_lit_spread(env, base, fields, span),
+        NoExpr() =>
+            ElabExprErr(elab_expr_error(
+                "cannot infer record type; provide type annotation",
+                span
+            ))
+    }
+}
+
+fn synth_record_lit_spread(
+    env: Env,
+    base: Expr,
+    fields: List<FieldInit>,
+    span: Span
+) -> ElabExprResult {
+    match synth(env, base) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, base_term, base_ty, base_cir) =>
+            let bi: TermInfo = { term: base_term, ty: base_ty, cir: base_cir };
+            synth_record_update(env2, bi, fields, span)
+    }
+}
+
+pub fn check_record_lit(
+    env: Env,
+    spread: MaybeExpr,
+    fields: List<FieldInit>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match spread {
+        SomeExpr(base) =>
+            check_record_lit_spread(env, base, fields, expected, span),
+        NoExpr() =>
+            check_record_fields(env, expected, fields, span)
+    }
+}
+
+fn check_record_lit_spread(
+    env: Env,
+    base: Expr,
+    fields: List<FieldInit>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match check(env, base, expected) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, base_term, _, base_cir) =>
+            let bi: TermInfo = { term: base_term, ty: expected, cir: base_cir };
+            check_record_update(env2, bi, fields, span)
+    }
+}
+
+// ===========================================================================
+// FIELD ACCESS
+// ===========================================================================
+
+pub fn synth_field(
+    env: Env,
+    base: Expr,
+    field: Ident,
+    span: Span
+) -> ElabExprResult {
+    let field_name = ident_name(field);
+    match synth(env, base) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, base_term, base_ty, base_cir) =>
+            let bi: TermInfo = { term: base_term, ty: base_ty, cir: base_cir };
+            project_field(env2, bi, field_name, span)
+    }
+}
+
+// ===========================================================================
+// FIELD PROJECTION
+// ===========================================================================
+
+pub fn get_type_name(ty: TypeHandle) -> String {
+    if tg_type_is_tyvar(ty) {
+        let name_ptr = tg_type_get_tyvar_name(ty);
+        if name_ptr == 0 {
+            ""
+        } else {
+            cstring_to_string(name_ptr)
+        }
+    } else if tg_type_is_app(ty) {
+        let name_ptr = tg_type_get_app_name(ty);
+        if name_ptr == 0 {
+            ""
+        } else {
+            cstring_to_string(name_ptr)
+        }
+    } else {
+        ""
+    }
+}
+
+fn project_field(
+    env: Env,
+    base: TermInfo,
+    field_name: String,
+    span: Span
+) -> ElabExprResult {
+    if is_numeric_string(field_name) {
+        let index = parse_field_index(field_name);
+        project_index(env, base, index, span)
+    } else {
+        project_named_field(env, base, field_name, span)
+    }
+}
+
+fn project_named_field(
+    env: Env,
+    base: TermInfo,
+    field_name: String,
+    span: Span
+) -> ElabExprResult {
+    let type_name = get_type_name(base.ty);
+    if type_name == "" {
+        ElabExprErr(elab_expr_error(
+            "expected record type for field access",
+            span
+        ))
+    } else {
+        match env_lookup_type_def(env, type_name) {
+            NoTypeDef() =>
+                ElabExprErr(elab_expr_error(
+                    "unknown record type for field access",
+                    span
+                )),
+            SomeTypeDef(type_info) =>
+                project_from_type_info(env, base, type_info, field_name, span)
+        }
+    }
+}
+
+fn project_from_type_info(
+    env: Env,
+    base: TermInfo,
+    type_info: TypeDefInfo,
+    field_name: String,
+    span: Span
+) -> ElabExprResult {
+    match type_info.record_fields {
+        NoRecordFields() =>
+            ElabExprErr(elab_expr_error(
+                "type is not a record (no fields)",
+                span
+            )),
+        SomeRecordFields(fields) =>
+            match record_field_lookup(fields, field_name) {
+                NoRecordField() =>
+                    ElabExprErr(elab_expr_error(
+                        "unknown field in record",
+                        span
+                    )),
+                SomeRecordField(field_info) =>
+                    let structural_base: TermInfo = { term: base.term, ty: type_info.encoded_type, cir: base.cir };
+                    project_index_with_result_type(
+                        env, structural_base,
+                        field_info.index, field_info.ty, span
+                    )
+            }
+    }
+}
+
+fn project_index(
+    env: Env,
+    base: TermInfo,
+    index: Nat,
+    span: Span
+) -> ElabExprResult {
+    if index == 0 {
+        if tg_type_is_product(base.ty) {
+            let elem_ty = tg_type_get_product_left(base.ty);
+            let term = tg_term_fst(base.term);
+            let cir = CIRFst(base.cir);
+            ElabExprOk(env, term, elem_ty, cir)
+        } else {
+            ElabExprOk(env, base.term, base.ty, base.cir)
+        }
+    } else {
+        if tg_type_is_product(base.ty) {
+            let next: TermInfo = {
+                term: tg_term_snd(base.term),
+                ty: tg_type_get_product_right(base.ty),
+                cir: CIRSnd(base.cir)
+            };
+            project_index(env, next, index - 1, span)
+        } else {
+            ElabExprErr(elab_expr_error(
+                "index out of bounds for record/tuple",
+                span
+            ))
+        }
+    }
+}
+
+fn project_index_with_result_type(
+    env: Env,
+    base: TermInfo,
+    index: Nat,
+    result_ty: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    if index == 0 {
+        if tg_type_is_product(base.ty) {
+            let term = tg_term_fst(base.term);
+            let cir = CIRFst(base.cir);
+            ElabExprOk(env, term, result_ty, cir)
+        } else {
+            ElabExprOk(env, base.term, result_ty, base.cir)
+        }
+    } else {
+        if tg_type_is_product(base.ty) {
+            let next: TermInfo = {
+                term: tg_term_snd(base.term),
+                ty: tg_type_get_product_right(base.ty),
+                cir: CIRSnd(base.cir)
+            };
+            project_index_with_result_type(env, next, index - 1, result_ty, span)
+        } else {
+            ElabExprErr(elab_expr_error(
+                "index out of bounds for record/tuple",
+                span
+            ))
+        }
+    }
+}

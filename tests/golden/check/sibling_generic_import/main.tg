@@ -1,0 +1,11 @@
+// Regression test: sibling module with generic type usage.
+// Verifies that Phase A (type stub collection) extracts correct arity,
+// so generics like List<Token> resolve across sibling branches.
+// See ADR 6.5.26e §6, acceptance criterion "generic sibling import".
+
+pub mod tokens;
+pub mod parser;
+
+fn main() -> Nat {
+    parser::count()
+}

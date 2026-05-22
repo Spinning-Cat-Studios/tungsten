@@ -1,0 +1,83 @@
+// src/compiler/parser/items/use_decl/use_paths.tg
+// Use path parsing.
+
+use lexer::token::{TokenKind, TokLBrace, TokStar, TokColonColon};
+use lexer::span::{Span};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, ident_list_singleton};
+use parser::ast::nodes::{Path, path_new};
+use driver::ffi::{List, Cons};
+use driver::util::list_reverse;
+use driver::util::{Result, Ok, Err};
+
+// ===========================================================================
+// USE PATH PARSING
+// ===========================================================================
+
+/// Parse a simple path (no type arguments).
+/// Uses cons-then-reverse pattern for O(n) total instead of O(n²).
+pub fn parse_use_path(cur: Cursor) -> Result<(Path, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            Err(parse_error_expected("path", found, cursor_peek_span(cur)))
+        },
+        SomeIdentResult(name, cur2) => {
+            // Start accumulator with first segment (in reverse order)
+            let ident = ident_new(name, start_span);
+            let acc = ident_list_singleton(ident);
+            parse_use_path_rest(cur2, acc, start_span)
+        }
+    }
+}
+
+/// Parse remaining path segments.
+/// The `acc` parameter accumulates segments in reverse order.
+fn parse_use_path_rest(cur: Cursor, acc: List<Ident>, start_span: Span) -> Result<(Path, Cursor), ParseError> {
+    // Check for :: followed by identifier (not * or {)
+    if cursor_check(cur, TokColonColon()) {
+        let cur2 = cursor_advance(cur);
+        // Peek ahead to see if it's an identifier
+        match cursor_peek_kind(cur2) {
+            None() => {
+                // End of path, reverse and return
+                Ok((path_new(list_reverse(acc), start_span), cur))
+            },
+            Some(kind) => {
+                parse_use_path_after_colon(cur, cur2, kind, acc, start_span)
+            }
+        }
+    } else {
+        // No more segments, reverse and return path - O(n) once
+        Ok((path_new(list_reverse(acc), start_span), cur))
+    }
+}
+
+/// Handle the token after :: in a use path.
+fn parse_use_path_after_colon(cur_before: Cursor, cur: Cursor, kind: TokenKind, acc: List<Ident>, start_span: Span) -> Result<(Path, Cursor), ParseError> {
+    match kind {
+        TokStar() => Ok((path_new(list_reverse(acc), start_span), cur_before)),
+        TokLBrace() => Ok((path_new(list_reverse(acc), start_span), cur_before)),
+        _ => parse_use_path_after_colon_ident(cur_before, cur, acc, start_span)
+    }
+}
+
+fn parse_use_path_after_colon_ident(cur_before: Cursor, cur: Cursor, acc: List<Ident>, start_span: Span) -> Result<(Path, Cursor), ParseError> {
+    match cursor_eat_ident(cur) {
+        NoIdentResult() =>
+            Ok((path_new(list_reverse(acc), start_span), cur_before)),
+        SomeIdentResult(name, cur2) => {
+            let ident = ident_new(name, cursor_peek_span(cur));
+            let new_acc = Cons(ident, acc);
+            parse_use_path_rest(cur2, new_acc, start_span)
+        }
+    }
+}

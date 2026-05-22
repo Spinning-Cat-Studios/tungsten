@@ -1,0 +1,8 @@
+// Golden test: all wildcards — let (_, _) = pair
+// Verifies no crash when no bindings are produced.
+
+fn main() -> Nat {
+    let pair = (10, 20);
+    let (_, _) = pair;
+    99
+}

@@ -1,0 +1,14 @@
+[E0010] Error: expected `Nat`, found `String`
+   ╭─[tests/golden/error/type_mismatch_hints.tg:3:10]
+   │
+ 2 │ fn main() -> Nat {
+   │              ─┬─  
+   │               ╰─── expected due to return type
+ 3 │     42 + "hello"
+   │          ───┬───  
+   │             ╰───── expected `Nat`, found `String`
+───╯
+  hint: run `tungsten info type-encoding <Type> tests/golden/error/type_mismatch_hints.tg`
+  hint: run `tungsten doctor suggest-tools "type mismatch"`
+
+error: aborting due to 1 error

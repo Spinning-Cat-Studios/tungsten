@@ -1,0 +1,11 @@
+// AC6: Arity mismatch on type alias application
+type Result<T, E> =
+    | Err(E)
+    | Ok(T)
+
+type Alias<T> = Result<T, String>
+
+fn main() -> Unit {
+    let x: Alias<Nat, Bool> = Ok(42);
+    ()
+}

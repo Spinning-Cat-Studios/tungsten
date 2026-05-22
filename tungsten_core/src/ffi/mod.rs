@@ -66,8 +66,6 @@ use crate::types::Type;
 pub use check::*;
 pub use context::*;
 pub use driver::*;
-pub use terms::*;
-pub use types::*;
 
 // ============================================================================
 // Handle Types

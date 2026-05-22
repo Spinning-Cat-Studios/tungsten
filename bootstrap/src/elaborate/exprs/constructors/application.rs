@@ -62,8 +62,8 @@ impl<'a> Elaborator<'a> {
         let ctx = self.get_constructor_context(info, span)?;
         let constructor = &ctx.constructors[info.index];
 
-        // Infer argument types
-        let (arg_terms, arg_types) = self.infer_args(args)?;
+        // Infer argument types (used only for type parameter inference)
+        let (_arg_terms, arg_types) = self.infer_args(args)?;
 
         // Infer type arguments from argument types
         let type_args = self.infer_type_args_from_constructor(
@@ -75,6 +75,14 @@ impl<'a> Elaborator<'a> {
 
         // Get the full ADT type with inferred type arguments
         let adt_type = self.encode_adt_type(&info.type_name, &type_args)?;
+
+        // Build substitution from inferred type args and re-check arguments
+        // against substituted field types. This fixes TyVar leaks from nullary
+        // sub-constructors (e.g., Nil in Cons(s, Nil) where Nil is inferred
+        // in isolation without knowing T = String).
+        let substitution =
+            self.build_substitution_from_expected(&adt_type, &ctx.type_params, &info.type_name)?;
+        let arg_terms = self.check_args_against_fields(args, &constructor.fields, &substitution)?;
 
         // Build constructor term
         let value = self.build_product_value(arg_terms);

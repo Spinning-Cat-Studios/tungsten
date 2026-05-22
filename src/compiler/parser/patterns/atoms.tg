@@ -1,0 +1,169 @@
+// src/compiler/parser/patterns/atoms.tg
+// Atomic pattern parsing: wildcards, literals, tuples, and dispatch.
+
+use lexer::token::{Token, TokenKind, TokIdent, TokIntLit, TokStringLit,
+    TokLParen, TokRParen, TokComma, TokUnderscore,
+    TokTrue, TokFalse};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected, parse_error_eof};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_check,
+    cursor_advance, cursor_expect, token_kind_name};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{PatLit, PatLitInt, PatLitBool, PatLitString};
+use parser::ast::pattern::{Pattern, PatWildcard, PatLiteral, PatTuple, pattern_span};
+use parser::patterns::constructors::{parse_pattern_ident_or_constructor};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use driver::util::{Result, Ok, Err};
+
+// ===========================================================================
+// HELPER: GET CURSOR SPAN
+// ===========================================================================
+
+/// Get the span at the current cursor position.
+/// If at EOF, returns an empty span at the cursor position.
+pub fn get_cursor_span(cur: Cursor) -> Span {
+    match cursor_peek(cur) {
+        None() => span_empty(cur.position, cur.filename),
+        Some(tok) => tok.span
+    }
+}
+
+// ===========================================================================
+// PATTERN PARSING - ATOMIC PATTERNS
+// ===========================================================================
+
+/// Parse an atomic pattern (no or-patterns).
+/// 
+/// This is exported for use in lambda pipe syntax where the `|` character
+/// is used as a delimiter, making or-patterns ambiguous.
+/// 
+/// Atomic patterns:
+/// - Wildcard: _
+/// - Integer literal: 42
+/// - Boolean literal: true, false
+/// - String literal: "hello"
+/// - Tuple: (a, b, c)
+/// - Grouping: (a)
+/// - Unit: ()
+/// - Variable or Constructor: depends on path structure
+pub fn parse_pattern_atom(cur: Cursor) -> Result<(Pattern, Cursor), ParseError> {
+    match cursor_peek_kind(cur) {
+        None() => {
+            Err(parse_error_eof("pattern", get_cursor_span(cur)))
+        },
+        Some(kind) => parse_pattern_atom_by_kind(cur, kind)
+    }
+}
+
+/// Dispatch atomic pattern parsing based on token kind.
+fn parse_pattern_atom_by_kind(cur: Cursor, kind: TokenKind) -> Result<(Pattern, Cursor), ParseError> {
+    match kind {
+        // Wildcard: _
+        TokUnderscore() => {
+            let span = get_cursor_span(cur);
+            Ok((PatWildcard(span), cursor_advance(cur)))
+        },
+        
+        // Integer literal: 42
+        TokIntLit(n) => {
+            let span = get_cursor_span(cur);
+            Ok((PatLiteral(PatLitInt(n), span), cursor_advance(cur)))
+        },
+        
+        // Boolean literal: true
+        TokTrue() => {
+            let span = get_cursor_span(cur);
+            Ok((PatLiteral(PatLitBool(true), span), cursor_advance(cur)))
+        },
+        
+        // Boolean literal: false
+        TokFalse() => {
+            let span = get_cursor_span(cur);
+            Ok((PatLiteral(PatLitBool(false), span), cursor_advance(cur)))
+        },
+        
+        // String literal: "hello"
+        TokStringLit(s) => {
+            let span = get_cursor_span(cur);
+            Ok((PatLiteral(PatLitString(s), span), cursor_advance(cur)))
+        },
+        
+        // Parenthesized: (), (a), (a, b, c)
+        TokLParen() => parse_pattern_paren_or_tuple(cur),
+        
+        // Identifier: variable or constructor
+        TokIdent(_) => parse_pattern_ident_or_constructor(cur),
+        
+        // Unknown token - error
+        _ => {
+            let found = token_kind_name(kind);
+            Err(parse_error_expected("pattern", found, get_cursor_span(cur)))
+        }
+    }
+}
+
+// ===========================================================================
+// PATTERN PARSING - PARENTHESIZED / TUPLE
+// ===========================================================================
+
+/// Parse parenthesized pattern, unit, or tuple: (), (p), (p1, p2, ...)
+fn parse_pattern_paren_or_tuple(cur: Cursor) -> Result<(Pattern, Cursor), ParseError> {
+    let start_span = get_cursor_span(cur);
+    let cur2 = cursor_advance(cur);
+    if cursor_check(cur2, TokRParen()) {
+        let end_span = get_cursor_span(cur2);
+        let cur3 = cursor_advance(cur2);
+        Ok((PatTuple(Nil, span_merge(start_span, end_span)), cur3))
+    } else {
+        let (first, cur3) = parse_pattern(cur2)?;
+        parse_paren_after_first(first, cur3, start_span)
+    }
+}
+
+fn parse_paren_after_first(first: Pattern, cur: Cursor, start_span: Span) -> Result<(Pattern, Cursor), ParseError> {
+    if cursor_check(cur, TokComma()) {
+        parse_tuple_pattern_rest(cur, first, start_span)
+    } else {
+        let (_, cur2) = cursor_expect(cur, TokRParen())?;
+        Ok((first, cur2))
+    }
+}
+
+/// Parse the rest of a tuple pattern after the first element.
+fn parse_tuple_pattern_rest(cur: Cursor, first: Pattern, start_span: Span) -> Result<(Pattern, Cursor), ParseError> {
+    // Accumulate patterns in a list (first is already parsed)
+    parse_tuple_patterns_collect(cur, Cons(first, Nil), start_span)
+}
+
+/// Collect tuple pattern elements, consuming commas.
+/// Entry: cursor is at the comma following the first element.
+/// 
+/// Supports trailing commas: (a, b,) is valid.
+fn parse_tuple_patterns_collect(cur: Cursor, acc: List<Pattern>, start_span: Span) -> Result<(Pattern, Cursor), ParseError> {
+    let cur2 = cursor_advance(cur);
+    if cursor_check(cur2, TokRParen()) {
+        let end_span = get_cursor_span(cur2);
+        let cur3 = cursor_advance(cur2);
+        let patterns = list_reverse(acc);
+        Ok((PatTuple(patterns, span_merge(start_span, end_span)), cur3))
+    } else {
+        let (pat, cur3) = parse_pattern(cur2)?;
+        parse_tuple_after_pattern(pat, cur3, acc, start_span)
+    }
+}
+
+fn parse_tuple_after_pattern(pat: Pattern, cur: Cursor, acc: List<Pattern>, start_span: Span) -> Result<(Pattern, Cursor), ParseError> {
+    let acc2 = Cons(pat, acc);
+    if cursor_check(cur, TokComma()) {
+        parse_tuple_patterns_collect(cur, acc2, start_span)
+    } else {
+        let (_, cur2) = cursor_expect(cur, TokRParen())?;
+        let end_span = get_cursor_span(cur);
+        let patterns = list_reverse(acc2);
+        Ok((PatTuple(patterns, span_merge(start_span, end_span)), cur2))
+    }
+}
+
+// Forward declaration: parse_pattern is in mod.tg but needed here for recursion
+use parser::patterns::{parse_pattern};

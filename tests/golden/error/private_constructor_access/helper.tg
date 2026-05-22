@@ -1,0 +1,7 @@
+// Module with private ADT (constructors inherit type visibility).
+
+type Color =
+    | Red
+    | Blue
+
+pub type Shape = Nat

@@ -1,0 +1,10 @@
+// AC11: Unannotated record fields inherit parent type visibility.
+// When the parent type is pub, unannotated fields are also pub.
+
+mod helper;
+use helper::Config;
+
+fn main() -> Nat {
+    let c = Config { name: 1, internal_id: 42, secret: 0 };
+    c.name
+}

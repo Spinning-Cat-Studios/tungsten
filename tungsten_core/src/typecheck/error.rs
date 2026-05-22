@@ -76,15 +76,17 @@ pub enum TypeError {
 
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // "Expected X, got: {got}" family
+        if let Some((expected_desc, got)) = self.expected_got_msg() {
+            return write!(f, "Expected {expected_desc}, got: {got}");
+        }
+        // "X mismatch: expected {e}, got {g}" family
+        if let Some((label, expected, got)) = self.mismatch_msg() {
+            return write!(f, "{label} mismatch: expected {expected}, got {got}");
+        }
         match self {
             TypeError::UnboundVariable(v) => write!(f, "Unbound variable: {v}"),
             TypeError::UnboundTypeVar(v) => write!(f, "Unbound type variable: {v}"),
-            TypeError::NotAFunction { got } => write!(f, "Expected function type, got: {got}"),
-            TypeError::ArgumentTypeMismatch { expected, got } => {
-                write!(f, "Argument type mismatch: expected {expected}, got {got}")
-            }
-            TypeError::NotAProduct { got } => write!(f, "Expected product type, got: {got}"),
-            TypeError::NotASum { got } => write!(f, "Expected sum type, got: {got}"),
             TypeError::BranchTypeMismatch {
                 then_type,
                 else_type,
@@ -94,25 +96,7 @@ impl fmt::Display for TypeError {
             TypeError::ConditionNotBool { got } => {
                 write!(f, "Condition must be Bool, got: {got}")
             }
-            TypeError::NotANat { got } => write!(f, "Expected Nat, got: {got}"),
-            TypeError::NotPolymorphic { got } => {
-                write!(f, "Expected polymorphic type (∀α. τ), got: {got}")
-            }
-            TypeError::NotVoid { got } => write!(f, "Expected Void, got: {got}"),
-            TypeError::NotEquality { got } => write!(f, "Expected Eq type, got: {got}"),
-            TypeError::TypeMismatch { expected, got } => {
-                write!(f, "Type mismatch: expected {expected}, got {got}")
-            }
             TypeError::MalformedType(ty) => write!(f, "Malformed type: {ty}"),
-            TypeError::NatRecSuccTypeMismatch { expected, got } => {
-                write!(
-                    f,
-                    "natrec succ case type mismatch: expected {expected}, got {got}"
-                )
-            }
-            TypeError::NatIndMotiveMismatch { expected, got } => {
-                write!(f, "natind motive mismatch: expected {expected}, got {got}")
-            }
             TypeError::MotiveNotFunction { got } => {
                 write!(f, "Motive must be a function type, got: {got}")
             }
@@ -125,12 +109,56 @@ impl fmt::Display for TypeError {
                     "Invalid variant index {index} for ADT with {num_variants} variants"
                 )
             }
-            TypeError::NotAnAdt { got } => {
-                write!(f, "Expected ADT type, got: {got}")
-            }
             TypeError::EmptyMatch => {
                 write!(f, "Match expression has no arms")
             }
+            // Handled by helpers above
+            TypeError::NotAFunction { .. }
+            | TypeError::NotAProduct { .. }
+            | TypeError::NotASum { .. }
+            | TypeError::NotANat { .. }
+            | TypeError::NotPolymorphic { .. }
+            | TypeError::NotVoid { .. }
+            | TypeError::NotEquality { .. }
+            | TypeError::NotAnAdt { .. }
+            | TypeError::ArgumentTypeMismatch { .. }
+            | TypeError::TypeMismatch { .. }
+            | TypeError::NatRecSuccTypeMismatch { .. }
+            | TypeError::NatIndMotiveMismatch { .. } => unreachable!(),
+        }
+    }
+}
+
+impl TypeError {
+    /// "Expected X, got: {got}" — single-type-mismatch errors.
+    fn expected_got_msg(&self) -> Option<(&str, &Type)> {
+        match self {
+            TypeError::NotAFunction { got } => Some(("function type", got)),
+            TypeError::NotAProduct { got } => Some(("product type", got)),
+            TypeError::NotASum { got } => Some(("sum type", got)),
+            TypeError::NotANat { got } => Some(("Nat", got)),
+            TypeError::NotPolymorphic { got } => Some(("polymorphic type (∀α. τ)", got)),
+            TypeError::NotVoid { got } => Some(("Void", got)),
+            TypeError::NotEquality { got } => Some(("Eq type", got)),
+            TypeError::NotAnAdt { got } => Some(("ADT type", got)),
+            _ => None,
+        }
+    }
+
+    /// "X mismatch: expected {e}, got {g}" — two-type-mismatch errors.
+    fn mismatch_msg(&self) -> Option<(&str, &Type, &Type)> {
+        match self {
+            TypeError::ArgumentTypeMismatch { expected, got } => {
+                Some(("Argument type", expected, got))
+            }
+            TypeError::TypeMismatch { expected, got } => Some(("Type", expected, got)),
+            TypeError::NatRecSuccTypeMismatch { expected, got } => {
+                Some(("natrec succ case type", expected, got))
+            }
+            TypeError::NatIndMotiveMismatch { expected, got } => {
+                Some(("natind motive", expected, got))
+            }
+            _ => None,
         }
     }
 }

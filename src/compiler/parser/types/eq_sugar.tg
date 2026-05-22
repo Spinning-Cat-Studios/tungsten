@@ -1,0 +1,77 @@
+// src/compiler/parser/types/eq_sugar.tg
+// == sugar parsing: `expr == expr` in type position → TyEq(lhs, rhs, span).
+// Split from types/mod.tg for complexity (ADR 21.5.26f P5).
+
+use lexer::token::{TokenKind, TokIntLit, TokStringLit, TokTrue, TokFalse, TokEqEq, TokLParen};
+use lexer::span::{Span, span_merge};
+use parser::error::{ParseError, parse_error_simple};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_expect};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Path, path_span};
+use parser::ast::nodes::{TypeExpr, TyPath, TyEq, type_expr_span};
+use parser::ast::nodes::{Expr, ExprPath, ExprApp, expr_span};
+use driver::ffi::{List, Nil};
+use driver::util::{Result, Ok, Err};
+use parser::exprs::pratt::parse_expr_prec;
+use parser::exprs::postfix::{parse_postfix_loop, parse_call_args};
+
+/// Check if the current token can only start an expression, not a type.
+pub fn is_eq_sugar_start(cur: Cursor) -> Bool {
+    match cursor_peek_kind(cur) {
+        None() => false,
+        Some(kind) => is_eq_sugar_token(kind)
+    }
+}
+
+fn is_eq_sugar_token(kind: TokenKind) -> Bool {
+    match kind {
+        TokIntLit(_) => true,
+        TokTrue() => true,
+        TokFalse() => true,
+        TokStringLit(_) => true,
+        _ => false
+    }
+}
+
+/// Parse `expr == expr` when the LHS is known to be expression-only.
+pub fn parse_eq_sugar(cur: Cursor) -> Result<(TypeExpr, Cursor), ParseError> {
+    let (lhs, cur2) = parse_expr_prec(cur, 4)?;
+    let (_, cur3) = cursor_expect(cur2, TokEqEq())?;
+    let (rhs, cur4) = parse_expr_prec(cur3, 4)?;
+    let full_span = span_merge(expr_span(lhs), expr_span(rhs));
+    Ok((TyEq(lhs, rhs, full_span), cur4))
+}
+
+/// After parsing a type followed by `==`, convert the type LHS to an expression.
+/// Only path types (identifiers) can be reinterpreted as expressions.
+pub fn parse_eq_sugar_after_type(lhs_ty: TypeExpr, cur: Cursor) -> Result<(TypeExpr, Cursor), ParseError> {
+    match lhs_ty {
+        TyPath(path) => {
+            let start = path_span(path);
+            let lhs = ExprPath(path);
+            let (_, cur2) = cursor_expect(cur, TokEqEq())?;
+            let (rhs, cur3) = parse_expr_prec(cur2, 4)?;
+            let full_span = span_merge(start, expr_span(rhs));
+            Ok((TyEq(lhs, rhs, full_span), cur3))
+        },
+        _ => {
+            let span = cursor_peek_span(cur);
+            Err(parse_error_simple(
+                "left side of `==` in type position must be an identifier or literal",
+                span
+            ))
+        }
+    }
+}
+
+/// Parse `ident(args...) == expr` in type position.
+/// Called when a path was parsed as a type, then `(` follows.
+pub fn parse_eq_sugar_fn_call(path: Path, cur: Cursor) -> Result<(TypeExpr, Cursor), ParseError> {
+    let start = path_span(path);
+    let lhs_base = ExprPath(path);
+    let (lhs, cur2) = parse_postfix_loop(lhs_base, cur)?;
+    let (_, cur3) = cursor_expect(cur2, TokEqEq())?;
+    let (rhs, cur4) = parse_expr_prec(cur3, 4)?;
+    let full_span = span_merge(start, expr_span(rhs));
+    Ok((TyEq(lhs, rhs, full_span), cur4))
+}

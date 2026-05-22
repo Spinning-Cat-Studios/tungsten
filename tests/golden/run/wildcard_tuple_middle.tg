@@ -1,0 +1,8 @@
+// Golden test: wildcard in middle — let (a, _, c) = triple
+// Verifies a binds to first, c binds to third, middle skipped.
+
+fn main() -> Nat {
+    let triple = (10, 20, 30);
+    let (a, _, c) = triple;
+    a + c
+}

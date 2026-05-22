@@ -1,0 +1,52 @@
+// Regression test: mutual recursion fold/unfold with pair destructuring.
+//
+// Root cause of SIGSEGV in tungsten1 (ADR 21.4.26a):
+// Mutually recursive ADTs were not detected as recursive by adt_is_recursive(),
+// so constructors emitted flat Sum structs (12 bytes) instead of fold→ptr (8 bytes).
+// When stored in a pair and destructured, the size mismatch corrupted adjacent fields.
+//
+// This test exercises the exact pattern that crashed:
+// 1. Define mutually recursive types (MaybeExpr ↔ Expr)
+// 2. Construct a value of the non-self-referencing type (MaybeExpr)
+// 3. Put it in a pair with another value
+// 4. Destructure the pair and use the second element
+//
+// If fold/unfold is missing, the second pair element reads corrupted data.
+
+pub type MaybeExpr =
+    | NoExpr
+    | SomeExpr(Expr)
+
+pub type Expr =
+    | Lit(Nat)
+    | Add(MaybeExpr, MaybeExpr)
+
+pub fn make_pair() -> (MaybeExpr, Nat) {
+    let m = NoExpr();
+    (m, 99)
+}
+
+pub fn extract_second(p: (MaybeExpr, Nat)) -> Nat {
+    let (m, n) = p;
+    n
+}
+
+pub fn make_pair_some() -> (MaybeExpr, Nat) {
+    let e = Lit(1);
+    let m = SomeExpr(e);
+    (m, 77)
+}
+
+pub fn main() -> Nat {
+    // Test 1: NoExpr in pair — the minimal crash case
+    let p1 = make_pair();
+    let n1 = extract_second(p1);
+
+    // Test 2: SomeExpr in pair — exercises the data-carrying variant
+    let p2 = make_pair_some();
+    let n2 = extract_second(p2);
+
+    // Return sum so both paths are exercised.
+    // 99 + 77 = 176
+    n1 + n2
+}

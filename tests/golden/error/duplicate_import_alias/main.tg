@@ -1,0 +1,10 @@
+// Test: importing the same name from two different modules produces E0007.
+// The fix is to use `as` aliasing: `use mod_b::Foo as FooB;`
+
+pub mod mod_a;
+pub mod mod_b;
+
+use mod_a::Foo;
+use mod_b::Foo;
+
+fn main() -> Nat { 0 }

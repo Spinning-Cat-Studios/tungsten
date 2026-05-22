@@ -1,0 +1,9 @@
+// Test: path-qualified import through a pub mod submodule.
+
+pub mod parent;
+
+use parent::child::helper;
+
+fn main() -> Nat {
+    helper(21)
+}

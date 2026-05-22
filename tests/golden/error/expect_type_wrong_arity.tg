@@ -1,0 +1,8 @@
+// Golden test: expect_type with wrong arity should error.
+
+fn test_wrong_arity() -> Unit {
+    expect_type(42);
+    ()
+}
+
+pub fn main() -> Nat { 0 }

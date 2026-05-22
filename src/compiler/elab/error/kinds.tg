@@ -3,6 +3,17 @@
 //
 // This module defines ElabErrorKind, the enum of all error types,
 // along with functions to get error codes and messages.
+//
+// **L1/L2 error code numbering differs.** L2 (this file) uses range-based
+// numbering (E0001-E0099 for types, E0100-E0199 for names, etc.).
+// L1 (`bootstrap/src/elaborate/error/kind.rs`) uses a flat scheme.
+//
+// Key divergences:
+//   L2 ErrTypeMismatch   = E0001   vs  L1 TypeMismatch       = E0010
+//   L2 ErrUnresolvedValue = E0101  vs  L1 UndefinedVariable  = E0001
+//   L2 ErrUnresolvedType  = E0100  vs  L1 UndefinedType      = E0002
+//
+// .tg test assertions (expect_error, expect_type) use L1 codes since L1 runs them.
 
 use lexer::span::Span;
 use elab::ffi::{TypeHandle, INVALID_HANDLE};
@@ -62,11 +73,18 @@ pub type ElabErrorKind =
     | ErrMissingField(String)                       // Required field missing
     | ErrExtraField(String)                         // Unexpected field
     | ErrMultiArmMatch(Nat)                         // Match with too many arms (>2)
+    | ErrPatternTooDeep(Nat)                         // Pattern nesting exceeds limit
     
     // Proof errors (E0400-E0499)
     | ErrProofRequired(String)                      // Expected proof term
     | ErrSorryInProd                                // sorry used in production
     | ErrInvalidRefl(TypeHandle, TypeHandle)        // refl on non-equal types
+    | ErrSubstExpectedEquality(TypeHandle)           // subst arg not Eq type
+    | ErrTransEndpointMismatch(TypeHandle, TypeHandle) // trans h1.rhs != h2.lhs
+    | ErrCongExpectedFunction(TypeHandle)            // cong first arg not function
+    | ErrMotiveNotPredicate(TypeHandle)               // subst motive not a predicate lambda
+    | ErrMotiveDomainMismatch(TypeHandle, TypeHandle)  // motive param type ≠ equality base type
+    | ErrMotiveBodyNotType                            // motive body is a term, not a type
     
     // Reference/mutability errors (E0500-E0599)
     | ErrRefInPureContext                           // ref in pure code
@@ -126,11 +144,18 @@ pub fn error_kind_code(kind: ElabErrorKind) -> String {
         ErrMissingField(_) => "E0304",
         ErrExtraField(_) => "E0305",
         ErrMultiArmMatch(_) => "E0306",
+        ErrPatternTooDeep(_) => "E0307",
         
         // Proof errors (E0400-E0499)
         ErrProofRequired(_) => "E0400",
         ErrSorryInProd() => "E0401",
         ErrInvalidRefl(_, _) => "E0402",
+        ErrSubstExpectedEquality(_) => "E0403",
+        ErrTransEndpointMismatch(_, _) => "E0404",
+        ErrCongExpectedFunction(_) => "E0405",
+        ErrMotiveNotPredicate(_) => "E0475",
+        ErrMotiveDomainMismatch(_, _) => "E0476",
+        ErrMotiveBodyNotType() => "E0477",
         
         // Reference/mutability errors (E0500-E0599)
         ErrRefInPureContext() => "E0500",
@@ -202,11 +227,19 @@ pub fn error_kind_message(kind: ElabErrorKind) -> String {
         ErrExtraField(name) => "unexpected field: '" ++ name ++ "'",
         ErrMultiArmMatch(n) => 
             "match with " ++ nat_to_string(n) ++ " arms not yet supported (max 2)",
+        ErrPatternTooDeep(depth) =>
+            "pattern nesting depth " ++ nat_to_string(depth) ++ " exceeds maximum of 3",
         
         // Proof errors
         ErrProofRequired(what) => "proof required for " ++ what,
         ErrSorryInProd() => "'sorry' is not allowed in production code",
         ErrInvalidRefl(_, _) => "refl requires both sides to be equal",
+        ErrSubstExpectedEquality(_) => "subst requires an equality proof as first argument",
+        ErrTransEndpointMismatch(_, _) => "trans: endpoint mismatch — first proof's RHS does not equal second proof's LHS",
+        ErrCongExpectedFunction(_) => "cong requires a function as first argument",
+        ErrMotiveNotPredicate(_) => "subst motive must be a predicate lambda |x: T| <type>, not a plain expression",
+        ErrMotiveDomainMismatch(_, _) => "motive parameter type does not match equality base type",
+        ErrMotiveBodyNotType() => "motive body must be a type expression, not a term",
         
         // Reference/mutability errors
         ErrRefInPureContext() => "reference operation in pure context",

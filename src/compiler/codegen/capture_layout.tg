@@ -1,0 +1,55 @@
+// src/compiler/codegen/capture_layout.tg
+// LLVM-dependent closure environment layout helpers.
+//
+// Moved from elab/cir/ to codegen/ because it depends on codegen primitives
+// (llvm_type, type_size). Keeping it under elab/ caused E0001 errors for all
+// non-codegen test files that pull in `mod elab`.
+
+use elab::cir::types::{
+    CIRCapture, CIRCaptureList, CIRCaptureNil, CIRCaptureCons,
+    CodegenType
+};
+use codegen::ir_types::{llvm_type, type_size};
+
+// ===========================================================================
+// ENVIRONMENT TYPE / SIZE
+// ===========================================================================
+
+/// Build the LLVM struct type string for a closure environment.
+/// E.g. for captures [x: Nat, b: Bool] → "{ i64, i1 }".
+/// Returns "{}" for empty captures.
+fn capture_fields_string(list: CIRCaptureList) -> String {
+    match list {
+        CIRCaptureNil() => "",
+        CIRCaptureCons(cap, rest) =>
+            let field = llvm_type(cap.ty);
+            if capture_list_is_empty(rest) {
+                field
+            } else {
+                field ++ ", " ++ capture_fields_string(rest)
+            }
+    }
+}
+
+fn capture_list_is_empty(list: CIRCaptureList) -> Bool {
+    match list {
+        CIRCaptureNil() => true,
+        CIRCaptureCons(_, _) => false
+    }
+}
+
+pub fn capture_env_type(captures: CIRCaptureList) -> String {
+    match captures {
+        CIRCaptureNil() => "{}",
+        CIRCaptureCons(_, _) => "<{ " ++ capture_fields_string(captures) ++ " }>"
+    }
+}
+
+/// Compute the total byte size of a closure environment struct.
+/// Sum of all captured variable sizes (no padding — matches LLVM packed struct).
+pub fn capture_env_size(captures: CIRCaptureList) -> Nat {
+    match captures {
+        CIRCaptureNil() => 0,
+        CIRCaptureCons(cap, rest) => type_size(cap.ty) + capture_env_size(rest)
+    }
+}

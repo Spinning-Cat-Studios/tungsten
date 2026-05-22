@@ -1,0 +1,256 @@
+// Phase A: Global type + constructor stub collection.
+//
+// Walks the entire ParsedModule tree and extracts type stubs with correct
+// arity (from TypeParam AST nodes) and constructor stubs with correct
+// parent type, index, and arity. These stubs replace the arity-0 stubs
+// from populate_module_info, enabling cross-branch generic type resolution.
+//
+// Mirrors L1's `stubs.rs` (ADR 5.5.26c §2.2).
+// See ADR 6.5.26e §2.1.
+
+mod helpers;
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_len, list_reverse};
+use driver::modules::path::{ModulePath, module_path_root, module_path_child};
+use driver::modules::tree::parsed::{ParsedModule};
+use driver::modules::build::{get_module_name};
+use parser::ast::nodes::{
+    Item, ItemType, ItemTypeAlias,
+    TypeDef, TypeAliasDef, TypeParam, TypeDefBody, TypeDefAdt, TypeDefRecord,
+    Variant, RecordField
+};
+use parser::ast::common::{Ident, ident_name, Visibility, VisPublic};
+use lexer::span::{Span, span_new};
+use elab::ffi::{TypeHandle, STUB_KIND_UNSET, INVALID_HANDLE};
+use elab::env::defs::{
+    TypeDefInfo, TypeDefCore, TypeDefMeta, type_def_info_new,
+    ConstructorInfo, CtorIdentity, constructor_info_new
+};
+use elab::items::per_module::types::{
+    TypeDefExport, type_def_export_new,
+    ConstructorExport, constructor_export_new
+};
+use elab::items::per_module::stubs::helpers::{
+    extract_param_names, merge_stub_exports
+};
+
+// ===========================================================================
+// STUB EXPORTS
+// ===========================================================================
+
+/// Output of Phase A: type + constructor stubs from all modules.
+pub type StubExports = {
+    types: List<TypeDefExport>,
+    constructors: List<ConstructorExport>
+}
+
+/// Create empty stub exports.
+pub fn stub_exports_empty() -> StubExports {
+    { types: Nil, constructors: Nil }
+}
+
+// ===========================================================================
+// MAIN ENTRY POINT
+// ===========================================================================
+
+/// Phase A: Walk all modules and collect type + constructor stubs
+/// with correct arity and constructor info.
+pub fn collect_all_stubs(module: ParsedModule) -> StubExports {
+    let root_path = module_path_root();
+    collect_stubs_rec(module, root_path)
+}
+
+// ===========================================================================
+// RECURSIVE TREE WALK
+// ===========================================================================
+
+/// Recursively collect stubs from a module and its submodules.
+fn collect_stubs_rec(
+    module: ParsedModule,
+    current_path: ModulePath
+) -> StubExports {
+    // Collect from submodules first (post-order)
+    let child_stubs = collect_stubs_from_submodules(
+        module.submodules, current_path
+    );
+
+    // Collect from this module's items
+    let this_stubs = collect_stubs_from_items(
+        module.source_file.items, current_path
+    );
+
+    // Merge
+    merge_stub_exports(child_stubs, this_stubs)
+}
+
+/// Collect stubs from a list of submodules.
+fn collect_stubs_from_submodules(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath
+) -> StubExports {
+    collect_stubs_from_submodules_acc(submodules, parent_path, stub_exports_empty())
+}
+
+fn collect_stubs_from_submodules_acc(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath,
+    acc: StubExports
+) -> StubExports {
+    match submodules {
+        Nil() => acc,
+        Cons(sub, rest) =>
+            let name = get_module_name(sub);
+            let child_path = module_path_child(parent_path, name);
+            let sub_stubs = collect_stubs_rec(sub, child_path);
+            collect_stubs_from_submodules_acc(
+                rest, parent_path,
+                merge_stub_exports(acc, sub_stubs)
+            )
+    }
+}
+
+// ===========================================================================
+// ITEM PROCESSING
+// ===========================================================================
+
+/// Collect stubs from a list of items in a single module.
+fn collect_stubs_from_items(
+    items: List<Item>,
+    module_path: ModulePath
+) -> StubExports {
+    collect_stubs_from_items_acc(items, module_path, stub_exports_empty())
+}
+
+fn collect_stubs_from_items_acc(
+    items: List<Item>,
+    module_path: ModulePath,
+    acc: StubExports
+) -> StubExports {
+    match items {
+        Nil() => acc,
+        Cons(item, rest) =>
+            let item_stubs = collect_stub_from_item(item, module_path);
+            collect_stubs_from_items_acc(
+                rest, module_path,
+                merge_stub_exports(acc, item_stubs)
+            )
+    }
+}
+
+/// Collect stubs from a single item (if it's a type definition).
+fn collect_stub_from_item(
+    item: Item,
+    module_path: ModulePath
+) -> StubExports {
+    match item {
+        ItemType(def) => collect_type_def_stub(def, module_path),
+        ItemTypeAlias(def) => collect_type_alias_stub(def, module_path),
+        _ => stub_exports_empty()
+    }
+}
+
+// ===========================================================================
+// TYPE DEFINITION STUBS
+// ===========================================================================
+
+/// Create a type stub with correct arity from a TypeDef AST node.
+fn collect_type_def_stub(
+    def: TypeDef,
+    module_path: ModulePath
+) -> StubExports {
+    let name = ident_name(def.name);
+    let params = extract_param_names(def.type_params);
+    let arity = list_len(def.type_params);
+
+    let core: TypeDefCore = { name: name, arity: arity, params: params };
+    let meta: TypeDefMeta = {
+        kind: STUB_KIND_UNSET(),
+        vis: def.vis,
+        span: def.span,
+        encoded_type: 0
+    };
+    let info = type_def_info_new(core, meta);
+    let type_export = type_def_export_new(info, module_path);
+
+    // Collect constructor stubs from ADT variants
+    let ctor_exports: List<ConstructorExport> = match def.body {
+        TypeDefAdt(variants) =>
+            collect_variant_stubs(variants, name, module_path, 0),
+        TypeDefRecord(_) => Nil,
+        TypeDefAlias(_) => Nil
+    };
+
+    { types: Cons(type_export, Nil), constructors: ctor_exports }
+}
+
+/// Create a type stub from a type alias.
+fn collect_type_alias_stub(
+    def: TypeAliasDef,
+    module_path: ModulePath
+) -> StubExports {
+    let name = ident_name(def.name);
+    let params = extract_param_names(def.type_params);
+    let arity = list_len(def.type_params);
+
+    let core: TypeDefCore = { name: name, arity: arity, params: params };
+    let meta: TypeDefMeta = {
+        kind: STUB_KIND_UNSET(),
+        vis: def.vis,
+        span: def.span,
+        encoded_type: 0
+    };
+    let info = type_def_info_new(core, meta);
+    let type_export = type_def_export_new(info, module_path);
+
+    { types: Cons(type_export, Nil), constructors: Nil }
+}
+
+// ===========================================================================
+// CONSTRUCTOR STUBS
+// ===========================================================================
+
+/// Collect constructor stubs from ADT variants.
+fn collect_variant_stubs(
+    variants: List<Variant>,
+    parent_type: String,
+    module_path: ModulePath,
+    index: Nat
+) -> List<ConstructorExport> {
+    list_reverse(collect_variant_stubs_acc(
+        variants, parent_type, module_path, index, Nil
+    ))
+}
+
+fn collect_variant_stubs_acc(
+    variants: List<Variant>,
+    parent_type: String,
+    module_path: ModulePath,
+    index: Nat,
+    acc: List<ConstructorExport>
+) -> List<ConstructorExport> {
+    match variants {
+        Nil() => acc,
+        Cons(variant, rest) =>
+            let name = ident_name(variant.name);
+            let arity = list_len(variant.fields);
+            let id: CtorIdentity = {
+                name: name,
+                parent_type: parent_type,
+                index: index,
+                arity: arity
+            };
+            // ⚠ MUST use INVALID_HANDLE, not literal 0 — handle 0 is a valid
+            // arena index (the first type allocated, often TyVar from
+            // preregister_type_vars). Using 0 caused stale stubs to shadow
+            // real constructors in Phase B environments.
+            let info = constructor_info_new(
+                id, INVALID_HANDLE, INVALID_HANDLE, VisPublic, variant.span
+            );
+            let export = constructor_export_new(info, module_path);
+            collect_variant_stubs_acc(
+                rest, parent_type, module_path, index + 1,
+                Cons(export, acc)
+            )
+    }
+}

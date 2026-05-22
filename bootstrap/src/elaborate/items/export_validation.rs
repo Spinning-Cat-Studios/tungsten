@@ -6,11 +6,19 @@
 
 use std::collections::HashSet;
 
-use crate::ast::{self, Item, TypeExpr, Visibility};
+use crate::ast::{self, Item, TypeBody, TypeExpr, Visibility};
 
 use crate::elaborate::env::Env;
-use crate::elaborate::error::ElabError;
+use crate::elaborate::error::{ElabError, ElabErrorKind};
 use crate::elaborate::Elaborator;
+
+/// Identity of a public item being checked for visibility leaks.
+struct ItemIdentity<'a> {
+    span: crate::span::Span,
+    name: &'a str,
+    kind: &'a str,
+    visibility: Visibility,
+}
 
 /// Information about a visibility leak.
 pub struct VisibilityLeak {
@@ -56,12 +64,34 @@ impl<'a> Elaborator<'a> {
                 }
                 Item::Theorem(thm) | Item::Lemma(thm) => {
                     if thm.visibility != Visibility::Private {
-                        self.check_theorem_visibility(thm, &mut errors);
+                        let item = ItemIdentity {
+                            span: thm.span,
+                            name: &thm.name.name,
+                            kind: "theorem",
+                            visibility: thm.visibility,
+                        };
+                        self.check_proposition_item_visibility(
+                            &item,
+                            &thm.params,
+                            &thm.prop,
+                            &mut errors,
+                        );
                     }
                 }
                 Item::Axiom(axiom) => {
                     if axiom.visibility != Visibility::Private {
-                        self.check_axiom_visibility(axiom, &mut errors);
+                        let item = ItemIdentity {
+                            span: axiom.span,
+                            name: &axiom.name.name,
+                            kind: "axiom",
+                            visibility: axiom.visibility,
+                        };
+                        self.check_proposition_item_visibility(
+                            &item,
+                            &axiom.params,
+                            &axiom.prop,
+                            &mut errors,
+                        );
                     }
                 }
                 Item::ExternFn(extern_fn) => {
@@ -119,53 +149,42 @@ impl<'a> Elaborator<'a> {
 
     /// Check a type definition's constructors for visibility leaks.
     fn check_type_def_visibility(&self, type_def: &ast::TypeDef, errors: &mut Vec<ElabError>) {
-        use crate::ast::TypeBody;
-
         let required = type_def.visibility;
         let mut visited = HashSet::new();
         let base_path = vec![type_def.name.name.clone()];
 
-        match &type_def.body {
-            TypeBody::Sum(variants) => {
-                for variant in variants {
-                    for (i, field) in variant.fields.iter().enumerate() {
-                        let mut path = base_path.clone();
-                        path.push(format!("{}::field {}", variant.name.name, i));
-                        if let Some(leak) = self.check_ast_type_visibility(
-                            &field.ty,
-                            required,
-                            &mut visited,
-                            &mut path,
-                        ) {
-                            errors.push(self.make_leak_error(
-                                type_def.span,
-                                &type_def.name.name,
-                                "type",
-                                required,
-                                leak,
-                            ));
-                            return; // One error per item is enough
-                        }
-                    }
-                }
-            }
-            TypeBody::Record(fields) => {
-                for field in fields {
-                    let mut path = base_path.clone();
-                    path.push(format!("field `{}`", field.name.name));
-                    if let Some(leak) =
-                        self.check_ast_type_visibility(&field.ty, required, &mut visited, &mut path)
-                    {
-                        errors.push(self.make_leak_error(
-                            type_def.span,
-                            &type_def.name.name,
-                            "type",
-                            required,
-                            leak,
-                        ));
-                        return; // One error per item is enough
-                    }
-                }
+        // Collect field types from both Sum and Record bodies
+        let fields: Vec<(&TypeExpr, String)> = match &type_def.body {
+            TypeBody::Sum(variants) => variants
+                .iter()
+                .flat_map(|v| {
+                    let name = &v.name.name;
+                    v.fields
+                        .iter()
+                        .enumerate()
+                        .map(move |(i, f)| (&f.ty, format!("{}::field {}", name, i)))
+                })
+                .collect(),
+            TypeBody::Record(fields) => fields
+                .iter()
+                .map(|f| (&f.ty, format!("field `{}`", f.name.name)))
+                .collect(),
+        };
+
+        for (ty, label) in &fields {
+            let mut path = base_path.clone();
+            path.push(label.clone());
+            if let Some(leak) =
+                self.check_ast_type_visibility(ty, required, &mut visited, &mut path)
+            {
+                errors.push(self.make_leak_error(
+                    type_def.span,
+                    &type_def.name.name,
+                    "type",
+                    required,
+                    leak,
+                ));
+                return; // One error per item is enough
             }
         }
     }
@@ -189,60 +208,26 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    /// Check a theorem's signature for visibility leaks.
-    fn check_theorem_visibility(&self, thm: &ast::TheoremDef, errors: &mut Vec<ElabError>) {
-        let required = thm.visibility;
+    /// Check a proposition item's (theorem/lemma/axiom) signature for visibility leaks.
+    fn check_proposition_item_visibility(
+        &self,
+        item: &ItemIdentity<'_>,
+        params: &[ast::Param],
+        prop: &TypeExpr,
+        errors: &mut Vec<ElabError>,
+    ) {
+        let required = item.visibility;
         let mut visited = HashSet::new();
-        let base_path = vec![thm.name.name.clone()];
+        let base_path = vec![item.name.to_string()];
 
         // Check parameter types
-        for (i, param) in thm.params.iter().enumerate() {
+        for (i, param) in params.iter().enumerate() {
             let mut path = base_path.clone();
             path.push(format!("param {}", i + 1));
             if let Some(leak) =
                 self.check_ast_type_visibility(&param.ty, required, &mut visited, &mut path)
             {
-                errors.push(self.make_leak_error(
-                    thm.span,
-                    &thm.name.name,
-                    "theorem",
-                    required,
-                    leak,
-                ));
-                return;
-            }
-        }
-
-        // Check proposition type
-        let mut path = base_path.clone();
-        path.push("proposition".to_string());
-        if let Some(leak) =
-            self.check_ast_type_visibility(&thm.prop, required, &mut visited, &mut path)
-        {
-            errors.push(self.make_leak_error(thm.span, &thm.name.name, "theorem", required, leak));
-        }
-    }
-
-    /// Check an axiom's signature for visibility leaks.
-    fn check_axiom_visibility(&self, axiom: &ast::AxiomDef, errors: &mut Vec<ElabError>) {
-        let required = axiom.visibility;
-        let mut visited = HashSet::new();
-        let base_path = vec![axiom.name.name.clone()];
-
-        // Check parameter types
-        for (i, param) in axiom.params.iter().enumerate() {
-            let mut path = base_path.clone();
-            path.push(format!("param {}", i + 1));
-            if let Some(leak) =
-                self.check_ast_type_visibility(&param.ty, required, &mut visited, &mut path)
-            {
-                errors.push(self.make_leak_error(
-                    axiom.span,
-                    &axiom.name.name,
-                    "axiom",
-                    required,
-                    leak,
-                ));
+                errors.push(self.make_leak_error(item.span, item.name, item.kind, required, leak));
                 return;
             }
         }
@@ -250,16 +235,9 @@ impl<'a> Elaborator<'a> {
         // Check proposition type
         let mut path = base_path;
         path.push("proposition".to_string());
-        if let Some(leak) =
-            self.check_ast_type_visibility(&axiom.prop, required, &mut visited, &mut path)
+        if let Some(leak) = self.check_ast_type_visibility(prop, required, &mut visited, &mut path)
         {
-            errors.push(self.make_leak_error(
-                axiom.span,
-                &axiom.name.name,
-                "axiom",
-                required,
-                leak,
-            ));
+            errors.push(self.make_leak_error(item.span, item.name, item.kind, required, leak));
         }
     }
 
@@ -348,13 +326,9 @@ impl<'a> Elaborator<'a> {
             }
 
             // Compound types - check recursively
-            TypeExpr::Arrow(t1, t2, _) => self
-                .check_ast_type_visibility(t1, required, visited, path)
-                .or_else(|| self.check_ast_type_visibility(t2, required, visited, path)),
-            TypeExpr::Product(t1, t2, _) => self
-                .check_ast_type_visibility(t1, required, visited, path)
-                .or_else(|| self.check_ast_type_visibility(t2, required, visited, path)),
-            TypeExpr::Sum(t1, t2, _) => self
+            TypeExpr::Arrow(t1, t2, _)
+            | TypeExpr::Product(t1, t2, _)
+            | TypeExpr::Sum(t1, t2, _) => self
                 .check_ast_type_visibility(t1, required, visited, path)
                 .or_else(|| self.check_ast_type_visibility(t2, required, visited, path)),
             TypeExpr::App(base, args, _) => {
@@ -383,6 +357,9 @@ impl<'a> Elaborator<'a> {
 
             // Eq types - we only check the type parts (terms don't leak types)
             TypeExpr::Eq(_, _, _) => None, // Terms don't have type visibility concerns
+            TypeExpr::EqExplicit(ty, _, _, _) => {
+                self.check_ast_type_visibility(ty, required, visited, path)
+            }
 
             // Error nodes
             TypeExpr::Error(_) => None,
@@ -398,13 +375,15 @@ impl<'a> Elaborator<'a> {
         required: Visibility,
         leak: VisibilityLeak,
     ) -> ElabError {
-        ElabError::public_item_leak(
+        ElabError::new(
             span,
-            item_name,
-            item_kind,
-            Env::visibility_name(required),
-            leak.path,
-            Env::visibility_name(leak.visibility),
+            ElabErrorKind::PublicItemLeak {
+                item_name: item_name.to_string(),
+                item_kind: item_kind.to_string(),
+                required_visibility: Env::visibility_name(required).to_string(),
+                leak_path: leak.path,
+                leaked_visibility: Env::visibility_name(leak.visibility).to_string(),
+            },
         )
     }
 }

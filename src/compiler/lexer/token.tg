@@ -32,6 +32,12 @@ pub type TokenKind =
     | TokProp
     | TokSorry
     | TokRefl
+    | TokSubst
+    | TokSym
+    | TokTrans
+    | TokCong
+    | TokNatInd
+    | TokNatRec
     | TokBool
     | TokNat
     | TokUnit
@@ -42,6 +48,7 @@ pub type TokenKind =
     | TokPub
     | TokUse
     | TokAs
+    | TokTry
     | TokCrate
     | TokReserved(String)
     | TokLParen
@@ -153,6 +160,12 @@ pub fn classify_keyword(text: String) -> TokenKind {
     else if text == "Prop" { TokProp }
     else if text == "sorry" { TokSorry }
     else if text == "refl" { TokRefl }
+    else if text == "subst" { TokSubst }
+    else if text == "sym" { TokSym }
+    else if text == "trans" { TokTrans }
+    else if text == "cong" { TokCong }
+    else if text == "natind" { TokNatInd }
+    else if text == "natrec" { TokNatRec }
     else if text == "Bool" { TokBool }
     else if text == "Nat" { TokNat }
     else if text == "Unit" { TokUnit }
@@ -162,6 +175,7 @@ pub fn classify_keyword(text: String) -> TokenKind {
     else if text == "mod" { TokMod }
     else if text == "use" { TokUse }
     else if text == "pub" { TokPub }
+    else if text == "try" { TokTry }
     else if is_reserved_keyword(text) { TokReserved(text) }
     else if text == "_" { TokUnderscore }
     else { TokIdent(text) }

@@ -1,0 +1,267 @@
+// Per-module elaboration loop.
+//
+// Three-phase pipeline (ADR 6.5.26e):
+//   Phase A   — Walk ALL modules, register type + constructor stubs globally
+//   Phase A.5 — Build combined AST, run collection pass (1a–2),
+//               extract all function signatures
+//   Phase B   — Elaborate each module's value bodies in post-order
+//
+// Phase A gives types correct arity so generics resolve cross-branch.
+// Phase A.5 gives values full signatures so cross-branch function
+// imports resolve. Phase B does per-module body elaboration with
+// the global context injected.
+//
+// See ADR 5.5.26b (W6.3a), ADR 6.5.26e.
+
+pub mod types;
+pub mod inject;
+pub mod stubs;
+pub mod combined;
+
+pub use elab::items::per_module::types::*;
+pub use elab::items::per_module::inject::*;
+pub use elab::items::per_module::stubs::*;
+pub use elab::items::per_module::combined::*;
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_reverse};
+use driver::modules::path::{ModulePath, module_path_root, module_path_child};
+use driver::modules::info::{ModuleInfo};
+use driver::modules::tree::parsed::{ParsedModule};
+use driver::modules::build::{get_module_name};
+use driver::modules::build::flatten::{filter_mod_decls};
+use driver::modules::build::resolve::{resolve_use_paths};
+use parser::ast::nodes::{source_file_items};
+use parser::ast::nodes::items::{Item};
+use elab::env::{
+    Env, env_new, populate_module_info
+};
+use elab::env::types::{
+    ElabMode, env_with_elab_mode, env_current_module_contents
+};
+use elab::items::{elaborate_items_with_env};
+use elab::items::result::{
+    ElabResult, ElabDef, elab_result_new
+};
+use elab::error::{ElabError};
+use elab::items::per_module::stubs::{collect_all_stubs};
+use elab::items::per_module::combined::{
+    collect_global_signatures, GlobalExports
+};
+use elab::items::per_module::inject::{seed_global_exports};
+use elab::items::per_module::types::{
+    ModuleElabResult, wrap_type_exports, wrap_value_exports, wrap_ctor_exports
+};
+
+// ===========================================================================
+// ELABORATION CONTEXT
+// ===========================================================================
+
+/// Shared context threaded through the per-module tree walk.
+/// Bundles the immutable parameters that every recursive call needs.
+/// Carries Phase A.5 global exports for seeding per-module envs.
+type TreeElabCtx = {
+    module_info: ModuleInfo,
+    elab_mode: ElabMode,
+    global: GlobalExports
+}
+
+// ===========================================================================
+// MAIN ENTRY POINT
+// ===========================================================================
+
+/// Elaborate a module tree with per-module elaboration.
+///
+/// Three-phase pipeline (ADR 6.5.26e):
+///   Phase A:   Collect type + constructor stubs from ALL modules
+///   Phase A.5: Build combined AST, run collection pass for global sigs
+///   Phase B:   Elaborate per-module in post-order, seeded with global context
+///
+/// Returns a flat ElabResult combining all per-module results.
+pub fn elaborate_module_tree(
+    module: ParsedModule,
+    module_info: ModuleInfo,
+    elab_mode: ElabMode
+) -> ElabResult {
+    // Phase A: collect type + constructor stubs from ALL modules
+    let stubs = collect_all_stubs(module);
+
+    // Phase A.5: build combined AST, run collection pass
+    let global = collect_global_signatures(
+        module, module_info, elab_mode, stubs
+    );
+
+    // Phase B: elaborate per-module in post-order, seeded with global
+    let root_path = module_path_root();
+    let ctx: TreeElabCtx = {
+        module_info: module_info,
+        elab_mode: elab_mode,
+        global: global
+    };
+    let (results, all_errors) = elaborate_tree_rec(
+        module, root_path, ctx, Nil, Nil
+    );
+    let all_defs = collect_all_defs(results);
+    elab_result_new(all_defs, all_errors)
+}
+
+// ===========================================================================
+// RECURSIVE TREE WALK
+// ===========================================================================
+
+/// Recursively elaborate a module and its submodules in post-order.
+///
+/// Returns:
+/// - accumulated ModuleElabResults (for cross-module injection)
+/// - accumulated errors
+fn elaborate_tree_rec(
+    module: ParsedModule,
+    current_path: ModulePath,
+    ctx: TreeElabCtx,
+    prior_results: List<ModuleElabResult>,
+    prior_errors: List<ElabError>
+) -> (List<ModuleElabResult>, List<ElabError>) {
+    // 1. Elaborate children first (post-order)
+    let (results_after_children, errors_after_children) = elaborate_submodules(
+        module.submodules, current_path, ctx,
+        prior_results, prior_errors
+    );
+
+    // 2. Elaborate this module
+    let result = elaborate_single_module(
+        module, current_path, ctx, results_after_children
+    );
+
+    // 3. Accumulate
+    let new_results = Cons(result, results_after_children);
+    let new_errors = append_errors(result.errors, errors_after_children);
+    (new_results, new_errors)
+}
+
+/// Elaborate a list of submodules, threading results and errors.
+fn elaborate_submodules(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath,
+    ctx: TreeElabCtx,
+    prior_results: List<ModuleElabResult>,
+    prior_errors: List<ElabError>
+) -> (List<ModuleElabResult>, List<ElabError>) {
+    match submodules {
+        Nil() => (prior_results, prior_errors),
+        Cons(sub, rest) =>
+            let name = get_module_name(sub);
+            let child_path = module_path_child(parent_path, name);
+            let (results1, errors1) = elaborate_tree_rec(
+                sub, child_path, ctx,
+                prior_results, prior_errors
+            );
+            elaborate_submodules(
+                rest, parent_path, ctx,
+                results1, errors1
+            )
+    }
+}
+
+// ===========================================================================
+// SINGLE MODULE ELABORATION
+// ===========================================================================
+
+/// Elaborate a single module's items against its own env.
+///
+/// The env is seeded with Phase A.5 global exports (types, values,
+/// constructors) so cross-branch references resolve correctly.
+fn elaborate_single_module(
+    module: ParsedModule,
+    current_path: ModulePath,
+    ctx: TreeElabCtx,
+    prior_results: List<ModuleElabResult>
+) -> ModuleElabResult {
+    // Get this module's items (excluding mod declarations)
+    let raw_items = filter_mod_decls(source_file_items(module.source_file));
+
+    // Resolve relative use-paths to absolute
+    let items = resolve_use_paths(raw_items, current_path, ctx.module_info);
+
+    // Build a fresh env for this module
+    let env = env_new();
+    let env = env_with_elab_mode(env, ctx.elab_mode);
+    let env = populate_module_info(env, ctx.module_info);
+
+    // Seed with Phase A.5 global exports (types, values, constructors)
+    let env = seed_global_exports(env, ctx.global);
+
+    // Inject full defs from completed modules into their owning slots
+    let env = inject_prior_results(env, prior_results);
+
+    // Elaborate
+    let (elab_result, final_env) = elaborate_items_with_env(env, items);
+    build_module_result(current_path, elab_result, final_env)
+}
+
+// ===========================================================================
+// MODULE RESULT BUILDER
+// ===========================================================================
+
+/// Build a ModuleElabResult from elaboration result and final env.
+fn build_module_result(
+    current_path: ModulePath,
+    elab_result: ElabResult,
+    final_env: Env
+) -> ModuleElabResult {
+    let root_contents = env_current_module_contents(final_env);
+    let type_exports = wrap_type_exports(root_contents.types, current_path);
+    let value_exports = wrap_value_exports(root_contents.values, current_path);
+    let ctor_exports = wrap_ctor_exports(
+        root_contents.constructors, current_path
+    );
+    let result: ModuleElabResult = {
+        path: current_path,
+        defs: elab_result.defs,
+        type_defs: type_exports,
+        value_sigs: value_exports,
+        constructor_info: ctor_exports,
+        errors: elab_result.errors
+    };
+    result
+}
+
+// ===========================================================================
+// RESULT COLLECTION
+// ===========================================================================
+
+/// Flatten all per-module defs into a single list.
+fn collect_all_defs(results: List<ModuleElabResult>) -> List<ElabDef> {
+    collect_all_defs_acc(results, Nil)
+}
+
+fn collect_all_defs_acc(results: List<ModuleElabResult>, acc: List<ElabDef>) -> List<ElabDef> {
+    match results {
+        Nil() => acc,
+        Cons(result, rest) =>
+            collect_all_defs_acc(rest, append_defs(result.defs, acc))
+    }
+}
+
+/// Append two def lists.
+fn append_defs(a: List<ElabDef>, b: List<ElabDef>) -> List<ElabDef> {
+    append_defs_acc(list_reverse(a), b)
+}
+
+fn append_defs_acc(reversed_a: List<ElabDef>, b: List<ElabDef>) -> List<ElabDef> {
+    match reversed_a {
+        Nil() => b,
+        Cons(def, rest) => append_defs_acc(rest, Cons(def, b))
+    }
+}
+
+/// Append two error lists.
+fn append_errors(a: List<ElabError>, b: List<ElabError>) -> List<ElabError> {
+    append_errors_acc(list_reverse(a), b)
+}
+
+fn append_errors_acc(reversed_a: List<ElabError>, b: List<ElabError>) -> List<ElabError> {
+    match reversed_a {
+        Nil() => b,
+        Cons(err, rest) => append_errors_acc(rest, Cons(err, b))
+    }
+}

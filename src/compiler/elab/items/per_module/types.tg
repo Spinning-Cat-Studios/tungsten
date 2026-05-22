@@ -1,0 +1,122 @@
+// Per-module elaboration types.
+//
+// Types for carrying results between per-module elaboration passes.
+// See ADR 5.5.26b (W6.3a).
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_reverse};
+use driver::modules::path::{ModulePath};
+use elab::ffi::{TypeHandle};
+use elab::env::defs::{TypeDefInfo, ValueDefInfo, ConstructorInfo};
+use elab::items::result::{ElabDef};
+use elab::error::{ElabError};
+
+// ===========================================================================
+// PER-MODULE ELABORATION RESULT
+// ===========================================================================
+
+/// Result of elaborating a single module.
+pub type ModuleElabResult = {
+    path: ModulePath,
+    defs: List<ElabDef>,
+    type_defs: List<TypeDefExport>,
+    value_sigs: List<ValueSigExport>,
+    constructor_info: List<ConstructorExport>,
+    errors: List<ElabError>
+}
+
+// ===========================================================================
+// EXPORT TYPES
+// ===========================================================================
+
+/// Exported type definition from a completed module.
+pub type TypeDefExport = {
+    info: TypeDefInfo,
+    module: ModulePath
+}
+
+/// Create a TypeDefExport.
+pub fn type_def_export_new(info: TypeDefInfo, module: ModulePath) -> TypeDefExport {
+    { info: info, module: module }
+}
+
+/// Exported value signature from a completed module.
+pub type ValueSigExport = {
+    name: String,
+    ty: TypeHandle,
+    module: ModulePath
+}
+
+/// Create a ValueSigExport.
+pub fn value_sig_export_new(name: String, ty: TypeHandle, module: ModulePath) -> ValueSigExport {
+    { name: name, ty: ty, module: module }
+}
+
+/// Exported constructor from a completed module.
+pub type ConstructorExport = {
+    info: ConstructorInfo,
+    module: ModulePath
+}
+
+/// Create a ConstructorExport.
+pub fn constructor_export_new(info: ConstructorInfo, module: ModulePath) -> ConstructorExport {
+    { info: info, module: module }
+}
+
+// ===========================================================================
+// EXPORT WRAPPING HELPERS (shared by combined.tg and mod.tg)
+// ===========================================================================
+
+/// Wrap a list of TypeDefInfo as TypeDefExports for a given module.
+pub fn wrap_type_exports(
+    types: List<TypeDefInfo>, module: ModulePath
+) -> List<TypeDefExport> {
+    list_reverse(wrap_type_exports_acc(types, module, Nil))
+}
+
+fn wrap_type_exports_acc(
+    types: List<TypeDefInfo>, module: ModulePath, acc: List<TypeDefExport>
+) -> List<TypeDefExport> {
+    match types {
+        Nil() => acc,
+        Cons(info, rest) =>
+            wrap_type_exports_acc(rest, module,
+                 Cons(type_def_export_new(info, module), acc))
+    }
+}
+
+/// Wrap a list of ValueDefInfo as ValueSigExports for a given module.
+pub fn wrap_value_exports(
+    values: List<ValueDefInfo>, module: ModulePath
+) -> List<ValueSigExport> {
+    list_reverse(wrap_value_exports_acc(values, module, Nil))
+}
+
+fn wrap_value_exports_acc(
+    values: List<ValueDefInfo>, module: ModulePath, acc: List<ValueSigExport>
+) -> List<ValueSigExport> {
+    match values {
+        Nil() => acc,
+        Cons(info, rest) =>
+            wrap_value_exports_acc(rest, module,
+                 Cons(value_sig_export_new(info.name, info.ty, module), acc))
+    }
+}
+
+/// Wrap a list of ConstructorInfo as ConstructorExports for a given module.
+pub fn wrap_ctor_exports(
+    ctors: List<ConstructorInfo>, module: ModulePath
+) -> List<ConstructorExport> {
+    list_reverse(wrap_ctor_exports_acc(ctors, module, Nil))
+}
+
+fn wrap_ctor_exports_acc(
+    ctors: List<ConstructorInfo>, module: ModulePath, acc: List<ConstructorExport>
+) -> List<ConstructorExport> {
+    match ctors {
+        Nil() => acc,
+        Cons(info, rest) =>
+            wrap_ctor_exports_acc(rest, module,
+                 Cons(constructor_export_new(info, module), acc))
+    }
+}

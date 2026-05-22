@@ -1,0 +1,39 @@
+// Diagnostic bridge — PRODUCTION build (stubs).
+//
+// This file provides no-op stub implementations of diagnostic tools.
+// All functions return None/Nil — no FFI dependencies, no link-time cost.
+// The real implementations are in diagnostics_dev.tg.
+// See ADR 18.4.26f for conditional compilation design.
+
+use elab::ffi::{TermHandle, TypeHandle};
+use driver::ffi::types::{List, Cons, Nil};
+
+// --- Stub Implementations (no FFI, no link-time dependency) ---
+
+/// Dump Core IR for a single definition. (stub — always returns None)
+pub fn diagnostic_dump_core(name: String, term: TermHandle, ty: TypeHandle) -> Option<String> {
+    None
+}
+
+/// Check whether a term has free TyVar escapes. (stub — always returns None)
+pub fn diagnostic_check_tyvar_escape(term: TermHandle) -> Option<String> {
+    None
+}
+
+/// Count free TyVar escapes in a term. (stub — always returns None)
+pub fn diagnostic_tyvar_escape_count(term: TermHandle) -> Option<Nat> {
+    None
+}
+
+// --- Capability Discovery ---
+
+/// Diagnostic capability — one variant per diagnostic tool.
+pub type DiagnosticCapability =
+    | DumpCore
+    | CheckTyvarEscape
+
+/// Query which diagnostic tools are compiled into this binary.
+/// Production stubs return Nil (no tools compiled).
+pub fn diagnostic_capabilities() -> List<DiagnosticCapability> {
+    Nil
+}

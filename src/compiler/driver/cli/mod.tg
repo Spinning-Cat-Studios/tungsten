@@ -1,0 +1,280 @@
+// src/compiler/driver/cli/mod.tg
+// CLI argument parsing for the self-hosted compiler.
+//
+// Implements a clap-style command-line interface with:
+// - Subcommands: check, run, compile, help, version
+// - Global options: --verbose, --max-errors
+// - Command-specific options: --output, --emit-llvm
+//
+// Uses pure functional parsing with recursive descent.
+
+// Output functions and command accessors
+pub mod output;
+pub use driver::cli::output::{
+    print_help, print_version, print_error,
+    is_cmd_error, get_verbose, get_max_errors, get_file
+};
+
+// Test command parsing
+pub mod test;
+pub use driver::cli::test::parse_test_command;
+
+// Shared option parsing
+pub mod options;
+pub use driver::cli::options::{ParseState, initial_state, parse_options};
+
+use driver::ffi::{
+    argc, argv, get_args, println, eprintln, process_exit,
+    stdout_is_tty, stderr_is_tty,
+    List, Nil, Cons
+};
+// Import Option directly from canonical source to avoid re-export chain issues (bootstrap limitation)
+use parser::option::{Option, Some, None};
+use driver::util::{
+    string_eq, starts_with, string_is_empty,
+    parse_nat, option_unwrap_or,
+    list_len, list_drop, list_get, list_reverse,
+    string_concat
+};
+use elab::env::types::{ElabMode, ElabCheck, ElabTest, ElabCompile};
+
+// ===========================================================================
+// COMMAND TYPES
+// ===========================================================================
+
+/// Parsed CLI command.
+pub type Command =
+    | CmdCheck(CheckOpts)
+    | CmdRun(RunOpts)
+    | CmdCompile(CompileOpts)
+    | CmdTest(TestOpts)
+    | CmdInfo(InfoOpts)
+    | CmdExplain(ExplainOpts)
+    | CmdHelp
+    | CmdVersion
+    | CmdError(CliError)
+
+/// Options for the `check` command.
+pub type CheckOpts = {
+    file: String,
+    verbose: Bool,
+    max_errors: Nat,
+    dump_core: Option<String>,
+    check_tyvar_escape: Bool,
+    elab_mode: ElabMode
+}
+
+/// Options for the `run` command.
+pub type RunOpts = {
+    file: String,
+    verbose: Bool,
+    max_errors: Nat
+}
+
+/// Options for the `compile` command.
+pub type CompileOpts = {
+    file: String,
+    output: String,
+    emit_llvm: Bool,
+    verbose: Bool
+}
+
+/// CLI parsing error with context.
+pub type CliError = {
+    message: String,
+    usage: String
+}
+
+/// Options for the `test` command.
+pub type TestOpts = {
+    file: String,
+    verbose: Bool,
+    filter: String,
+    max_errors: Nat
+}
+
+/// Options for the `info` subcommand.
+pub type InfoOpts =
+    | InfoPipeline
+    | InfoVersion
+
+/// Options for the `explain` subcommand.
+pub type ExplainOpts =
+    | ExplainFlag(String)
+    | ExplainError(String)
+    | ExplainErrorList
+
+// ===========================================================================
+// MAIN ENTRY POINT
+// ===========================================================================
+
+/// Parse CLI arguments and return a Command.
+pub fn parse_args() -> Command {
+    let args = get_args();
+    parse_args_list(list_drop(args, 1))  // Skip program name
+}
+
+/// Parse argument list (without program name).
+fn parse_args_list(args: List<String>) -> Command {
+    match args {
+        Nil() => CmdHelp,
+        Cons(first, rest) =>
+            // Check for help/version first
+            if string_eq(first, "help") || string_eq(first, "--help") || string_eq(first, "-h") {
+                CmdHelp
+            } else if string_eq(first, "version") || string_eq(first, "--version") || string_eq(first, "-V") {
+                CmdVersion
+            // Subcommands
+            } else if string_eq(first, "check") {
+                parse_check_command(rest)
+            } else if string_eq(first, "run") {
+                parse_run_command(rest)
+            } else if string_eq(first, "compile") {
+                parse_compile_command(rest)
+            } else if string_eq(first, "test") {
+                parse_test_command(rest)
+            } else if string_eq(first, "info") {
+                parse_info_command(rest)
+            } else if string_eq(first, "explain") {
+                parse_explain_command(rest)
+            // Shorthand: `tungsten file.tg` → `tungsten run file.tg`
+            } else if !starts_with(first, "-") {
+                parse_run_command(args)
+            // Unknown
+            } else {
+                CmdError({
+                    message: string_concat("unknown option: ", first),
+                    usage: "tungsten <COMMAND> [OPTIONS] <FILE>"
+                })
+            }
+    }
+}
+
+// ===========================================================================
+// COMMAND PARSERS
+// ===========================================================================
+
+/// Parse `check` command arguments.
+fn parse_check_command(args: List<String>) -> Command {
+    let state = parse_options(initial_state(args));
+    let file_opt: Option<String> = state.file;
+    match file_opt {
+        None() => {
+            let err: CliError = {
+                message: "missing required argument: <FILE>",
+                usage: "tungsten check [OPTIONS] <FILE>"
+            };
+            CmdError(err)
+        },
+        Some(f) => {
+            let file: String = f;
+            let opts: CheckOpts = {
+                file: file,
+                verbose: state.verbose,
+                max_errors: state.max_errors,
+                dump_core: state.dump_core,
+                check_tyvar_escape: state.check_tyvar_escape,
+                elab_mode: ElabCheck
+            };
+            CmdCheck(opts)
+        }
+    }
+}
+
+/// Parse `run` command arguments.
+fn parse_run_command(args: List<String>) -> Command {
+    let state = parse_options(initial_state(args));
+    let file_opt: Option<String> = state.file;
+    match file_opt {
+        None() => {
+            let err: CliError = {
+                message: "missing required argument: <FILE>",
+                usage: "tungsten run [OPTIONS] <FILE>"
+            };
+            CmdError(err)
+        },
+        Some(f) => {
+            let file: String = f;
+            let opts: RunOpts = {
+                file: file,
+                verbose: state.verbose,
+                max_errors: state.max_errors
+            };
+            CmdRun(opts)
+        }
+    }
+}
+
+/// Parse `compile` command arguments.
+fn parse_compile_command(args: List<String>) -> Command {
+    let state = parse_options(initial_state(args));
+    let file_opt: Option<String> = state.file;
+    match file_opt {
+        None() => {
+            let err: CliError = {
+                message: "missing required argument: <FILE>",
+                usage: "tungsten compile [OPTIONS] <FILE>"
+            };
+            CmdError(err)
+        },
+        Some(f) => {
+            let file: String = f;
+            let opts: CompileOpts = {
+                file: file,
+                output: state.output,
+                emit_llvm: state.emit_llvm,
+                verbose: state.verbose
+            };
+            CmdCompile(opts)
+        }
+    }
+}
+
+/// Parse `info` subcommand arguments.
+fn parse_info_command(args: List<String>) -> Command {
+    match args {
+        Nil() => CmdInfo(InfoPipeline),
+        Cons(sub, _rest) =>
+            if string_eq(sub, "pipeline") {
+                CmdInfo(InfoPipeline)
+            } else if string_eq(sub, "version") {
+                CmdInfo(InfoVersion)
+            } else {
+                CmdError({
+                    message: string_concat("unknown info subcommand: ", sub),
+                    usage: "tungsten info [pipeline|version]"
+                })
+            }
+    }
+}
+
+/// Parse `explain` subcommand arguments.
+fn parse_explain_command(args: List<String>) -> Command {
+    match args {
+        Nil() => CmdError({
+            message: "missing subcommand for explain",
+            usage: "tungsten explain [flag <name>|error [code]]"
+        }),
+        Cons(sub, rest) =>
+            if string_eq(sub, "flag") {
+                match rest {
+                    Nil() => CmdError({
+                        message: "missing flag name",
+                        usage: "tungsten explain flag <name>"
+                    } : CliError),
+                    Cons(name, _rest2) => CmdExplain(ExplainFlag(name))
+                }
+            } else if string_eq(sub, "error") {
+                match rest {
+                    Nil() => CmdExplain(ExplainErrorList),
+                    Cons(code, _rest2) => CmdExplain(ExplainError(code))
+                }
+            } else {
+                CmdError({
+                    message: string_concat("unknown explain subcommand: ", sub),
+                    usage: "tungsten explain [flag <name>|error [code]]"
+                })
+            }
+    }
+}
+

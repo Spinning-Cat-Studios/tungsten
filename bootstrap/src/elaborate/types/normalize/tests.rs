@@ -68,6 +68,7 @@ fn test_normalize_mutually_recursive_types_terminates() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     // Define type B with field of type A (as Type::App)
@@ -79,6 +80,7 @@ fn test_normalize_mutually_recursive_types_terminates() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     // This should terminate (not hang) due to cycle detection
@@ -123,6 +125,7 @@ fn test_normalize_multi_field_mutual_recursion() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     elab.env.define_type(TypeDef {
@@ -136,6 +139,7 @@ fn test_normalize_multi_field_mutual_recursion() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     let type_a = Type::app("A", vec![]);
@@ -173,12 +177,14 @@ fn test_normalization_is_idempotent() {
                 name: "Nil".to_string(),
                 fields: vec![],
                 index: 0,
+                visibility: None,
                 span: dummy_span,
             },
             Constructor {
                 name: "Cons".to_string(),
                 fields: vec![Type::Nat, Type::app("List", vec![])],
                 index: 1,
+                visibility: None,
                 span: dummy_span,
             },
         ]),
@@ -186,6 +192,7 @@ fn test_normalization_is_idempotent() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     // Normalize the type once
@@ -221,12 +228,14 @@ fn test_types_equal_recursive_type_consistency() {
                 name: "Nil".to_string(),
                 fields: vec![],
                 index: 0,
+                visibility: None,
                 span: dummy_span,
             },
             Constructor {
                 name: "Cons".to_string(),
                 fields: vec![Type::Nat, Type::app("List", vec![])],
                 index: 1,
+                visibility: None,
                 span: dummy_span,
             },
         ]),
@@ -234,6 +243,7 @@ fn test_types_equal_recursive_type_consistency() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     // Both representations of List should be equal
@@ -279,6 +289,7 @@ fn test_ptr_alias_normalization() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     // Ptr<MyNat> should equal Ptr<Nat> after normalization
@@ -307,6 +318,7 @@ fn test_parameterized_alias_normalization() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     // Handle<Nat> should equal Ptr<Nat> after normalization
@@ -334,6 +346,7 @@ fn test_nested_alias_expansion() {
         span: dummy_span,
         defining_module: None,
         encoded_type: None,
+        field_visibilities: Vec::new(),
     });
 
     // Ptr<Ref<SomeAlias>> should equal Ptr<Ref<Nat>> after normalization

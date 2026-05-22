@@ -1,0 +1,93 @@
+// src/compiler/codegen/ir_types.tg
+// CodegenType → LLVM type string mapping.
+//
+// Must be ABI-compatible with the Rust bootstrap (tungsten_codegen/src/types/).
+//
+// | CodegenType      | LLVM IR Type         | Notes                       |
+// |------------------|----------------------|-----------------------------|
+// | CTNat            | i64                  |                             |
+// | CTBool           | i1                   |                             |
+// | CTString         | { ptr, i64 }         | pointer + length            |
+// | CTUnit           | {}                   | zero-size struct            |
+// | CTVoid           | {}                   | zero-size struct            |
+// | CTProp           | {}                   | zero-size struct            |
+// | CTArrow(_, _)    | { ptr, ptr }         | closure: fn_ptr + env_ptr   |
+// | CTPair(A, B)     | { <A>, <B> }         | nested struct               |
+// | CTSum(A, B)      | { i32, [N x i8] }   | tag + max(sizeof A, sizeof B)|
+// | CTRef(T)         | ptr                  | opaque pointer              |
+// | CTPtr(T)         | ptr                  | opaque pointer              |
+// | CTMu(_, _)       | ptr                  | heap-allocated, boxed       |
+// | CTForall(_, body) | <body>              | erased to body              |
+// | CTVar(_)         | ptr                  | opaque (monomorphized away) |
+// | CTEq(_, _, _)    | {}                   | proof-irrelevant            |
+
+use driver::util::nat_to_string;
+
+use elab::cir::types::{
+    CodegenType,
+    CTNat, CTBool, CTString, CTUnit, CTVoid, CTProp,
+    CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq
+};
+
+// ===========================================================================
+// TYPE LOWERING
+// ===========================================================================
+
+/// Convert a CodegenType to its LLVM IR type string.
+pub fn llvm_type(ty: CodegenType) -> String {
+    match ty {
+        CTNat() => "i64",
+        CTBool() => "i1",
+        CTString() => "{ ptr, i64 }",
+        CTUnit() => "{}",
+        CTVoid() => "{}",
+        CTProp() => "{}",
+        CTArrow(_, _) => "{ ptr, ptr }",
+        CTPair(a, b) => "{ " ++ llvm_type(a) ++ ", " ++ llvm_type(b) ++ " }",
+        CTSum(a, b) =>
+            let size_a = type_size(a);
+            let size_b = type_size(b);
+            let max_size = if size_a > size_b { size_a } else { size_b };
+            "{ i32, [" ++ nat_to_string(max_size) ++ " x i8] }",
+        CTRef(_) => "ptr",
+        CTPtr(_) => "ptr",
+        CTMu(_, _) => "ptr",
+        CTForall(_, body) => llvm_type(body),
+        CTVar(_) => "ptr",
+        CTEq(_, _, _) => "{}"
+    }
+}
+
+// ===========================================================================
+// SIZE CALCULATION
+// ===========================================================================
+
+/// Compute the byte size of a CodegenType's LLVM representation.
+/// Used for sum type payload sizing (max of variant sizes).
+pub fn type_size(ty: CodegenType) -> Nat {
+    match ty {
+        CTNat() => 8,
+        CTBool() => 1,
+        CTString() => 16,  // ptr (8) + i64 (8)
+        CTUnit() => 0,
+        CTVoid() => 0,
+        CTProp() => 0,
+        CTArrow(_, _) => 16,  // ptr (8) + ptr (8)
+        CTPair(a, b) => type_size(a) + type_size(b),
+        CTSum(a, b) =>
+            let size_a = type_size(a);
+            let size_b = type_size(b);
+            // 4 (tag) + max(size_a, size_b)
+            4 + (if size_a > size_b { size_a } else { size_b }),
+        CTRef(_) => 8,
+        CTPtr(_) => 8,
+        CTMu(_, _) => 8,   // pointer
+        CTForall(_, body) => type_size(body),
+        CTVar(_) => 8,     // pointer
+        CTEq(_, _, _) => 0
+    }
+}
+
+// ===========================================================================
+// HELPERS (imported in other codegen modules)
+// ===========================================================================

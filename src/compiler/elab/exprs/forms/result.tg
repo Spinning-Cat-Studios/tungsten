@@ -1,0 +1,157 @@
+// src/compiler/elab/exprs/result.tg
+// Result types and helper functions for expression elaboration.
+//
+// **Two error types exist in L2:**
+//   - `ElabExprError` (this file): lightweight record {message, span, expected_because, code}
+//     used for expression-level elaboration results. Propagated through ElabExprResult.
+//   - `ElabError` (elab/error/list.tg): structured diagnostic {kind: ElabErrorKind, span,
+//     notes, suggestions, help, expected_because} used for full diagnostic reporting.
+//
+// ElabExprError is the simpler form — it carries a flat string message and optional
+// error code. ElabError carries a structured kind enum and optional notes/suggestions.
+// Expression elaboration uses ElabExprError internally; errors are converted to
+// ElabError at the diagnostic reporting boundary.
+
+use lexer::span::Span;
+use parser::ast::{
+    Pattern, PatWildcard, PatVar, PatLiteral, PatTuple, PatConstructor, PatOr, PatError,
+    Ident, ident_name, ident_span
+};
+use elab::ffi::{TermHandle, TypeHandle};
+use elab::env::Env;
+use elab::types::ElabTypeError;
+use elab::cir::{CodegenIR, CodegenType, CIRUnit, CTUnit};
+use elab::error::{
+    ExpectedBecause, MaybeExpectedBecause, NoExpectedBecause, SomeExpectedBecause,
+    ExpFunctionReturn, ExpIfCondition, ExpIfBranch, ExpMatchScrutinee, ExpMatchBranch,
+    ExpLetAnnotation, ExpArgumentType, ExpBinaryOperand, ExpUnaryOperand,
+    ExpFieldType, ExpConstructorArg, ExpTypeAnnotation, ExpProofObligation, ExpOther
+};
+use driver::util::{nat_to_string};
+
+// ===========================================================================
+// RESULT TYPE
+// ===========================================================================
+
+/// Bundled elaboration output: a Core term, its type, and the codegen IR.
+/// Used to thread (term, ty, cir) triples through recursive call trees
+/// without repeating three parameters.
+pub type TermInfo = { term: TermHandle, ty: TypeHandle, cir: CodegenIR }
+
+/// Result of expression elaboration.
+/// Returns the updated environment, the term handle, inferred type, and CodegenIR.
+/// The CodegenIR is constructed in lockstep with the Core term for Phase 3.5 codegen.
+pub type ElabExprResult =
+    | ElabExprOk(Env, TermHandle, TypeHandle, CodegenIR)
+    | ElabExprErr(ElabExprError)
+
+/// Error during expression elaboration.
+/// Extended to include optional ExpectedBecause context for better diagnostics.
+/// The `code` field carries the error code (e.g. "E0001") when available,
+/// or "" when no structured code applies. Used by `expect_error` (ADR 12.5.26c).
+pub type ElabExprError = {
+    message: String,
+    span: Span,
+    expected_because: MaybeExpectedBecause,
+    code: String
+}
+
+/// Create an expression elaboration error.
+pub fn elab_expr_error(message: String, span: Span) -> ElabExprError {
+    { message: message, span: span, expected_because: NoExpectedBecause, code: "" }
+}
+
+/// Create an expression elaboration error with a specific error code.
+pub fn elab_expr_error_coded(message: String, span: Span, code: String) -> ElabExprError {
+    { message: message, span: span, expected_because: NoExpectedBecause, code: code }
+}
+
+/// Create an expression error with ExpectedBecause context.
+pub fn elab_expr_error_with_context(message: String, span: Span, ctx: ExpectedBecause) -> ElabExprError {
+    { message: message, span: span, expected_because: SomeExpectedBecause(ctx), code: "" }
+}
+
+/// Add ExpectedBecause context to an existing error.
+pub fn add_expected_because(err: ElabExprError, ctx: ExpectedBecause) -> ElabExprError {
+    { message: err.message, span: err.span, expected_because: SomeExpectedBecause(ctx), code: err.code }
+}
+
+/// Convenience: Create type mismatch error for binary operator.
+pub fn elab_expr_binary_type_error(op: String, span: Span, operand_span: Span) -> ElabExprError {
+    { message: "type mismatch in binary operator '" ++ op ++ "'",
+      span: operand_span,
+      expected_because: SomeExpectedBecause(ExpBinaryOperand(op, span)),
+      code: "E0001" }
+}
+
+/// Convenience: Create type mismatch error for function argument.
+pub fn elab_expr_arg_type_error(arg_num: Nat, span: Span, func_span: Span) -> ElabExprError {
+    { message: "type mismatch in argument " ++ nat_to_string(arg_num),
+      span: span,
+      expected_because: SomeExpectedBecause(ExpArgumentType(arg_num, func_span)),
+      code: "E0001" }
+}
+
+/// Convenience: Create type mismatch error for if condition.
+pub fn elab_expr_if_cond_error(cond_span: Span, if_span: Span) -> ElabExprError {
+    { message: "if condition must be Bool",
+      span: cond_span,
+      expected_because: SomeExpectedBecause(ExpIfCondition(if_span)),
+      code: "E0001" }
+}
+
+/// Convenience: Create type mismatch error for if branch.
+pub fn elab_expr_if_branch_error(branch_span: Span, other_span: Span) -> ElabExprError {
+    { message: "if branches must have same type",
+      span: branch_span,
+      expected_because: SomeExpectedBecause(ExpIfBranch(other_span)),
+      code: "E0001" }
+}
+
+/// Convenience: Create type mismatch error for let annotation.
+pub fn elab_expr_let_annot_error(span: Span, annot_span: Span) -> ElabExprError {
+    { message: "type mismatch in let binding",
+      span: span,
+      expected_because: SomeExpectedBecause(ExpLetAnnotation(annot_span)),
+      code: "E0001" }
+}
+
+/// Convenience: Create type mismatch error for return.
+pub fn elab_expr_return_type_error(span: Span, fn_span: Span) -> ElabExprError {
+    { message: "return type mismatch",
+      span: span,
+      expected_because: SomeExpectedBecause(ExpFunctionReturn(fn_span)),
+      code: "E0001" }
+}
+
+/// Convert a type error to an expression error.
+pub fn type_error_to_expr_error(e: ElabTypeError) -> ElabExprError {
+    { message: e.message, span: e.span, expected_because: NoExpectedBecause, code: "" }
+}
+
+// ===========================================================================
+// PATTERN HELPERS
+// ===========================================================================
+
+/// Extract the binding name from a simple pattern.
+/// For complex patterns (tuples, constructors), returns "_".
+pub fn pattern_to_name(pat: Pattern) -> String {
+    match pat {
+        PatVar(id) => ident_name(id),
+        PatWildcard(_) => "_",
+        _ => "_"  // Complex patterns generate fresh names
+    }
+}
+
+/// Get the span from a pattern.
+pub fn pattern_get_span(pat: Pattern) -> Span {
+    match pat {
+        PatWildcard(s) => s,
+        PatVar(id) => ident_span(id),
+        PatLiteral(_, s) => s,
+        PatTuple(_, s) => s,
+        PatConstructor(_, _, s) => s,
+        PatOr(_, _, s) => s,
+        PatError(s) => s
+    }
+}

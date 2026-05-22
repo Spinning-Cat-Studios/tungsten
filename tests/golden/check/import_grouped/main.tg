@@ -1,0 +1,10 @@
+// Test: grouped import brings multiple items into scope at once.
+
+pub mod mymod;
+
+use mymod::{GroupType, group_fn};
+
+fn main() -> Nat {
+    let x: GroupType = 42;
+    group_fn(x)
+}

@@ -1,0 +1,123 @@
+// src/compiler/elab/error/render/helpers/mod.tg
+// Source line rendering, formatting, and suggestions.
+
+pub mod multiline;
+pub mod formatting;
+
+pub use elab::error::render::helpers::multiline::*;
+pub use elab::error::render::helpers::formatting::*;
+
+use lexer::span::Span;
+use elab::error::source::{SourceInfo, LineCol, offset_to_line_col, get_line_content};
+use elab::error::render::colors::{Color, ColorRed, ColorBlue,
+    colorize};
+use elab::error::render::helpers::formatting::{make_gutter, make_spaces, make_carets, pad_left, repeat_string};
+use driver::util::nat_to_string;
+use driver::ffi::{string_len};
+
+// ===========================================================================
+// SHARED RECORD TYPES
+// ===========================================================================
+
+/// Common rendering context: gutter width + color flag.
+pub type RenderCtx = {
+    gutter_width: Nat,
+    use_color: Bool
+}
+
+/// Loop-invariant context for multiline middle rendering.
+pub type MultilineLoopCtx = {
+    src: SourceInfo,
+    end_line: Nat,
+    gutter_width: Nat,
+    marker: String
+}
+
+/// Style context for rendering lists of strings.
+pub type ListRenderStyle = {
+    gutter_width: Nat,
+    prefix: String,
+    color: Color,
+    use_color: Bool
+}
+
+// ===========================================================================
+// SOURCE LINE RENDERING
+// ===========================================================================
+
+/// Render source line with underline marker (no colors, backward compatible).
+pub fn render_source_with_underline(src: SourceInfo, span: Span, gutter_width: Nat) -> String {
+    render_source_with_underline_colored(src, span, gutter_width, false)
+}
+
+/// Render source line with underline marker (with optional colors).
+pub fn render_source_with_underline_colored(src: SourceInfo, span: Span, gutter_width: Nat, use_color: Bool) -> String {
+    let lc_start = offset_to_line_col(src, span.start);
+    let lc_end = offset_to_line_col(src, span.end);
+    
+    let line_num = lc_start.line;
+    let line_content = get_line_content(src, line_num);
+    
+    let line_str = nat_to_string(line_num);
+    let padded_num = pad_left(line_str, gutter_width, " ");
+    let pipe = colorize("|", ColorBlue, use_color);
+    let source = colorize(padded_num, ColorBlue, use_color) ++ " " ++ pipe ++ " " ++ line_content;
+    
+    let col_start = lc_start.col;
+    let col_end = if lc_end.line == lc_start.line { lc_end.col } else { string_len(line_content) + 1 };
+    let underline_len = if col_end > col_start { col_end - col_start } else { 1 };
+    
+    let carets = colorize(make_carets(underline_len), ColorRed, use_color);
+    let underline = make_gutter(gutter_width) ++ " " ++ pipe ++ " " ++ 
+                    make_spaces(col_start - 1) ++ 
+                    carets;
+    
+    source ++ "\n" ++ underline
+}
+
+/// Render source line with underline and message (backward compatible).
+pub fn render_source_with_message(
+    src: SourceInfo, 
+    span: Span, 
+    message: String,
+    gutter_width: Nat,
+    is_primary: Bool
+) -> String {
+    let rctx: RenderCtx = { gutter_width: gutter_width, use_color: false };
+    render_source_with_message_colored(src, span, message, rctx, is_primary)
+}
+
+/// Render source line with underline and message (with optional colors).
+pub fn render_source_with_message_colored(
+    src: SourceInfo, 
+    span: Span, 
+    message: String,
+    rctx: RenderCtx,
+    is_primary: Bool
+) -> String {
+    let lc_start = offset_to_line_col(src, span.start);
+    let lc_end = offset_to_line_col(src, span.end);
+    
+    let line_num = lc_start.line;
+    let line_content = get_line_content(src, line_num);
+    
+    let line_str = nat_to_string(line_num);
+    let padded_num = pad_left(line_str, rctx.gutter_width, " ");
+    let pipe = colorize("|", ColorBlue, rctx.use_color);
+    let source = colorize(padded_num, ColorBlue, rctx.use_color) ++ " " ++ pipe ++ " " ++ line_content;
+    
+    let col_start = lc_start.col;
+    let col_end = if lc_end.line == lc_start.line { lc_end.col } else { string_len(line_content) + 1 };
+    let underline_len = if col_end > col_start { col_end - col_start } else { 1 };
+    
+    let marker = if is_primary { "^" } else { "-" };
+    let marker_color = if is_primary { ColorRed } else { ColorBlue };
+    let markers = colorize(repeat_string(marker, underline_len), marker_color, rctx.use_color);
+    let msg_colored = colorize(message, marker_color, rctx.use_color);
+    let underline = make_gutter(rctx.gutter_width) ++ " " ++ pipe ++ " " ++ 
+                    make_spaces(col_start - 1) ++ 
+                    markers ++
+                    " " ++ msg_colored;
+    
+    source ++ "\n" ++ underline
+}

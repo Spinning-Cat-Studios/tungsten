@@ -1,0 +1,218 @@
+// Environment mutation operations.
+//
+// Provides scope management, type variable binding, registration
+// of types/values/constructors, module navigation, and visibility checking.
+//
+// Depth tracking and return type management live in context.tg.
+
+use parser::ast::{
+    Ident, ident_name,
+    VisPrivate, VisCrate, VisPublic, Visibility
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_contains_string;
+use driver::util::list_is_prefix_or_eq_string;
+use elab::env::types::{
+    Env, env_current_module_contents,
+    env_with_scopes, env_with_type_vars, env_with_module_map,
+    env_with_current_module, env_with_depth
+};
+use elab::env::scope::{
+    ScopeStack, ScopeStackNil, ScopeStackCons,
+    Scope, ScopeNil, ScopeCons,
+    scope_stack_pop, local_binding_new
+};
+use elab::env::defs::{
+    TypeDefInfo, ValueDefInfo, ConstructorInfo
+};
+use elab::env::module::{
+    ElabModulePath, MkElabModulePath,
+    ModuleMap,
+    ModuleContents,
+    MaybeModuleContents, NoModuleContents, SomeModuleContents,
+    module_map_lookup, module_map_insert,
+    module_contents_empty,
+    module_contents_add_type, module_contents_add_value,
+    module_contents_add_constructor, module_contents_add_import,
+    module_contents_add_types, module_contents_add_values,
+    module_contents_add_constructors,
+    elab_module_path_append,
+    Import
+};
+use driver::util::list_init_string;
+
+// ===========================================================================
+// SCOPE OPERATIONS
+// ===========================================================================
+
+/// Push a new scope onto the stack.
+pub fn env_push_scope(env: Env) -> Env {
+    env_with_scopes(env, ScopeStackCons(ScopeNil, env.scopes))
+}
+
+/// Pop the current scope from the stack.
+pub fn env_pop_scope(env: Env) -> Env {
+    env_with_scopes(env, scope_stack_pop(env.scopes))
+}
+
+/// Bind a local variable in the current scope.
+/// Increments the depth and adds the binding.
+pub fn env_bind_local(env: Env, name: String, ty: TypeHandle) -> Env {
+    let binding = local_binding_new(name, ty, env.depth);
+    let new_scopes = match env.scopes {
+        ScopeStackNil() =>
+            ScopeStackCons(ScopeCons(binding, ScopeNil), ScopeStackNil),
+        ScopeStackCons(scope, rest) =>
+            ScopeStackCons(ScopeCons(binding, scope), rest)
+    };
+    let env2 = env_with_scopes(env, new_scopes);
+    env_with_depth(env2, env.depth + 1)
+}
+
+// ===========================================================================
+// TYPE VARIABLE OPERATIONS
+// ===========================================================================
+
+/// Bind a type variable (for forall).
+pub fn env_bind_type_var(env: Env, name: String) -> Env {
+    env_with_type_vars(env, Cons(name, env.type_vars))
+}
+
+/// Unbind a type variable (pop from list).
+pub fn env_unbind_type_var(env: Env) -> Env {
+    let new_type_vars: List<String> = match env.type_vars {
+        Nil() => Nil(),
+        Cons(_, rest) => rest
+    };
+    env_with_type_vars(env, new_type_vars)
+}
+
+/// Alias for env_bind_type_var (legacy name).
+pub fn env_push_type_var(env: Env, name: String) -> Env {
+    env_bind_type_var(env, name)
+}
+
+/// Alias for env_unbind_type_var (legacy name).
+pub fn env_pop_type_var(env: Env) -> Env {
+    env_unbind_type_var(env)
+}
+
+/// Check if a name is a bound type variable.
+pub fn env_is_type_var(env: Env, name: String) -> Bool {
+    list_contains_string(env.type_vars, name)
+}
+
+// ===========================================================================
+// REGISTRATION OPERATIONS
+// ===========================================================================
+
+/// Update the current module contents.
+fn env_update_module_contents(env: Env, contents: ModuleContents) -> Env {
+    env_with_module_map(env, module_map_insert(env.modules, env.current_module, contents))
+}
+
+/// Register a type definition in the current module.
+pub fn env_register_type(env: Env, def: TypeDefInfo) -> Env {
+    let contents = env_current_module_contents(env);
+    let new_contents = module_contents_add_type(contents, def);
+    env_update_module_contents(env, new_contents)
+}
+
+/// Register a value definition in the current module.
+pub fn env_register_value(env: Env, def: ValueDefInfo) -> Env {
+    
+    let contents = env_current_module_contents(env);
+    let new_contents = module_contents_add_value(contents, def);
+    env_update_module_contents(env, new_contents)
+}
+
+/// Register a constructor in the current module.
+pub fn env_register_constructor(env: Env, info: ConstructorInfo) -> Env {
+    let contents = env_current_module_contents(env);
+    let new_contents = module_contents_add_constructor(contents, info);
+    env_update_module_contents(env, new_contents)
+}
+
+/// Register an import in the current module.
+pub fn env_add_import(env: Env, imp: Import) -> Env {
+    let contents = env_current_module_contents(env);
+    let new_contents = module_contents_add_import(contents, imp);
+    env_update_module_contents(env, new_contents)
+}
+
+/// Register multiple types in the current module with a single map insert.
+/// Use when iterating a list of types with no inter-item dependency (ADR 7.5.26c).
+pub fn env_register_types_batch(env: Env, defs: List<TypeDefInfo>) -> Env {
+    let contents = env_current_module_contents(env);
+    let new_contents = module_contents_add_types(contents, defs);
+    env_update_module_contents(env, new_contents)
+}
+
+/// Register multiple values in the current module with a single map insert.
+/// Use when iterating a list of values with no inter-item dependency (ADR 7.5.26c).
+pub fn env_register_values_batch(env: Env, defs: List<ValueDefInfo>) -> Env {
+    let contents = env_current_module_contents(env);
+    let new_contents = module_contents_add_values(contents, defs);
+    env_update_module_contents(env, new_contents)
+}
+
+/// Register multiple constructors in the current module with a single map insert.
+/// Use when iterating a list of constructors with no inter-item dependency (ADR 7.5.26c).
+pub fn env_register_constructors_batch(env: Env, ctors: List<ConstructorInfo>) -> Env {
+    let contents = env_current_module_contents(env);
+    let new_contents = module_contents_add_constructors(contents, ctors);
+    env_update_module_contents(env, new_contents)
+}
+
+// ===========================================================================
+// MODULE OPERATIONS
+// ===========================================================================
+
+/// Enter a module (push module path).
+pub fn env_enter_module(env: Env, name: String) -> Env {
+    let new_path = elab_module_path_append(env.current_module, name);
+    // Create empty module if it doesn't exist
+    let new_modules = match module_map_lookup(env.modules, new_path) {
+        SomeModuleContents(_) => env.modules,
+        NoModuleContents() =>
+            module_map_insert(env.modules, new_path, module_contents_empty(new_path))
+    };
+    env_with_current_module(env, new_path, new_modules)
+}
+
+/// Leave the current module (pop module path).
+pub fn env_leave_module(env: Env) -> Env {
+    match env.current_module {
+        MkElabModulePath(segments) =>
+            let new_path = MkElabModulePath(list_init_string(segments));
+            env_with_current_module(env, new_path, env.modules)
+    }
+}
+
+// ===========================================================================
+// VISIBILITY CHECKING
+// ===========================================================================
+
+/// Check if an item with given visibility is accessible from the current module.
+pub fn env_check_visibility(
+    env: Env,
+    item_visibility: Visibility,
+    item_module: ElabModulePath
+) -> Bool {
+    match item_visibility {
+        VisPublic() => true,
+        VisCrate() => true,  // TODO: crate boundary checking
+        VisPrivate() =>
+            // Private items are visible within the same module or submodules
+            elab_module_path_is_prefix_or_eq(item_module, env.current_module)
+    }
+}
+
+/// Check if path A is a prefix of or equal to path B.
+fn elab_module_path_is_prefix_or_eq(a: ElabModulePath, b: ElabModulePath) -> Bool {
+    match a {
+        MkElabModulePath(segs_a) => match b {
+            MkElabModulePath(segs_b) => list_is_prefix_or_eq_string(segs_a, segs_b)
+        }
+    }
+}

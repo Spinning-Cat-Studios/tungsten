@@ -36,10 +36,22 @@ mod structural;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::elaborate::Elaborator;
 use tungsten_core::Type;
+
+/// Context for normalizing fields within an ADT constructor.
+///
+/// Bundles the ADT identity, substitution map, recursion info,
+/// and cycle-detection set threaded through field normalization.
+pub(super) struct NormFieldCtx<'a> {
+    pub adt_name: &'a str,
+    pub subst: &'a HashMap<&'a str, &'a Type>,
+    pub is_recursive: bool,
+    pub mu_var: &'a str,
+    pub in_progress: &'a mut HashSet<String>,
+}
 
 impl<'a> Elaborator<'a> {
     /// Normalize a type for structural comparison.

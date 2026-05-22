@@ -1,0 +1,99 @@
+// src/compiler/parser/items/types/records.tg
+// Record type body and field parsing.
+
+use lexer::token::{TokenKind, TokLBrace, TokRBrace, TokComma, TokColon};
+use lexer::span::{Span, span_merge};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new};
+use parser::ast::nodes::{TypeExpr, type_expr_span, TypeDefBody, TypeDefRecord, RecordField};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use driver::util::{Result, Ok, Err};
+use parser::types::{parse_type};
+
+/// Parse a record body.
+///
+/// Grammar:
+///   RecordBody = "{" RecordField ("," RecordField)* ","? "}"
+pub fn parse_record_body(cur: Cursor) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokLBrace())?;
+    parse_record_body_inner(cur2)
+}
+
+fn parse_record_body_inner(cur: Cursor) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
+    // Check for empty record
+    if cursor_check(cur, TokRBrace()) {
+        let cur2 = cursor_advance(cur);
+        let end_span = cursor_peek_span(cur);
+        Ok((TypeDefRecord(Nil()), end_span, cur2))
+    } else {
+        // Parse first field
+        let (field, cur2) = parse_record_field(cur)?;
+        parse_record_fields_rest(cur2, Cons(field, Nil()))
+    }
+}
+
+/// Parse a single record field.
+///
+/// Grammar:
+///   RecordField = IDENT ":" TypeExpr
+fn parse_record_field(cur: Cursor) -> Result<(RecordField, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    match cursor_eat_ident(cur) {
+        NoIdentResult() =>
+            parse_record_field_no_ident(cur),
+        SomeIdentResult(name, cur2) =>
+            parse_record_field_colon(start_span, name, cur2)
+    }
+}
+
+fn parse_record_field_no_ident(cur: Cursor) -> Result<(RecordField, Cursor), ParseError> {
+    let found = match cursor_peek_kind(cur) {
+        None() => "end of file",
+        Some(k) => token_kind_name(k)
+    };
+    Err(parse_error_expected("field name", found, cursor_peek_span(cur)))
+}
+
+fn parse_record_field_colon(start_span: Span, name: String, cur: Cursor) -> Result<(RecordField, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokColon())?;
+    parse_record_field_type(start_span, name, cur2)
+}
+
+fn parse_record_field_type(start_span: Span, name: String, cur: Cursor) -> Result<(RecordField, Cursor), ParseError> {
+    let (ty, cur2) = parse_type(cur)?;
+    let field: RecordField = {
+        name: ident_new(name, start_span),
+        ty: ty,
+        span: span_merge(start_span, type_expr_span(ty))
+    };
+    Ok((field, cur2))
+}
+
+/// Parse remaining record fields.
+fn parse_record_fields_rest(cur: Cursor, acc: List<RecordField>) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma
+        if cursor_check(cur2, TokRBrace()) {
+            let (end_tok, cur3) = cursor_expect(cur2, TokRBrace())?;
+            Ok((TypeDefRecord(list_reverse(acc)), end_tok.span, cur3))
+        } else {
+            let (field, cur3) = parse_record_field(cur2)?;
+            parse_record_fields_rest(cur3, Cons(field, acc))
+        }
+    } else if cursor_check(cur, TokRBrace()) {
+        let (end_tok, cur2) = cursor_expect(cur, TokRBrace())?;
+        Ok((TypeDefRecord(list_reverse(acc)), end_tok.span, cur2))
+    } else {
+        let found = match cursor_peek_kind(cur) {
+            None() => "end of file",
+            Some(k) => token_kind_name(k)
+        };
+        Err(parse_error_expected("',' or '}'", found, cursor_peek_span(cur)))
+    }
+}

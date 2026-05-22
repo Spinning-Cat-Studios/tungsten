@@ -8,6 +8,8 @@ use crate::elaborate::env::Constructor;
 use crate::elaborate::Elaborator;
 use tungsten_core::Type;
 
+use super::NormFieldCtx;
+
 impl<'a> Elaborator<'a> {
     /// Encode an ADT for normalization, properly wrapping recursive types in μ-binders.
     ///
@@ -54,14 +56,14 @@ impl<'a> Elaborator<'a> {
         let constructor_types: Vec<Type> = constructors
             .iter()
             .map(|ctor| {
-                self.encode_constructor_for_normalization(
-                    ctor,
-                    name,
-                    &subst,
+                let mut ctx = NormFieldCtx {
+                    adt_name: name,
+                    subst: &subst,
                     is_recursive,
-                    &mu_var,
+                    mu_var: &mu_var,
                     in_progress,
-                )
+                };
+                self.encode_constructor_for_normalization(ctor, &mut ctx)
             })
             .collect();
 
@@ -80,11 +82,7 @@ impl<'a> Elaborator<'a> {
     pub(super) fn encode_constructor_for_normalization(
         &self,
         ctor: &Constructor,
-        adt_name: &str,
-        subst: &HashMap<&str, &Type>,
-        is_recursive: bool,
-        mu_var: &str,
-        in_progress: &mut HashSet<String>,
+        ctx: &mut NormFieldCtx,
     ) -> Type {
         if ctor.fields.is_empty() {
             return Type::Unit;
@@ -94,16 +92,7 @@ impl<'a> Elaborator<'a> {
         let field_types: Vec<Type> = ctor
             .fields
             .iter()
-            .map(|field_ty| {
-                self.normalize_field_for_adt(
-                    field_ty,
-                    adt_name,
-                    subst,
-                    is_recursive,
-                    mu_var,
-                    in_progress,
-                )
-            })
+            .map(|field_ty| self.normalize_field_for_adt(field_ty, ctx))
             .collect();
 
         self.build_product_from_fields(field_types)

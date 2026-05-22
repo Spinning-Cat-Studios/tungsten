@@ -15,9 +15,20 @@ use crate::ast::{self, Pattern};
 use crate::span::Spanned;
 use tungsten_core::{Term, Type};
 
+use super::context::AdtIdentity;
 use crate::elaborate::env::{self as elab_env};
 use crate::elaborate::error::{ElabError, ElabErrorKind};
 use crate::elaborate::{ElabResult, Elaborator};
+
+/// Shared context for elaborating a single field's pattern within a constructor arm.
+/// Bundles the params that flow through all dispatch branches.
+struct FieldElabCtx<'a> {
+    field_type: &'a Type,
+    raw_var: &'a str,
+    body: &'a ast::Expr,
+    result_ty: Option<&'a Type>,
+    depth: usize,
+}
 
 impl<'a> Elaborator<'a> {
     /// Elaborate a match arm - either a constructor pattern or a catch-all (wildcard/variable).
@@ -26,16 +37,31 @@ impl<'a> Elaborator<'a> {
         arm: &ast::MatchArm,
         ctor_ty: &Type, // The type of the value at this position in the sum
         constructor: &elab_env::Constructor,
-        adt_type: &Type,        // Original ADT type for recursive references
-        type_params: &[String], // Type parameters of the ADT (for generic substitution)
-        adt_name: &str,         // Name of the ADT (for type argument extraction)
+        adt: &AdtIdentity<'_>,
+        result_ty: Option<&Type>, // Expected result type (for nullary constructor check mode)
     ) -> ElabResult<(String, Term)> {
         match &arm.pattern {
             Pattern::Constructor(_, _, _) => {
-                self.elab_ctor_arm(arm, ctor_ty, constructor, adt_type, type_params, adt_name)
+                self.elab_ctor_arm(arm, ctor_ty, constructor, adt, result_ty)
             }
-            Pattern::Wildcard(_) => self.elab_wildcard_arm(&arm.body, ctor_ty, &constructor.name),
-            Pattern::Var(ref var) => self.elab_var_arm(&arm.body, ctor_ty, &var.name),
+            Pattern::Wildcard(_) => {
+                self.elab_wildcard_arm(&arm.body, ctor_ty, &constructor.name, result_ty)
+            }
+            Pattern::Var(ref var) => {
+                // Check if this is actually a nullary constructor (parser can't distinguish)
+                if constructor.name == var.name && constructor.fields.is_empty() {
+                    // Nullary constructor written without parens (e.g., `Zero` not `Zero()`)
+                    // Don't bind as variable — elaborate as constructor arm with no fields
+                    let raw_var = format!("__ctor_{}", constructor.name);
+                    self.with_scoped_binding(&raw_var, ctor_ty.clone(), |elab| {
+                        let body_term =
+                            elab.elab_ctor_body(&[], &[], &raw_var, &arm.body, result_ty)?;
+                        Ok((raw_var.clone(), body_term))
+                    })
+                } else {
+                    self.elab_var_arm(&arm.body, ctor_ty, &var.name, result_ty)
+                }
+            }
             _ => Err(ElabError::new(
                 arm.pattern.span(),
                 ElabErrorKind::Other(
@@ -52,10 +78,15 @@ impl<'a> Elaborator<'a> {
         body: &ast::Expr,
         ctor_ty: &Type,
         ctor_name: &str,
+        result_ty: Option<&Type>,
     ) -> ElabResult<(String, Term)> {
         let raw_var = format!("__catch_all_{}", ctor_name);
         self.with_scoped_binding(&raw_var, ctor_ty.clone(), |elab| {
-            let body_term = elab.infer(body)?.0;
+            let body_term = if let Some(expected) = result_ty {
+                elab.check(body, expected)?
+            } else {
+                elab.infer(body)?.0
+            };
             Ok((raw_var.clone(), body_term))
         })
     }
@@ -67,17 +98,22 @@ impl<'a> Elaborator<'a> {
         body: &ast::Expr,
         ctor_ty: &Type,
         var_name: &str,
+        result_ty: Option<&Type>,
     ) -> ElabResult<(String, Term)> {
         let raw_var = var_name.to_string();
         self.with_scoped_binding(&raw_var, ctor_ty.clone(), |elab| {
-            let body_term = elab.infer(body)?.0;
+            let body_term = if let Some(expected) = result_ty {
+                elab.check(body, expected)?
+            } else {
+                elab.infer(body)?.0
+            };
             Ok((raw_var.clone(), body_term))
         })
     }
 
     /// Execute a closure with a scoped variable binding.
     /// Handles push/pop scope and depth management.
-    fn with_scoped_binding<T, F>(&mut self, name: &str, ty: Type, f: F) -> ElabResult<T>
+    pub(crate) fn with_scoped_binding<T, F>(&mut self, name: &str, ty: Type, f: F) -> ElabResult<T>
     where
         F: FnOnce(&mut Self) -> ElabResult<T>,
     {
@@ -102,9 +138,8 @@ impl<'a> Elaborator<'a> {
         arm: &ast::MatchArm,
         ctor_ty: &Type, // The type of the value at this position in the sum
         constructor: &elab_env::Constructor,
-        adt_type: &Type,        // Original ADT type for recursive references
-        type_params: &[String], // Type parameters of the ADT (for generic substitution)
-        adt_name: &str,         // Name of the ADT (for type argument extraction)
+        adt: &AdtIdentity<'_>,
+        result_ty: Option<&Type>, // Expected result type (for nullary constructor check mode)
     ) -> ElabResult<(String, Term)> {
         let Pattern::Constructor(_, ref sub_patterns, _) = arm.pattern else {
             return Err(ElabError::new(
@@ -119,9 +154,9 @@ impl<'a> Elaborator<'a> {
         // Instantiate constructor field types with proper two-phase substitution
         let field_types = self.instantiate_constructor_fields_with_name(
             &constructor.fields,
-            type_params,
-            adt_type,
-            adt_name,
+            adt.type_params,
+            adt.adt_type,
+            adt.adt_name,
         );
 
         // Create a fresh variable for the raw matched value
@@ -129,13 +164,14 @@ impl<'a> Elaborator<'a> {
 
         self.with_scoped_binding(&raw_var, ctor_ty.clone(), |elab| {
             // Elaborate body with pattern bindings
-            let body_term = elab.elab_ctor_body(sub_patterns, &field_types, &raw_var, &arm.body)?;
+            let body_term =
+                elab.elab_ctor_body(sub_patterns, &field_types, &raw_var, &arm.body, result_ty)?;
             Ok((raw_var.clone(), body_term))
         })
     }
 
     /// Validate a constructor arm: check for guards and arity.
-    fn validate_ctor_arm(
+    pub(crate) fn validate_ctor_arm(
         &self,
         arm: &ast::MatchArm,
         constructor: &elab_env::Constructor,
@@ -159,22 +195,41 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Elaborate the body of a constructor arm with field bindings.
+    ///
+    /// For nullary constructors (no fields), uses `check` mode against `result_ty`
+    /// when available. This prevents TyVar leaks: nullary arms don't bind any type
+    /// variables through field destructuring, so without checking, unsubstituted
+    /// TyVars can persist into Core IR and cause codegen size mismatches.
     fn elab_ctor_body(
         &mut self,
         sub_patterns: &[Pattern],
         field_types: &[Type],
         raw_var: &str,
         body: &ast::Expr,
+        result_ty: Option<&Type>,
     ) -> ElabResult<Term> {
         if sub_patterns.is_empty() {
-            // Nullary constructor: just elaborate the body
-            self.infer(body).map(|(term, _)| term)
+            // Nullary constructor: use check mode if we have an expected result type,
+            // to prevent TyVar leaks from unsubstituted type parameters.
+            if let Some(expected) = result_ty {
+                self.check(body, expected)
+            } else {
+                self.infer(body).map(|(term, _)| term)
+            }
         } else if sub_patterns.len() == 1 {
-            // Single field: handle directly
-            self.elab_single_field_pattern(&sub_patterns[0], &field_types[0], raw_var, body)
+            // Single field: use check mode when result_ty is available to prevent
+            // unconstrained type params from defaulting to Unit (ADR 15.5.26e).
+            self.elab_single_field_pattern(
+                &sub_patterns[0],
+                &field_types[0],
+                raw_var,
+                body,
+                result_ty,
+            )
         } else {
-            // Multiple fields: destructure the product
-            self.elab_multi_field_patterns(sub_patterns, field_types, raw_var, body)
+            // Multiple fields: use check mode when result_ty is available to prevent
+            // unconstrained type params from defaulting to Unit (ADR 15.5.26e).
+            self.elab_multi_field_patterns(sub_patterns, field_types, raw_var, body, result_ty)
         }
     }
 
@@ -185,18 +240,38 @@ impl<'a> Elaborator<'a> {
         field_type: &Type,
         raw_var: &str,
         body: &ast::Expr,
+        result_ty: Option<&Type>,
     ) -> ElabResult<Term> {
+        let ctx = FieldElabCtx {
+            field_type,
+            raw_var,
+            body,
+            result_ty,
+            depth: 2,
+        };
         match pattern {
             Pattern::Wildcard(_) => {
-                // Wildcard: don't bind anything, just elaborate body
-                self.infer(body).map(|(term, _)| term)
+                // Wildcard: use check mode when result_ty is available
+                if let Some(expected) = ctx.result_ty {
+                    self.check(ctx.body, expected)
+                } else {
+                    self.infer(ctx.body).map(|(term, _)| term)
+                }
             }
-            Pattern::Var(ref var) => {
-                self.elab_single_var_binding(&var.name, field_type, raw_var, body)
-            }
+            Pattern::Var(ref var) => self.elab_single_var_binding(&var.name, &ctx),
             Pattern::Constructor(_, _, _) => {
                 // Nested constructor pattern: use recursive elaboration
-                self.elab_nested_ctor_pattern(pattern, raw_var, field_type, body, 2)
+                self.elab_nested_ctor_pattern(
+                    pattern,
+                    ctx.raw_var,
+                    ctx.field_type,
+                    ctx.body,
+                    ctx.depth,
+                )
+            }
+            Pattern::Tuple(ref sub_pats, tup_span) => {
+                // Tuple pattern inside constructor (ADR 15.5.26f)
+                self.elab_tuple_in_ctor_pattern(sub_pats, *tup_span, &ctx)
             }
             _ => Err(ElabError::unsupported(
                 pattern.span(),
@@ -209,401 +284,78 @@ impl<'a> Elaborator<'a> {
     fn elab_single_var_binding(
         &mut self,
         var_name: &str,
-        field_type: &Type,
-        raw_var: &str,
-        body: &ast::Expr,
+        ctx: &FieldElabCtx<'_>,
     ) -> ElabResult<Term> {
         self.env
-            .bind_local(var_name.to_string(), field_type.clone(), self.depth);
+            .bind_local(var_name.to_string(), ctx.field_type.clone(), self.depth);
         self.depth += 1;
 
-        let body_term = self.infer(body)?.0;
-        let wrapped = Term::let_in(var_name, field_type.clone(), Term::var(raw_var), body_term);
+        let body_term = if let Some(expected) = ctx.result_ty {
+            self.check(ctx.body, expected)?
+        } else {
+            self.infer(ctx.body)?.0
+        };
+        let wrapped = Term::let_in(
+            var_name,
+            ctx.field_type.clone(),
+            Term::var(ctx.raw_var),
+            body_term,
+        );
 
         self.depth -= 1;
         Ok(wrapped)
     }
 
-    /// Elaborate multiple field patterns (product destructuring).
-    fn elab_multi_field_patterns(
+    /// Elaborate a tuple pattern inside a constructor field (ADR 15.5.26f).
+    ///
+    /// For `Ok((a, b))`: the constructor has one field of tuple type, and
+    /// the tuple sub-patterns destructure that field. Projection uses the
+    /// tuple's right-nested convention (not the constructor's left-nested).
+    fn elab_tuple_in_ctor_pattern(
         &mut self,
-        sub_patterns: &[Pattern],
-        field_types: &[Type],
-        raw_var: &str,
-        body: &ast::Expr,
+        sub_pats: &[Pattern],
+        span: crate::span::Span,
+        ctx: &FieldElabCtx<'_>,
     ) -> ElabResult<Term> {
-        let has_nested_ctor = sub_patterns
-            .iter()
-            .any(|p| matches!(p, Pattern::Constructor(_, _, _)));
+        // Check depth limit at this level (consistent with elab_nested_ctor_pattern)
+        if ctx.depth > crate::config::MAX_PATTERN_DEPTH {
+            return Err(ElabError::new(
+                span,
+                ElabErrorKind::PatternTooDeep {
+                    depth: ctx.depth,
+                    max: crate::config::MAX_PATTERN_DEPTH,
+                },
+            ));
+        }
 
-        if has_nested_ctor {
-            // Use recursive pattern elaboration for nested constructors
-            self.elab_product_with_nested_ctors(sub_patterns, field_types, raw_var, body, 2)
+        // 1. Extract tuple element types from the field type
+        let elem_types = self.extract_tuple_types(ctx.field_type, sub_pats.len(), span)?;
+
+        // 2. Collect bindings (left-to-right, depth-first) and register in env
+        let mut bindings = Vec::new();
+        for (pat, ty) in sub_pats.iter().zip(elem_types.iter()) {
+            self.collect_bindings_from_pattern(pat, ty, &mut bindings, span)?;
+        }
+        for (name, ty) in &bindings {
+            self.env.bind_local(name.clone(), ty.clone(), self.depth);
+            self.depth += 1;
+        }
+
+        // 3. Elaborate body (check or infer based on result_ty)
+        let body_term = if let Some(expected) = ctx.result_ty {
+            self.check(ctx.body, expected)?
         } else {
-            // Use simpler approach for vars and wildcards
-            self.bind_product_patterns(sub_patterns, field_types, raw_var)?;
-            let body_term = self.infer(body)?.0;
-            self.wrap_product_destructs(body_term, sub_patterns, field_types, raw_var)
-        }
-    }
+            self.infer(ctx.body)?.0
+        };
 
-    /// Bind pattern variables from a product (for multi-field constructors).
-    /// Wildcards (`_`) are skipped - no binding is created.
-    pub(super) fn bind_product_patterns(
-        &mut self,
-        patterns: &[Pattern],
-        field_types: &[Type],
-        _raw_var: &str,
-    ) -> ElabResult<()> {
-        for (pat, ty) in patterns.iter().zip(field_types.iter()) {
-            match pat {
-                Pattern::Wildcard(_) => {
-                    // Wildcard: skip binding, but still increment depth for tracking
-                    self.depth += 1;
-                }
-                Pattern::Var(ref var) => {
-                    self.env
-                        .bind_local(var.name.clone(), ty.clone(), self.depth);
-                    self.depth += 1;
-                }
-                _ => {
-                    return Err(ElabError::unsupported(
-                        pat.span(),
-                        "nested patterns in constructors",
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
+        // 4. Wrap with tuple projection lets
+        let wrapped = self.build_tuple_lets(sub_pats, &elem_types, ctx.raw_var, body_term, span)?;
 
-    /// Wrap body with product destructuring lets.
-    pub(super) fn wrap_product_destructs(
-        &mut self,
-        body: Term,
-        patterns: &[Pattern],
-        field_types: &[Type],
-        raw_var: &str,
-    ) -> ElabResult<Term> {
-        // For patterns [a, b, c] from left-nested product ((a, b), c):
-        // let a = fst(fst(raw)); let b = snd(fst(raw)); let c = snd(raw); body
-        let mut result = body;
-        let n = patterns.len();
-
-        for i in (0..n).rev() {
-            let Pattern::Var(ref var) = patterns[i] else {
-                continue;
-            };
-
-            // Build the accessor for field i using left-nested product convention
-            let accessor = Self::build_left_nested_accessor(raw_var, i, n);
-
-            result = Term::let_in(&var.name, field_types[i].clone(), accessor, result);
-        }
-
-        // Decrement depth for each pattern we bound
-        for _ in 0..n {
+        // 5. Pop depth for all bindings
+        for _ in &bindings {
             self.depth -= 1;
         }
 
-        Ok(result)
-    }
-
-    /// Build accessor for field at index `field_idx` in a left-nested product of `num_fields` fields.
-    ///
-    /// Left-nested encoding: ((a, b), c) for [a, b, c]
-    /// - Field 0: fst(fst(raw))
-    /// - Field 1: snd(fst(raw))
-    /// - Field 2: snd(raw)
-    fn build_left_nested_accessor(raw_var: &str, field_idx: usize, num_fields: usize) -> Term {
-        fn helper(raw: Term, field_idx: usize, num_fields: usize) -> Term {
-            if num_fields == 1 {
-                raw
-            } else if field_idx == num_fields - 1 {
-                Term::snd(raw)
-            } else {
-                helper(Term::fst(raw), field_idx, num_fields - 1)
-            }
-        }
-        helper(Term::var(raw_var), field_idx, num_fields)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::{Ident, Path, Pattern};
-    use tungsten_core::Context;
-
-    /// Create an Elaborator for testing.
-    fn make_elaborator() -> Elaborator<'static> {
-        let ctx = Box::leak(Box::new(Context::new()));
-        Elaborator::new(ctx)
-    }
-
-    /// Create a simple path from a string.
-    fn simple_path(name: &str, span: crate::span::Span) -> Path {
-        Path {
-            segments: vec![Ident::new(name, span)],
-            span,
-        }
-    }
-
-    // ========================================================================
-    // Tests for with_scoped_binding helper
-    // ========================================================================
-
-    /// Test that with_scoped_binding properly manages depth.
-    #[test]
-    fn test_with_scoped_binding_depth_management() {
-        let mut elab = make_elaborator();
-        let initial_depth = elab.depth;
-
-        let result: ElabResult<usize> = elab.with_scoped_binding("x", Type::Nat, |e| {
-            // Inside the closure, depth should be incremented
-            Ok(e.depth)
-        });
-
-        assert!(result.is_ok());
-        let inner_depth = result.unwrap();
-        assert_eq!(inner_depth, initial_depth + 1);
-
-        // After returning, depth should be restored
-        assert_eq!(elab.depth, initial_depth);
-    }
-
-    /// Test that with_scoped_binding handles errors correctly.
-    #[test]
-    fn test_with_scoped_binding_error_handling() {
-        use crate::elaborate::error::{ElabError, ElabErrorKind};
-        use crate::span::Span;
-
-        let mut elab = make_elaborator();
-        let initial_depth = elab.depth;
-
-        let result: ElabResult<()> = elab.with_scoped_binding("x", Type::Nat, |_| {
-            Err(ElabError::new(
-                Span::new(0, 0),
-                ElabErrorKind::Other("test error".to_string()),
-            ))
-        });
-
-        assert!(result.is_err());
-
-        // Depth should still be restored even on error
-        assert_eq!(elab.depth, initial_depth);
-    }
-
-    // ========================================================================
-    // Tests for validate_ctor_arm
-    // ========================================================================
-
-    /// Test validate_ctor_arm passes with correct arity and no guard.
-    #[test]
-    fn test_validate_ctor_arm_success() {
-        use crate::span::Span;
-
-        let elab = make_elaborator();
-        let span = Span::new(0, 0);
-
-        let constructor = elab_env::Constructor {
-            name: "Some".to_string(),
-            fields: vec![Type::Nat],
-            index: 0,
-            span,
-        };
-
-        let arm = ast::MatchArm {
-            pattern: Pattern::Constructor(
-                simple_path("Some", span),
-                vec![Pattern::Wildcard(span)],
-                span,
-            ),
-            guard: None,
-            body: ast::Expr::Unit(span),
-            span,
-        };
-
-        let result = elab.validate_ctor_arm(&arm, &constructor, 1);
-        assert!(result.is_ok());
-    }
-
-    /// Test validate_ctor_arm fails with guard.
-    #[test]
-    fn test_validate_ctor_arm_rejects_guard() {
-        use crate::span::Span;
-
-        let elab = make_elaborator();
-        let span = Span::new(0, 0);
-
-        let constructor = elab_env::Constructor {
-            name: "Some".to_string(),
-            fields: vec![Type::Nat],
-            index: 0,
-            span,
-        };
-
-        let arm = ast::MatchArm {
-            pattern: Pattern::Constructor(
-                simple_path("Some", span),
-                vec![Pattern::Wildcard(span)],
-                span,
-            ),
-            guard: Some(ast::Expr::BoolLiteral(true, span)),
-            body: ast::Expr::Unit(span),
-            span,
-        };
-
-        let result = elab.validate_ctor_arm(&arm, &constructor, 1);
-        assert!(result.is_err());
-    }
-
-    /// Test validate_ctor_arm fails with wrong arity.
-    #[test]
-    fn test_validate_ctor_arm_wrong_arity() {
-        use crate::span::Span;
-
-        let elab = make_elaborator();
-        let span = Span::new(0, 0);
-
-        let constructor = elab_env::Constructor {
-            name: "Some".to_string(),
-            fields: vec![Type::Nat],
-            index: 0,
-            span,
-        };
-
-        let arm = ast::MatchArm {
-            pattern: Pattern::Constructor(
-                simple_path("Some", span),
-                vec![], // 0 patterns but constructor expects 1
-                span,
-            ),
-            guard: None,
-            body: ast::Expr::Unit(span),
-            span,
-        };
-
-        let result = elab.validate_ctor_arm(&arm, &constructor, 0);
-        assert!(result.is_err());
-    }
-
-    // ========================================================================
-    // Tests for product field accessors (wrap_product_destructs)
-    // ========================================================================
-
-    /// Test wrap_product_destructs generates correct accessors for 2 fields.
-    #[test]
-    fn test_wrap_product_destructs_two_fields() {
-        use crate::span::Span;
-
-        let mut elab = make_elaborator();
-        let span = Span::new(0, 0);
-
-        // Simulate binding 2 patterns
-        elab.depth = 2;
-
-        let patterns = vec![
-            Pattern::Var(Ident::new("a", span)),
-            Pattern::Var(Ident::new("b", span)),
-        ];
-        let field_types = vec![Type::Nat, Type::String];
-        let body = Term::var("result");
-
-        let result = elab.wrap_product_destructs(body.clone(), &patterns, &field_types, "raw");
-        assert!(result.is_ok());
-
-        let term = result.unwrap();
-        // Should generate: let a = fst(raw); let b = snd(raw); result
-        // In reverse order: let b = ...; let a = ...; result
-        // So outer is `let a = ...`
-        if let Term::Let(var, ty, val, inner) = &term {
-            assert_eq!(var.as_str(), "a");
-            assert_eq!(ty, &Type::Nat);
-            // val should be fst(raw)
-            if let Term::Fst(inner_val) = val.as_ref() {
-                if let Term::Var(v) = inner_val.as_ref() {
-                    assert_eq!(v.as_str(), "raw");
-                } else {
-                    panic!("Expected Var in fst");
-                }
-            } else {
-                panic!("Expected Fst for first field");
-            }
-
-            // Check inner let for b
-            if let Term::Let(var2, ty2, val2, _) = inner.as_ref() {
-                assert_eq!(var2.as_str(), "b");
-                assert_eq!(ty2, &Type::String);
-                // val2 should be snd(raw)
-                if let Term::Snd(inner_val2) = val2.as_ref() {
-                    if let Term::Var(v2) = inner_val2.as_ref() {
-                        assert_eq!(v2.as_str(), "raw");
-                    }
-                } else {
-                    panic!("Expected Snd for second field");
-                }
-            }
-        } else {
-            panic!("Expected Let term");
-        }
-    }
-
-    /// Test wrap_product_destructs handles wildcards (skips them).
-    #[test]
-    fn test_wrap_product_destructs_with_wildcards() {
-        use crate::span::Span;
-
-        let mut elab = make_elaborator();
-        let span = Span::new(0, 0);
-
-        // Simulate binding 2 patterns
-        elab.depth = 2;
-
-        let patterns = vec![
-            Pattern::Wildcard(span), // Should be skipped
-            Pattern::Var(Ident::new("b", span)),
-        ];
-        let field_types = vec![Type::Nat, Type::String];
-        let body = Term::var("result");
-
-        let result = elab.wrap_product_destructs(body.clone(), &patterns, &field_types, "raw");
-        assert!(result.is_ok());
-
-        let term = result.unwrap();
-        // Should only have one let for "b"
-        if let Term::Let(var, _, _, _) = &term {
-            assert_eq!(var.as_str(), "b");
-        } else {
-            panic!("Expected single Let term for non-wildcard");
-        }
-    }
-
-    /// Test wrap_product_destructs generates correct accessors for 3 fields.
-    #[test]
-    fn test_wrap_product_destructs_three_fields() {
-        use crate::span::Span;
-
-        let mut elab = make_elaborator();
-        let span = Span::new(0, 0);
-
-        // Simulate binding 3 patterns
-        elab.depth = 3;
-
-        let patterns = vec![
-            Pattern::Var(Ident::new("a", span)),
-            Pattern::Var(Ident::new("b", span)),
-            Pattern::Var(Ident::new("c", span)),
-        ];
-        let field_types = vec![Type::Nat, Type::String, Type::Bool];
-        let body = Term::var("result");
-
-        let result = elab.wrap_product_destructs(body.clone(), &patterns, &field_types, "raw");
-        assert!(result.is_ok());
-
-        // The structure should be:
-        // let a = fst(raw); let b = fst(snd(raw)); let c = snd(snd(raw)); result
-        // Depth should be decremented by 3
-        assert_eq!(elab.depth, 0);
+        Ok(wrapped)
     }
 }

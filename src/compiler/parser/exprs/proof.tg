@@ -2,48 +2,47 @@
 // Proof construct parsing: return, have, show, assume.
 
 use lexer::token::{TokenKind, TokReturn, TokHave, TokShow, TokAssume, TokSorry, TokRefl,
+    TokSubst, TokSym, TokTrans, TokCong, TokNatInd, TokNatRec,
     TokIntLit, TokStringLit, TokTrue, TokFalse, TokIdent,
-    TokLParen, TokLBrace, TokBang, TokMinus, TokPipe, TokFn, TokIf, TokMatch, TokLet,
-    TokColon, TokEq, TokSemi};
+    TokLParen, TokRParen, TokLBrace, TokBang, TokMinus, TokPipe, TokFn, TokIf, TokMatch, TokLet,
+    TokColon, TokComma, TokEq, TokSemi, TokTry};
 use lexer::span::{Span, span_merge};
 use parser::error::{ParseError, parse_error_expected};
 use parser::cursor::{Cursor, cursor_peek_kind, cursor_advance, cursor_expect,
-    cursor_eat_ident, token_kind_name,
-    ParseResultToken, ParseOkToken, ParseErrToken,
+    cursor_eat_ident, token_kind_name, cursor_check,
     EatIdentResult, SomeIdentResult, NoIdentResult};
+use driver::util::{Result, Ok, Err};
 use parser::option::{Option, None, Some};
 use parser::ast::common::{Ident, ident_new};
-use parser::ast::nodes::{Expr, ExprReturn, ExprHave, ExprShow, ExprAssume, TypeExpr, expr_span,
-    MaybeExpr, NoExpr, SomeExpr};
-use result::{ParseResultExpr, ParseOkExpr, ParseErrExpr, cursor_peek_span};
-use pratt::parse_expr;
-use blocks::parse_block;
-use parser::types::{parse_type, ParseResultType, ParseOkType, ParseErrType};
+use parser::ast::nodes::{Expr, ExprReturn, ExprHave, ExprShow, ExprAssume, ExprSubst, ExprSym, ExprTrans, ExprCong, ExprNatInd, ExprNatRec, TypeExpr, expr_span, type_expr_span,
+    MaybeExpr, NoExpr, SomeExpr,
+    Motive, MotiveLambda, MotiveExpr,
+    LambdaParam, MaybeTypeExpr, SomeTypeExpr, NoTypeExpr};
+use parser::ast::pattern::{Pattern, pattern_span};
+use parser::exprs::result::{cursor_peek_span};
+use parser::exprs::pratt::parse_expr;
+use parser::types::parse_type;
+use parser::exprs::compound::blocks::parse_block;
+use parser::patterns::parse_pattern;
 
 // ===========================================================================
 // RETURN EXPRESSION
 // ===========================================================================
 
 /// Parse a return expression: `return` or `return expr`
-pub fn parse_return(cur: Cursor) -> ParseResultExpr {
+pub fn parse_return(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
     let start_span = cursor_peek_span(cur);
-    
-    match cursor_expect(cur, TokReturn()) {
-        ParseErrToken(e) => ParseErrExpr(e),
-        ParseOkToken(_, cur2) => {
-            // Check if there's an expression to return
-            if can_start_expr(cur2) {
-                match parse_expr(cur2) {
-                    ParseErrExpr(e) => ParseErrExpr(e),
-                    ParseOkExpr(value, cur3) => {
-                        let span = span_merge(start_span, expr_span(value));
-                        ParseOkExpr(ExprReturn(SomeExpr(value), span), cur3)
-                    }
-                }
-            } else {
-                ParseOkExpr(ExprReturn(NoExpr, start_span), cur2)
-            }
-        }
+    let (_, cur2) = cursor_expect(cur, TokReturn())?;
+    parse_return_value(start_span, cur2)
+}
+
+fn parse_return_value(start_span: Span, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    if can_start_expr(cur) {
+        let (value, cur2) = parse_expr(cur)?;
+        let span = span_merge(start_span, expr_span(value));
+        Ok((ExprReturn(SomeExpr(value), span), cur2))
+    } else {
+        Ok((ExprReturn(NoExpr, start_span), cur))
     }
 }
 
@@ -72,6 +71,11 @@ pub fn can_start_expr(cur: Cursor) -> Bool {
             TokAssume() => true,
             TokSorry() => true,
             TokRefl() => true,
+            TokSubst() => true,
+            TokSym() => true,
+            TokTrans() => true,
+            TokCong() => true,
+            TokTry() => true,
             _ => false
         }
     }
@@ -82,128 +86,239 @@ pub fn can_start_expr(cur: Cursor) -> Bool {
 // ===========================================================================
 
 /// Parse a have expression: `have name: Prop = proof; body`
-pub fn parse_have(cur: Cursor) -> ParseResultExpr {
+pub fn parse_have(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
     let start_span = cursor_peek_span(cur);
-    
-    match cursor_expect(cur, TokHave()) {
-        ParseErrToken(e) => ParseErrExpr(e),
-        ParseOkToken(_, cur2) => {
-            match cursor_eat_ident(cur2) {
-                NoIdentResult() => {
-                    let found = match cursor_peek_kind(cur2) {
-                        None() => "end of file",
-                        Some(k) => token_kind_name(k)
-                    };
-                    ParseErrExpr(parse_error_expected("identifier", found, cursor_peek_span(cur2)))
-                },
-                SomeIdentResult(name, cur3) => {
-                    let name_span = cursor_peek_span(cur2);
-                    let name_ident = ident_new(name, name_span);
-                    
-                    match cursor_expect(cur3, TokColon()) {
-                        ParseErrToken(e) => ParseErrExpr(e),
-                        ParseOkToken(_, cur4) => {
-                            match parse_type(cur4) {
-                                ParseErrType(e) => ParseErrExpr(e),
-                                ParseOkType(prop, cur5) => {
-                                    match cursor_expect(cur5, TokEq()) {
-                                        ParseErrToken(e) => ParseErrExpr(e),
-                                        ParseOkToken(_, cur6) => {
-                                            match parse_expr(cur6) {
-                                                ParseErrExpr(e) => ParseErrExpr(e),
-                                                ParseOkExpr(proof, cur7) => {
-                                                    match cursor_expect(cur7, TokSemi()) {
-                                                        ParseErrToken(e) => ParseErrExpr(e),
-                                                        ParseOkToken(_, cur8) => {
-                                                            match parse_expr(cur8) {
-                                                                ParseErrExpr(e) => ParseErrExpr(e),
-                                                                ParseOkExpr(body, cur9) => {
-                                                                    let span = span_merge(start_span, expr_span(body));
-                                                                    ParseOkExpr(ExprHave(name_ident, prop, proof, body, span), cur9)
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    let (_, cur2) = cursor_expect(cur, TokHave())?;
+    parse_have_ident(start_span, cur2)
+}
+
+fn parse_have_ident(start_span: Span, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => parse_have_no_ident(cur),
+        SomeIdentResult(name, cur2) =>
+            parse_have_colon(start_span, ident_new(name, cursor_peek_span(cur)), cur2)
     }
+}
+
+fn parse_have_no_ident(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let found = match cursor_peek_kind(cur) {
+        None() => "end of file",
+        Some(k) => token_kind_name(k)
+    };
+    Err(parse_error_expected("identifier", found, cursor_peek_span(cur)))
+}
+
+fn parse_have_colon(start_span: Span, name: Ident, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokColon())?;
+    parse_have_type(start_span, name, cur2)
+}
+
+fn parse_have_type(start_span: Span, name: Ident, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (prop, cur2) = parse_type(cur)?;
+    parse_have_eq(start_span, name, prop, cur2)
+}
+
+fn parse_have_eq(start_span: Span, name: Ident, prop: TypeExpr, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokEq())?;
+    parse_have_proof(start_span, name, prop, cur2)
+}
+
+fn parse_have_proof(start_span: Span, name: Ident, prop: TypeExpr, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (proof, cur2) = parse_expr(cur)?;
+    parse_have_semi(start_span, name, prop, proof, cur2)
+}
+
+fn parse_have_semi(start_span: Span, name: Ident, prop: TypeExpr, proof: Expr, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokSemi())?;
+    parse_have_body(start_span, name, prop, proof, cur2)
+}
+
+fn parse_have_body(start_span: Span, name: Ident, prop: TypeExpr, proof: Expr, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (body, cur2) = parse_expr(cur)?;
+    let span = span_merge(start_span, expr_span(body));
+    Ok((ExprHave(name, prop, proof, body, span), cur2))
 }
 
 /// Parse a show expression: `show Prop { body }`
-pub fn parse_show(cur: Cursor) -> ParseResultExpr {
+pub fn parse_show(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
     let start_span = cursor_peek_span(cur);
-    
-    match cursor_expect(cur, TokShow()) {
-        ParseErrToken(e) => ParseErrExpr(e),
-        ParseOkToken(_, cur2) => {
-            match parse_type(cur2) {
-                ParseErrType(e) => ParseErrExpr(e),
-                ParseOkType(prop, cur3) => {
-                    match parse_block(cur3) {
-                        ParseErrExpr(e) => ParseErrExpr(e),
-                        ParseOkExpr(body, cur4) => {
-                            let span = span_merge(start_span, expr_span(body));
-                            ParseOkExpr(ExprShow(prop, body, span), cur4)
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let (_, cur2) = cursor_expect(cur, TokShow())?;
+    parse_show_prop(start_span, cur2)
+}
+
+fn parse_show_prop(start_span: Span, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (prop, cur2) = parse_type(cur)?;
+    parse_show_body(start_span, prop, cur2)
+}
+
+fn parse_show_body(start_span: Span, prop: TypeExpr, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (body, cur2) = parse_block(cur)?;
+    let span = span_merge(start_span, expr_span(body));
+    Ok((ExprShow(prop, body, span), cur2))
 }
 
 /// Parse an assume expression: `assume name: Prop; body`
-pub fn parse_assume(cur: Cursor) -> ParseResultExpr {
+pub fn parse_assume(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
     let start_span = cursor_peek_span(cur);
-    
-    match cursor_expect(cur, TokAssume()) {
-        ParseErrToken(e) => ParseErrExpr(e),
-        ParseOkToken(_, cur2) => {
-            match cursor_eat_ident(cur2) {
-                NoIdentResult() => {
-                    let found = match cursor_peek_kind(cur2) {
-                        None() => "end of file",
-                        Some(k) => token_kind_name(k)
-                    };
-                    ParseErrExpr(parse_error_expected("identifier", found, cursor_peek_span(cur2)))
-                },
-                SomeIdentResult(name, cur3) => {
-                    let name_span = cursor_peek_span(cur2);
-                    let name_ident = ident_new(name, name_span);
-                    
-                    match cursor_expect(cur3, TokColon()) {
-                        ParseErrToken(e) => ParseErrExpr(e),
-                        ParseOkToken(_, cur4) => {
-                            match parse_type(cur4) {
-                                ParseErrType(e) => ParseErrExpr(e),
-                                ParseOkType(prop, cur5) => {
-                                    match cursor_expect(cur5, TokSemi()) {
-                                        ParseErrToken(e) => ParseErrExpr(e),
-                                        ParseOkToken(_, cur6) => {
-                                            match parse_expr(cur6) {
-                                                ParseErrExpr(e) => ParseErrExpr(e),
-                                                ParseOkExpr(body, cur7) => {
-                                                    let span = span_merge(start_span, expr_span(body));
-                                                    ParseOkExpr(ExprAssume(name_ident, prop, body, span), cur7)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    let (_, cur2) = cursor_expect(cur, TokAssume())?;
+    parse_assume_ident(start_span, cur2)
+}
+
+fn parse_assume_ident(start_span: Span, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => parse_assume_no_ident(cur),
+        SomeIdentResult(name, cur2) =>
+            parse_assume_colon(start_span, ident_new(name, cursor_peek_span(cur)), cur2)
     }
+}
+
+fn parse_assume_no_ident(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let found = match cursor_peek_kind(cur) {
+        None() => "end of file",
+        Some(k) => token_kind_name(k)
+    };
+    Err(parse_error_expected("identifier", found, cursor_peek_span(cur)))
+}
+
+fn parse_assume_colon(start_span: Span, name: Ident, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokColon())?;
+    parse_assume_type(start_span, name, cur2)
+}
+
+fn parse_assume_type(start_span: Span, name: Ident, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (prop, cur2) = parse_type(cur)?;
+    parse_assume_semi(start_span, name, prop, cur2)
+}
+
+fn parse_assume_semi(start_span: Span, name: Ident, prop: TypeExpr, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokSemi())?;
+    parse_assume_body(start_span, name, prop, cur2)
+}
+
+fn parse_assume_body(start_span: Span, name: Ident, prop: TypeExpr, cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let (body, cur2) = parse_expr(cur)?;
+    let span = span_merge(start_span, expr_span(body));
+    Ok((ExprAssume(name, prop, body, span), cur2))
+}
+
+// ===========================================================================
+// EQUALITY COMBINATORS
+// ===========================================================================
+
+/// Parse `subst(proof, motive, witness)`.
+/// Motive can be `|x: τ| <type-expr>` (predicate lambda) or a raw expression.
+pub fn parse_subst(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let (_, cur2) = cursor_expect(cur, TokSubst())?;
+    let (_, cur3) = cursor_expect(cur2, TokLParen())?;
+    let (proof, cur4) = parse_expr(cur3)?;
+    let (_, cur5) = cursor_expect(cur4, TokComma())?;
+    let (motive, cur6) = parse_motive(cur5)?;
+    let (_, cur7) = cursor_expect(cur6, TokComma())?;
+    let (witness, cur8) = parse_expr(cur7)?;
+    let (_, cur9) = cursor_expect(cur8, TokRParen())?;
+    let span = span_merge(start_span, cursor_peek_span(cur8));
+    Ok((ExprSubst(proof, motive, witness, span), cur9))
+}
+
+/// Parse a motive: `|x: τ| <type-expr>` or a raw expression.
+fn parse_motive(cur: Cursor) -> Result<(Motive, Cursor), ParseError> {
+    if cursor_check(cur, TokPipe()) {
+        parse_motive_lambda(cur)
+    } else {
+        let (e, cur2) = parse_expr(cur)?;
+        Ok((MotiveExpr(e), cur2))
+    }
+}
+
+/// Parse `|param: type| <type-body>` as a motive predicate lambda.
+fn parse_motive_lambda(cur: Cursor) -> Result<(Motive, Cursor), ParseError> {
+    let motive_start = cursor_peek_span(cur);
+    let (_, cur2) = cursor_expect(cur, TokPipe())?;
+    let param_start = cursor_peek_span(cur2);
+    let (pat, cur3) = parse_pattern(cur2)?;
+    // Require type annotation
+    let (_, cur4) = cursor_expect(cur3, TokColon())?;
+    let (param_ty, cur5) = parse_type(cur4)?;
+    let param_span = span_merge(param_start, type_expr_span(param_ty));
+    let param: LambdaParam = {
+        pattern: pat,
+        ty: SomeTypeExpr(param_ty),
+        span: param_span
+    };
+    let (_, cur6) = cursor_expect(cur5, TokPipe())?;
+    let (body, cur7) = parse_type(cur6)?;
+    let span = span_merge(motive_start, type_expr_span(body));
+    Ok((MotiveLambda(param, body, span), cur7))
+}
+
+/// Parse `sym(proof)`.
+pub fn parse_sym(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let (_, cur2) = cursor_expect(cur, TokSym())?;
+    let (_, cur3) = cursor_expect(cur2, TokLParen())?;
+    let (proof, cur4) = parse_expr(cur3)?;
+    let (_, cur5) = cursor_expect(cur4, TokRParen())?;
+    let span = span_merge(start_span, cursor_peek_span(cur4));
+    Ok((ExprSym(proof, span), cur5))
+}
+
+/// Parse `trans(h1, h2)`.
+pub fn parse_trans(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let (_, cur2) = cursor_expect(cur, TokTrans())?;
+    let (_, cur3) = cursor_expect(cur2, TokLParen())?;
+    let (h1, cur4) = parse_expr(cur3)?;
+    let (_, cur5) = cursor_expect(cur4, TokComma())?;
+    let (h2, cur6) = parse_expr(cur5)?;
+    let (_, cur7) = cursor_expect(cur6, TokRParen())?;
+    let span = span_merge(start_span, cursor_peek_span(cur6));
+    Ok((ExprTrans(h1, h2, span), cur7))
+}
+
+/// Parse `cong(f, proof)`.
+pub fn parse_cong(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let (_, cur2) = cursor_expect(cur, TokCong())?;
+    let (_, cur3) = cursor_expect(cur2, TokLParen())?;
+    let (f, cur4) = parse_expr(cur3)?;
+    let (_, cur5) = cursor_expect(cur4, TokComma())?;
+    let (proof, cur6) = parse_expr(cur5)?;
+    let (_, cur7) = cursor_expect(cur6, TokRParen())?;
+    let span = span_merge(start_span, cursor_peek_span(cur6));
+    Ok((ExprCong(f, proof, span), cur7))
+}
+
+/// Parse `natind(motive, base, step, n)`.
+pub fn parse_natind(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let (_, cur2) = cursor_expect(cur, TokNatInd())?;
+    let (_, cur3) = cursor_expect(cur2, TokLParen())?;
+    let (motive, cur4) = parse_motive(cur3)?;
+    let (_, cur5) = cursor_expect(cur4, TokComma())?;
+    let (base, cur6) = parse_expr(cur5)?;
+    let (_, cur7) = cursor_expect(cur6, TokComma())?;
+    let (step, cur8) = parse_expr(cur7)?;
+    let (_, cur9) = cursor_expect(cur8, TokComma())?;
+    let (n, cur10) = parse_expr(cur9)?;
+    let (_, cur11) = cursor_expect(cur10, TokRParen())?;
+    let span = span_merge(start_span, cursor_peek_span(cur10));
+    Ok((ExprNatInd(motive, base, step, n, span), cur11))
+}
+
+/// Parse `natrec(type, base, step, n)`.
+pub fn parse_natrec(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let (_, cur2) = cursor_expect(cur, TokNatRec())?;
+    let (_, cur3) = cursor_expect(cur2, TokLParen())?;
+    let (ty, cur4) = parse_type(cur3)?;
+    let (_, cur5) = cursor_expect(cur4, TokComma())?;
+    let (base, cur6) = parse_expr(cur5)?;
+    let (_, cur7) = cursor_expect(cur6, TokComma())?;
+    let (step, cur8) = parse_expr(cur7)?;
+    let (_, cur9) = cursor_expect(cur8, TokComma())?;
+    let (n, cur10) = parse_expr(cur9)?;
+    let (_, cur11) = cursor_expect(cur10, TokRParen())?;
+    let span = span_merge(start_span, cursor_peek_span(cur10));
+    Ok((ExprNatRec(ty, base, step, n, span), cur11))
 }

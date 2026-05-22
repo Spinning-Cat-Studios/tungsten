@@ -1,0 +1,189 @@
+// File I/O FFI declarations and safe wrappers.
+
+use driver::ffi::types::{
+    CString, Int, Ptr,
+    string_to_cstring, cstring_to_string, cstring_is_null,
+    string_len, string_char_at_internal, string_append_char,
+    tg_free_string,
+    FfiResult, FfiOk, FfiErr
+};
+use driver::ffi::types::{List, Nil, Cons, ffi_list_reverse};
+
+// --- Raw FFI Declarations ---
+
+extern "C" fn tg_read_file(path: CString) -> CString
+extern "C" fn tg_write_file(path: CString, content: CString, len: Nat) -> Int
+extern "C" fn tg_file_exists(path: CString) -> Int
+extern "C" fn tg_is_directory(path: CString) -> Int
+extern "C" fn tg_list_directory(path: CString) -> CString
+extern "C" fn tg_parent_directory(path: CString) -> CString
+extern "C" fn tg_path_join(base: CString, child: CString) -> CString
+extern "C" fn tg_driver_get_last_error() -> CString
+extern "C" fn tg_sha256(data: CString) -> CString
+extern "C" fn tg_mkdir_p(path: CString) -> Int
+
+// --- Safe Wrappers ---
+
+pub fn read_file(path: String) -> FfiResult<String> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_read_file(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error reading file")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    } else {
+        let contents = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        FfiOk(contents)
+    }
+}
+
+pub fn write_file(path: String, content: String) -> FfiResult<Unit> {
+    let path_c = string_to_cstring(path);
+    let content_c = string_to_cstring(content);
+    let len = string_len(content);
+    let result = tg_write_file(path_c, content_c, len);
+    tg_free_string(path_c);
+    tg_free_string(content_c);
+    
+    if result == 0 {
+        FfiOk(())
+    } else {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error writing file")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    }
+}
+
+pub fn file_exists(path: String) -> Bool {
+    let path_c = string_to_cstring(path);
+    let result = tg_file_exists(path_c);
+    tg_free_string(path_c);
+    result == 1
+}
+
+pub fn is_directory(path: String) -> Bool {
+    let path_c = string_to_cstring(path);
+    let result = tg_is_directory(path_c);
+    tg_free_string(path_c);
+    result == 1
+}
+
+pub fn list_directory(path: String) -> FfiResult<List<String>> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_list_directory(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error listing directory")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    } else {
+        let entries_str = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        FfiOk(split_by_newline(entries_str))
+    }
+}
+
+pub fn parent_directory(path: String) -> Option<String> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_parent_directory(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let parent = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(parent)
+    }
+}
+
+pub fn path_join(base: String, child: String) -> String {
+    let base_c = string_to_cstring(base);
+    let child_c = string_to_cstring(child);
+    let result_c = tg_path_join(base_c, child_c);
+    tg_free_string(base_c);
+    tg_free_string(child_c);
+    
+    if cstring_is_null(result_c) {
+        ""
+    } else {
+        let joined = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        joined
+    }
+}
+
+/// Compute SHA-256 hash of a string, returning the hex-encoded digest.
+pub fn sha256(data: String) -> String {
+    let data_c = string_to_cstring(data);
+    let result_c = tg_sha256(data_c);
+    tg_free_string(data_c);
+    let result = cstring_to_string(result_c);
+    tg_free_string(result_c);
+    result
+}
+
+/// Recursively create directories (like `mkdir -p`).
+pub fn mkdir_p(path: String) -> FfiResult<Unit> {
+    let path_c = string_to_cstring(path);
+    let result = tg_mkdir_p(path_c);
+    tg_free_string(path_c);
+    if result == 0 {
+        FfiOk(())
+    } else {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error creating directory")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    }
+}
+
+// --- Internal Helpers ---
+
+fn split_by_newline(s: String) -> List<String> {
+    split_by_newline_acc(s, 0, string_len(s), "", Nil)
+}
+
+fn split_by_newline_acc(s: String, i: Nat, len: Nat, current: String, acc: List<String>) -> List<String> {
+    if i >= len {
+        if string_len(current) > 0 {
+            ffi_list_reverse(Cons(current, acc))
+        } else {
+            ffi_list_reverse(acc)
+        }
+    } else {
+        let c = string_char_at_internal(s, i);
+        if c == 10 {
+            if string_len(current) > 0 {
+                split_by_newline_acc(s, i + 1, len, "", Cons(current, acc))
+            } else {
+                split_by_newline_acc(s, i + 1, len, "", acc)
+            }
+        } else {
+            split_by_newline_acc(s, i + 1, len, string_append_char(current, c), acc)
+        }
+    }
+}

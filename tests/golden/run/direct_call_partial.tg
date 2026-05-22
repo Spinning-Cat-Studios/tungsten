@@ -1,0 +1,19 @@
+// Test: partial application of multi-arg functions still works via closure path.
+// When fewer arguments than arity are supplied, the function should create a closure
+// and apply remaining arguments later.
+
+pub fn add(a: Nat, b: Nat) -> Nat {
+    a + b
+}
+
+pub fn apply(f: Nat -> Nat, x: Nat) -> Nat {
+    f(x)
+}
+
+fn main() -> Nat {
+    // Partial application: add(10) returns a closure waiting for the second arg
+    let add10 = add(10);
+    // Pass the partially applied function as a value
+    let result = apply(add10, 32);
+    result
+}

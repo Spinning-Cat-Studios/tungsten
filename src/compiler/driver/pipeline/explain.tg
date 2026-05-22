@@ -1,0 +1,116 @@
+// src/compiler/driver/pipeline/explain.tg
+// Explain subcommand implementations for the self-hosted compiler.
+//
+// Provides static explanations for compiler flags and error codes.
+// See ADR 18.4.26f §5.1.
+
+use driver::ffi::{println};
+use driver::cli::{ExplainOpts};
+use driver::util::{string_eq};
+
+// ===========================================================================
+// EXPLAIN DISPATCH
+// ===========================================================================
+
+/// Run an `explain` subcommand.
+pub fn run_explain(opts: ExplainOpts) -> Unit {
+    match opts {
+        ExplainFlag(name) => explain_flag(name),
+        ExplainError(code) => explain_error_code(code),
+        ExplainErrorList() => explain_error_list()
+    }
+}
+
+// ===========================================================================
+// EXPLAIN FLAG
+// ===========================================================================
+
+/// Explain what a compiler flag does.
+fn explain_flag(name: String) -> Unit {
+    if string_eq(name, "--dump-core") {
+        println("--dump-core PATTERN");
+        println("");
+        println("  Dump the Core IR representation for definitions matching PATTERN.");
+        println("  PATTERN is a comma-separated list of definition name substrings,");
+        println("  or '*' to dump all definitions.");
+        println("");
+        println("  The output includes the elaborated term, its type, and any free");
+        println("  TyVars remaining after elaboration.");
+        println("");
+        println("  Requires a developer build (make self-compile-dev).");
+        println("");
+        println("  Examples:");
+        println("    tungsten1 check file.tg --dump-core main");
+        println("    tungsten1 check file.tg --dump-core 'parse,lex'");
+        println("    tungsten1 check file.tg --dump-core '*'")
+    } else if string_eq(name, "--check-tyvar-escape") {
+        println("--check-tyvar-escape");
+        println("");
+        println("  Report free TyVar escapes after elaboration.");
+        println("  A TyVar escape occurs when a monomorphized definition retains");
+        println("  unresolved type variables — typically indicating an elaboration bug.");
+        println("");
+        println("  Requires a developer build (make self-compile-dev).");
+        println("");
+        println("  Example:");
+        println("    tungsten1 check file.tg --check-tyvar-escape")
+    } else if string_eq(name, "--emit-llvm") {
+        println("--emit-llvm");
+        println("");
+        println("  Emit LLVM IR (.ll file) instead of compiling to a native executable.");
+        println("  Used with the `compile` subcommand.");
+        println("");
+        println("  Example:");
+        println("    tungsten1 compile file.tg --emit-llvm -o output.ll")
+    } else if string_eq(name, "--verbose") || string_eq(name, "-v") {
+        println("--verbose / -v");
+        println("");
+        println("  Enable verbose output. Shows additional progress information");
+        println("  during compilation.")
+    } else if string_eq(name, "--max-errors") {
+        println("--max-errors N");
+        println("");
+        println("  Maximum number of errors to display before stopping.");
+        println("  Default: 20. Set to 0 for unlimited.");
+        println("");
+        println("  Example:");
+        println("    tungsten1 check file.tg --max-errors 0")
+    } else {
+        println("Unknown flag. Available flags:");
+        println("  --dump-core PATTERN");
+        println("  --check-tyvar-escape");
+        println("  --emit-llvm");
+        println("  --verbose / -v");
+        println("  --max-errors N");
+        println("  -o / --output PATH")
+    }
+}
+
+// ===========================================================================
+// EXPLAIN ERROR
+// ===========================================================================
+
+/// List all known error codes.
+fn explain_error_list() -> Unit {
+    println("Error codes:");
+    println("  E0001  Syntax error");
+    println("  E0002  Type mismatch");
+    println("  E0003  Undefined variable");
+    println("  E0004  Undefined type");
+    println("  E0005  Duplicate definition");
+    println("  E0006  Module not found");
+    println("  E0007  Duplicate import");
+    println("  E0008  Pattern match not exhaustive");
+    println("  E0009  Unreachable pattern");
+    println("  E0010  Arity mismatch");
+    println("");
+    println("Use 'tungsten explain error E0001' for details on a specific code.")
+}
+
+/// Explain a specific error code.
+fn explain_error_code(_code: String) -> Unit {
+    // For now, print a placeholder — detailed error catalog
+    // can be expanded or wired to the bootstrap's error catalog via FFI.
+    println("Detailed error explanations are not yet implemented.");
+    println("Use 'tungsten explain error' to see the list of known codes.")
+}

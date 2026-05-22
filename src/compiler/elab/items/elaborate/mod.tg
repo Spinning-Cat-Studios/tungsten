@@ -1,0 +1,99 @@
+// src/compiler/elab/items/elaborate/mod.tg
+// Body elaboration for items.
+//
+// This module elaborates item bodies after collection is complete.
+// The collection phase registered all type and value signatures, so
+// bodies can now reference any definition in scope.
+
+pub mod helpers;
+pub mod functions;
+pub mod proofs;
+
+pub use elab::items::elaborate::helpers::*;
+pub use elab::items::elaborate::functions::*;
+pub use elab::items::elaborate::proofs::*;
+
+use parser::ast::{
+    Item, ItemFn, ItemType, ItemTypeAlias, ItemTheorem, ItemLemma,
+    ItemAxiom, ItemExtern, ItemMod, ItemUse, ItemError,
+    FunctionDef, TypeDef, TypeAliasDef, TheoremDef, AxiomDef,
+    ExternFnDef, ModDecl, UseDecl
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::items::result::{
+    ElabContext,
+    ElabItemResult, ElabItemOk, ElabItemErr, ElabItemSkip,
+    ElabDef
+};
+use elab::items::elaborate::functions::{elaborate_fn_body};
+use elab::items::elaborate::proofs::{
+    elaborate_theorem_body, elaborate_axiom_body, elaborate_extern_body
+};
+
+// ===========================================================================
+// ELABORATION ENTRY POINT
+// ===========================================================================
+
+/// Elaborate all item bodies after collection.
+/// Returns the list of elaborated definitions.
+pub fn elaborate_item_bodies(ctx: ElabContext, items: List<Item>) -> (ElabContext, List<ElabDef>) {
+    let result = elaborate_items_rec(ctx, items, Nil());
+    result
+}
+
+/// Recursive item body elaboration.
+fn elaborate_items_rec(
+    ctx: ElabContext,
+    items: List<Item>,
+    acc: List<ElabDef>
+) -> (ElabContext, List<ElabDef>) {
+    match items {
+        Nil() => 
+            (ctx, acc),
+        Cons(item, rest) =>
+            let (ctx2, new_acc) = elaborate_items_step(ctx, item, acc);
+            elaborate_items_rec(ctx2, rest, new_acc)
+    }
+}
+
+fn elaborate_items_step(
+    ctx: ElabContext,
+    item: Item,
+    acc: List<ElabDef>
+) -> (ElabContext, List<ElabDef>) {
+    match elaborate_item_body(ctx, item) {
+        ElabItemOk(ctx2, def) =>
+            (ctx2, Cons(def, acc)),
+        ElabItemErr(ctx2) =>
+            (ctx2, acc),
+        ElabItemSkip(ctx2) =>
+            (ctx2, acc)
+    }
+}
+
+/// Elaborate a single item's body.
+fn elaborate_item_body(ctx: ElabContext, item: Item) -> ElabItemResult {
+    match item {
+        ItemFn(def) => 
+            elaborate_fn_body(ctx, def),
+        ItemTheorem(def) => 
+            elaborate_theorem_body(ctx, def),
+        ItemLemma(def) => 
+            elaborate_theorem_body(ctx, def),  // Same as theorem
+        ItemAxiom(def) => 
+            elaborate_axiom_body(ctx, def),
+        ItemExtern(def) => 
+            elaborate_extern_body(ctx, def),
+        // These don't produce Core definitions (handled in collection)
+        ItemType(_) => 
+            ElabItemSkip(ctx),
+        ItemTypeAlias(_) => 
+            ElabItemSkip(ctx),
+        ItemMod(_) => 
+            ElabItemSkip(ctx),
+        ItemUse(_) => 
+            ElabItemSkip(ctx),
+        ItemError(span) => 
+            ElabItemSkip(ctx)
+    }
+}

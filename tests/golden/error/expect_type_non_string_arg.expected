@@ -1,0 +1,9 @@
+[E9999] Error: expect_type: second argument must be a string literal
+   ╭─[tests/golden/error/expect_type_non_string_arg.tg:4:21]
+   │
+ 4 │     expect_type(42, 1);
+   │                     ┬  
+   │                     ╰── 
+───╯
+
+error: aborting due to 1 error

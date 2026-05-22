@@ -1,0 +1,12 @@
+// Regression test: constructor from sibling module visible during
+// body elaboration in another sibling.
+// Verifies Phase A constructor stubs + Phase A.5 combined collection
+// make constructors available across sibling branches.
+// See ADR 6.5.26e §6, acceptance criterion "constructor sibling import".
+
+pub mod shapes;
+pub mod renderer;
+
+fn main() -> Nat {
+    renderer::render()
+}

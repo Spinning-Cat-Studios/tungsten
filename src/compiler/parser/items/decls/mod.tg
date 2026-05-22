@@ -1,0 +1,6 @@
+// src/compiler/parser/items/decls/mod.tg
+// Value-level declaration parsing: functions, extern functions, and theorems.
+
+pub mod functions;
+pub mod extern_fn;
+pub mod theorems;

@@ -1,0 +1,249 @@
+// src/compiler/parser/ast/nodes/items.tg
+// Item-level AST node types: type definitions, functions, extern, use, mod, source file.
+
+use lexer::span::Span;
+use parser::ast::common::{
+    Visibility, VisPrivate,
+    Ident,
+    MaybeString,
+    Path
+};
+use parser::ast::nodes::types::{TypeExpr, MaybeTypeExpr};
+use parser::ast::nodes::exprs::{Expr};
+use parser::ast::pattern::{Pattern};
+use parser::option::{Option, Some, None};
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// ITEM SUPPORTING TYPES
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Type Parameter
+// ---------------------------------------------------------------------------
+
+/// A type parameter in a generic definition.
+pub type TypeParam = {
+    name: Ident,
+    bounds: List<TypeExpr>,   // Future: trait bounds
+    span: Span
+}
+
+// ---------------------------------------------------------------------------
+// Function Parameter
+// ---------------------------------------------------------------------------
+
+/// A function parameter.
+pub type Param = {
+    pattern: Pattern,
+    ty: TypeExpr,
+    span: Span
+}
+
+// ---------------------------------------------------------------------------
+// Extern Parameter
+// ---------------------------------------------------------------------------
+
+/// A parameter in an extern function declaration.
+pub type ExternParam = {
+    name: Ident,
+    ty: TypeExpr,
+    span: Span
+}
+
+// ---------------------------------------------------------------------------
+// Type Definition Body
+// ---------------------------------------------------------------------------
+
+/// A variant of an ADT (sum type).
+/// Fields are positional type expressions (e.g., `Cons(T, List<T>)`).
+pub type Variant = {
+    name: Ident,
+    fields: List<TypeExpr>,
+    span: Span
+}
+
+/// A field in a record type definition.
+pub type RecordField = {
+    name: Ident,
+    ty: TypeExpr,
+    span: Span
+}
+
+/// The body of a type definition.
+pub type TypeBody =
+    | TypeBodySum(List<Variant>)         // Sum type: | A | B(T) | C(T, U)
+    | TypeBodyRecord(List<RecordField>)  // Record type: { x: T, y: U }
+
+/// Type definition body variants (alternative naming for type definitions).
+pub type TypeDefBody =
+    | TypeDefAlias(TypeExpr)           // Type alias: type Foo = Bar
+    | TypeDefAdt(List<Variant>)          // ADT: type Foo = | A | B(T)
+    | TypeDefRecord(List<RecordField>)   // Record: type Foo = { x: T, y: U }
+
+// ---------------------------------------------------------------------------
+// Use Tree
+// ---------------------------------------------------------------------------
+
+/// The tree structure of a use statement.
+pub type UseTree =
+    | UseTreePath(Path)                         // use foo::bar;
+    | UseTreeSimple(Path)                       // use foo::bar; (alias for UseTreePath)
+    | UseTreeAlias(Path, Ident)                 // use foo::bar as baz; (2-arg version)
+    | UseTreeRename(Path, Ident, Span)          // use foo::bar as baz; (with span)
+    | UseTreeGroup(Path, List<UseTree>, Span)     // use foo::{bar, baz};
+    | UseTreeNested(Path, List<UseTree>, Span)    // use foo::{bar, baz}; (alias for UseTreeGroup)
+    | UseTreeGlob(Path, Span)                   // use foo::*;
+
+// ===========================================================================
+// ITEM DEFINITIONS
+// ===========================================================================
+
+/// A function definition.
+pub type FunctionDef = {
+    vis: Visibility,
+    name: Ident,
+    type_params: List<TypeParam>,
+    params: List<Param>,
+    return_type: MaybeTypeExpr,
+    body: Expr,
+    span: Span
+}
+
+/// A type definition (ADT or record).
+pub type TypeDef = {
+    vis: Visibility,
+    name: Ident,
+    type_params: List<TypeParam>,
+    body: TypeDefBody,
+    span: Span
+}
+
+/// A type alias.
+pub type TypeAliasDef = {
+    vis: Visibility,
+    name: Ident,
+    type_params: List<TypeParam>,
+    ty: TypeExpr,
+    span: Span
+}
+
+/// A theorem or lemma definition.
+pub type TheoremDef = {
+    vis: Visibility,
+    name: Ident,
+    type_params: List<TypeParam>,
+    params: List<Param>,
+    prop: TypeExpr,
+    body: Expr,
+    span: Span
+}
+
+/// An axiom definition (theorem without proof).
+pub type AxiomDef = {
+    vis: Visibility,
+    name: Ident,
+    type_params: List<TypeParam>,
+    params: List<Param>,
+    prop: TypeExpr,
+    span: Span
+}
+
+/// An external function declaration (FFI).
+pub type ExternFnDef = {
+    vis: Visibility,
+    name: Ident,
+    symbol: MaybeString,
+    abi: Option<String>,
+    params: List<ExternParam>,
+    return_type: MaybeTypeExpr,
+    span: Span
+}
+
+/// A module declaration.
+pub type ModDecl = {
+    vis: Visibility,
+    name: Ident,
+    span: Span
+}
+
+/// A use declaration.
+pub type UseDecl = {
+    vis: Visibility,
+    tree: UseTree,
+    span: Span
+}
+
+// ===========================================================================
+// ITEM
+// ===========================================================================
+
+/// A top-level item.
+pub type Item =
+    | ItemFn(FunctionDef)
+    | ItemType(TypeDef)
+    | ItemTypeAlias(TypeAliasDef)
+    | ItemTheorem(TheoremDef)
+    | ItemLemma(TheoremDef)
+    | ItemAxiom(AxiomDef)
+    | ItemExtern(ExternFnDef)
+    | ItemMod(ModDecl)
+    | ItemUse(UseDecl)
+    | ItemError(Span)
+
+/// Get the span of an item.
+pub fn item_span(item: Item) -> Span {
+    match item {
+        ItemFn(f) => f.span,
+        ItemType(t) => t.span,
+        ItemTypeAlias(t) => t.span,
+        ItemTheorem(t) => t.span,
+        ItemLemma(t) => t.span,
+        ItemAxiom(a) => a.span,
+        ItemExtern(e) => e.span,
+        ItemMod(m) => m.span,
+        ItemUse(u) => u.span,
+        ItemError(s) => s
+    }
+}
+
+/// Get the visibility of an item.
+pub fn item_visibility(item: Item) -> Visibility {
+    match item {
+        ItemFn(f) => f.vis,
+        ItemType(t) => t.vis,
+        ItemTypeAlias(t) => t.vis,
+        ItemTheorem(t) => t.vis,
+        ItemLemma(t) => t.vis,
+        ItemAxiom(a) => a.vis,
+        ItemExtern(e) => e.vis,
+        ItemMod(m) => m.vis,
+        ItemUse(u) => u.vis,
+        ItemError(_) => VisPrivate
+    }
+}
+
+// ===========================================================================
+// SOURCE FILE
+// ===========================================================================
+
+/// A complete source file.
+pub type SourceFile = {
+    items: List<Item>,
+    span: Span
+}
+
+/// Create a new source file.
+pub fn source_file_new(items: List<Item>, span: Span) -> SourceFile {
+    { items: items, span: span }
+}
+
+/// Get the items in a source file.
+pub fn source_file_items(f: SourceFile) -> List<Item> {
+    f.items
+}
+
+/// Get the span of a source file.
+pub fn source_file_span(f: SourceFile) -> Span {
+    f.span
+}

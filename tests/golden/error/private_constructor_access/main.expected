@@ -1,0 +1,9 @@
+[E0016] Error: constructor `Red` is private (defined in `helper`) and cannot be accessed from `<root>`
+   ╭─[tests/golden/error/private_constructor_access/main.tg:6:13]
+   │
+ 6 │     let x = helper::Red;
+   │             ─────┬─────  
+   │                  ╰─────── 
+───╯
+
+error: aborting due to 1 error

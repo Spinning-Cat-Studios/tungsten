@@ -1,0 +1,130 @@
+// src/compiler/parser/items/types/mod.tg
+// Type definition parsing: ADT, record, and alias types.
+
+pub mod adt;
+pub mod records;
+
+use lexer::token::{TokenKind, TokType, TokEq, TokPipe, TokLParen, TokRParen,
+    TokLBrace, TokRBrace, TokComma, TokColon};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, Visibility};
+use parser::ast::nodes::{Item, ItemType, TypeExpr, type_expr_span, TypeDefBody,
+    TypeDefAdt, TypeDefRecord, TypeDefAlias,
+    Variant, RecordField, TypeParam};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use driver::util::{Result, Ok, Err};
+use parser::items::shared::type_params::{parse_optional_type_params};
+use parser::types::{parse_type};
+use parser::items::types::adt::{parse_adt_body, is_adt_start};
+use parser::items::types::records::{parse_record_body};
+
+/// Parse a type definition.
+///
+/// Grammar:
+///   Type = "type" IDENT TypeParams? "=" TypeDefBody
+///   TypeDefBody = AdtBody | RecordBody | TypeExpr
+pub fn parse_type_item(cur: Cursor, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
+    let cur2 = cursor_advance(cur);
+    match cursor_eat_ident(cur2) {
+        NoIdentResult() =>
+            parse_type_item_no_ident(cur2),
+        SomeIdentResult(name, cur3) =>
+            parse_type_item_after_name(vis, start_span, name, cursor_peek_span(cur2), cur3)
+    }
+}
+
+fn parse_type_item_no_ident(cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let found = match cursor_peek_kind(cur) {
+        None() => "end of file",
+        Some(k) => token_kind_name(k)
+    };
+    Err(parse_error_expected("type name", found, cursor_peek_span(cur)))
+}
+
+/// Accumulated parser state for type item declarations.
+type TypeItemCtx = {
+    vis: Visibility,
+    start_span: Span,
+    name: String,
+    name_span: Span,
+    type_params: List<TypeParam>
+}
+
+fn parse_type_item_after_name(vis: Visibility, start_span: Span, name: String, name_span: Span, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (type_params, cur2) = parse_optional_type_params(cur)?;
+    let ctx: TypeItemCtx = {
+        vis: vis, start_span: start_span, name: name,
+        name_span: name_span, type_params: type_params
+    };
+    parse_type_item_eq(ctx, cur2)
+}
+
+fn parse_type_item_eq(ctx: TypeItemCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokEq())?;
+    parse_type_item_body(ctx, cur2)
+}
+
+fn parse_type_item_body(ctx: TypeItemCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    let (body, end_span, cur2) = parse_type_def_body(cur)?;
+    build_type_item(ctx, body, end_span, cur2)
+}
+
+fn build_type_item(ctx: TypeItemCtx, body: TypeDefBody, end_span: Span, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
+    match body {
+        TypeDefAlias(ty) => {
+            let alias_def: TypeAliasDef = {
+                vis: ctx.vis,
+                name: ident_new(ctx.name, ctx.name_span),
+                type_params: ctx.type_params,
+                ty: ty,
+                span: span_merge(ctx.start_span, end_span)
+            };
+            Ok((ItemTypeAlias(alias_def), cur))
+        },
+        _ => {
+            let type_def: TypeDef = {
+                vis: ctx.vis,
+                name: ident_new(ctx.name, ctx.name_span),
+                type_params: ctx.type_params,
+                body: body,
+                span: span_merge(ctx.start_span, end_span)
+            };
+            Ok((ItemType(type_def), cur))
+        }
+    }
+}
+
+/// Parse the body of a type definition.
+/// Determines if it's an ADT (|), record ({), or type alias.
+fn parse_type_def_body(cur: Cursor) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
+    match cursor_peek_kind(cur) {
+        None() =>
+            Err(parse_error_expected("type body", "end of file", cursor_peek_span(cur))),
+        Some(kind) =>
+            parse_type_def_body_kind(cur, kind)
+    }
+}
+
+fn parse_type_def_body_kind(cur: Cursor, kind: TokenKind) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
+    match kind {
+        TokPipe() => parse_adt_body(cur),
+        TokLBrace() => parse_record_body(cur),
+        _ => parse_type_def_body_default(cur)
+    }
+}
+
+fn parse_type_def_body_default(cur: Cursor) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
+    if is_adt_start(cur) {
+        parse_adt_body(cur)
+    } else {
+        let (ty, cur2) = parse_type(cur)?;
+        let ty_span = type_expr_span(ty);
+        Ok((TypeDefAlias(ty), ty_span, cur2))
+    }
+}

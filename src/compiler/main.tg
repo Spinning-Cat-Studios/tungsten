@@ -16,6 +16,7 @@ mod driver;
 mod lexer;
 mod parser;
 mod elab;
+mod codegen;
 
 use driver::{
     // CLI parsing

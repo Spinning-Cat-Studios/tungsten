@@ -1,0 +1,36 @@
+// Test if-let expression (ADR 14.5.26e).
+// expect_type assertions verify types at cost 3 (no LLVM).
+// Runtime value correctness is delegated to the existing match codegen path
+// since if-let is pure desugaring.
+
+type Option<T> = Some(T) | None
+
+fn id(x: Nat) -> Nat { x }
+
+// AC1: if let with else, value extraction
+fn test_if_let_some() -> () {
+    let result = if let Some(x) = Some(42) { x } else { 0 };
+    expect_type(result, "Nat");
+    ()
+}
+
+// AC2: if let with else, fallback branch
+fn test_if_let_none() -> () {
+    let opt: Option<Nat> = None();
+    let result = if let Some(x) = opt { x } else { 99 };
+    expect_type(result, "Nat");
+    ()
+}
+
+// AC3: if let without else has type ()
+fn test_if_let_no_else() -> () {
+    let result = if let Some(x) = Some(1) { id(x); () };
+    expect_type(result, "Unit");
+    ()
+}
+
+// AC5: irrefutable pattern produces W0004 (tested in Rust tests)
+
+// AC6: type mismatch tested in Rust tests
+
+// AC8: non-unit body without else tested in Rust tests

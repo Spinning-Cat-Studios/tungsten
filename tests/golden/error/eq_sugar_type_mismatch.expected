@@ -1,0 +1,15 @@
+warning: Phase A.5 global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0010]: expected `Nat`, found `Bool` (at 57..66)
+  note: both sides of equality must have the same type
+  hint: run `tungsten doctor check phase-a5 <file>` for details
+[E0010] Error: expected `Nat`, found `Bool`
+   ╭─[tests/golden/error/eq_sugar_type_mismatch.tg:2:11]
+   │
+ 2 │ fn f() -> 0 == true { refl }
+   │           ────┬────  
+   │               ╰────── expected `Nat`, found `Bool`
+   │ 
+   │ Note: both sides of equality must have the same type
+───╯
+
+error: aborting due to 1 error

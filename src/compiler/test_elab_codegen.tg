@@ -1,0 +1,3 @@
+mod elab;
+mod codegen;
+pub fn main() -> Nat { 0 }

@@ -30,7 +30,7 @@ pub mod lib;
 // - parser::lib::file_parse_error_count(result) -> Nat
 
 // Re-export main API for convenient access
-pub use lib::{
+pub use parser::lib::{
     parse_file, parse_source, parse_to_source_file,
     FileParseResult, FullParseResult,
     file_parse_ok, full_parse_ok, file_parse_error_count,
@@ -38,7 +38,7 @@ pub use lib::{
 };
 
 // Re-export error types and formatting
-pub use error::{
+pub use parser::error::{
     ParseError, ParseErrors, NoParseErrors, ConsParseError,
     parse_error_new, parse_error_expected, parse_error_eof,
     parse_errors_empty, parse_errors_push, parse_error_count,

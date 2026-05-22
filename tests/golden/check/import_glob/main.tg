@@ -1,0 +1,10 @@
+// Test: glob import brings all public items into scope.
+
+pub mod mymod;
+
+use mymod::*;
+
+fn main() -> Nat {
+    let x: GlobType = 42;
+    glob_fn(x)
+}

@@ -1,0 +1,19 @@
+warning: Phase A.5 global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0007]: the name `Foo` is imported from both `mod_a` and `mod_b` (at 196..199)
+  note: first imported from `mod_a` (at 180..183)
+  help: use `as` to rename one import: `use mod_b::Bar as bar_alias;`
+  hint: run `tungsten doctor check phase-a5 <file>` for details
+[E0007] Error: the name `Foo` is imported from both `mod_a` and `mod_b`
+   ╭─[tests/golden/error/duplicate_import_as_alias/main.tg:7:12]
+   │
+ 6 │ use mod_a::Foo;
+   │            ─┬─  
+   │             ╰─── first imported from `mod_a`
+ 7 │ use mod_b::Bar as Foo;
+   │            ─┬─  
+   │             ╰─── 
+   │ 
+   │ Help: use `as` to rename one import: `use mod_b::Bar as bar_alias;`
+───╯
+
+error: aborting due to 1 error

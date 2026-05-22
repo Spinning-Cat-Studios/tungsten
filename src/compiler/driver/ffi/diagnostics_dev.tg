@@ -1,0 +1,76 @@
+// Diagnostic bridge — DEVELOPER build (real FFI wrappers).
+//
+// This file provides real diagnostic tool implementations via FFI.
+// It is swapped in by `make self-compile-dev` during developer builds.
+// See ADR 18.4.26f for conditional compilation design.
+
+use driver::ffi::types::{
+    CString,
+    string_to_cstring, cstring_to_string, cstring_is_null,
+    tg_free_string,
+    invalid_handle,
+    List, Cons, Nil
+};
+use elab::ffi::{TermHandle, TypeHandle};
+
+// --- Raw FFI Declarations ---
+
+extern "C" fn tg_diagnostic_dump_core(name: CString, term: TermHandle, ty: TypeHandle) -> CString
+extern "C" fn tg_diagnostic_check_tyvar_escape(term: TermHandle) -> CString
+extern "C" fn tg_diagnostic_tyvar_escape_count(term: TermHandle) -> Nat
+
+// --- Safe Wrappers ---
+
+/// Dump Core IR for a single definition.
+/// Returns a formatted string with term, type, and free TyVars,
+/// or None on error.
+pub fn diagnostic_dump_core(name: String, term: TermHandle, ty: TypeHandle) -> Option<String> {
+    let name_c = string_to_cstring(name);
+    let result_c = tg_diagnostic_dump_core(name_c, term, ty);
+    tg_free_string(name_c);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+/// Check whether a term has free TyVar escapes.
+/// Returns Some with comma-separated TyVar names if escapes exist,
+/// or None if the term is clean (no escapes).
+pub fn diagnostic_check_tyvar_escape(term: TermHandle) -> Option<String> {
+    let result_c = tg_diagnostic_check_tyvar_escape(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+/// Count free TyVar escapes in a term.
+/// Returns the count, or None on error (invalid handle).
+pub fn diagnostic_tyvar_escape_count(term: TermHandle) -> Option<Nat> {
+    let count = tg_diagnostic_tyvar_escape_count(term);
+    if count == invalid_handle() {
+        None
+    } else {
+        Some(count)
+    }
+}
+
+// --- Capability Discovery ---
+
+/// Diagnostic capability — one variant per diagnostic tool.
+pub type DiagnosticCapability =
+    | DumpCore
+    | CheckTyvarEscape
+
+/// Query which diagnostic tools are compiled into this binary.
+/// Developer builds return the full list; production stubs return Nil.
+pub fn diagnostic_capabilities() -> List<DiagnosticCapability> {
+    Cons(DumpCore, Cons(CheckTyvarEscape, Nil))
+}

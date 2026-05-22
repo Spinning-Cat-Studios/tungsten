@@ -1,0 +1,10 @@
+// Test: import aliasing with `as` keyword (ADR 16.5.26b)
+mod math;
+
+use math::add as plus;
+use math::Point as Pt;
+
+fn main() -> Nat {
+    let p: Pt = { x: 1, y: 2 }
+    plus(p.x, p.y)
+}

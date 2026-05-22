@@ -6,6 +6,7 @@
 use crate::ast;
 use crate::span::Spanned;
 
+use tungsten_core::terms::{SpannedTerm, TermSpan};
 use tungsten_core::Term;
 
 use crate::elaborate::error::{ElabError, ElabErrorKind, ExpectedContext};
@@ -44,7 +45,7 @@ impl<'a> Elaborator<'a> {
         Ok(CoreDef {
             name: func.name.name.clone(),
             ty: func_ty,
-            term,
+            term: SpannedTerm::new(term, TermSpan::new(func.span.start, func.span.end)),
             span: func.span,
         })
     }
@@ -67,7 +68,9 @@ impl<'a> Elaborator<'a> {
             let expected = self.elab_type(ret_ty)?;
             // Push context for better error messages
             self.push_context(ExpectedContext::return_type(ret_ty.span()));
-            let result = self.check(&func.body, &expected);
+            let result = self.with_return_context(Some(expected.clone()), |elab| {
+                elab.check(&func.body, &expected)
+            });
             self.pop_context();
             result?
         } else {
@@ -118,7 +121,7 @@ impl<'a> Elaborator<'a> {
         Ok(CoreDef {
             name: thm.name.name.clone(),
             ty: thm_ty,
-            term: wrapped_term,
+            term: SpannedTerm::new(wrapped_term, TermSpan::new(thm.span.start, thm.span.end)),
             span: thm.span,
         })
     }
@@ -192,7 +195,7 @@ impl<'a> Elaborator<'a> {
         Ok(CoreDef {
             name: axiom.name.name.clone(),
             ty: axiom_ty,
-            term,
+            term: SpannedTerm::new(term, TermSpan::new(axiom.span.start, axiom.span.end)),
             span: axiom.span,
         })
     }

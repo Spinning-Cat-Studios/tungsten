@@ -1,0 +1,177 @@
+// src/compiler/driver/pipeline/check.tg
+// Check pipeline: lex → parse → elaborate (no codegen).
+
+use driver::ffi::{
+    eprintln, println, stderr_is_tty,
+    List, Nil, Cons,
+    diagnostic_dump_core, diagnostic_check_tyvar_escape
+};
+use driver::util::{
+    Result, Ok, Err, Option, Some, None,
+    nat_to_string,
+    string_eq
+};
+use driver::cli::{CheckOpts};
+use driver::modules::{
+    ParsedModule,
+    find_workspace_root, discover_sibling_modules,
+    parse_module_tree, build_module_info,
+    parsed_module_parse_errors, parsed_module_lex_errors
+};
+use parser::error::{parse_has_errors, parse_error_count};
+use lexer::error::{has_errors, error_count};
+use elab::items::{elaborate_file, ElabResult, ElabDef, elab_result_ok, elab_result_def_count, elab_result_error_count};
+use elab::items::per_module::{elaborate_module_tree};
+use elab::error::{
+    errors_deduplicate,
+    SourceInfo, source_info_new,
+    render_diagnostics_limited
+};
+use elab::error::render::colors::{colorize_bold, ColorRed, ColorGreen};
+use driver::pipeline::{PipelineResult, PipelineOk, PipelineErr};
+use driver::pipeline::errors::{render_lex_parse_errors, get_module_source};
+
+// ===========================================================================
+// CHECK PIPELINE
+// ===========================================================================
+
+/// Run the check pipeline: lex → parse → elaborate (no codegen).
+pub fn run_check(opts: CheckOpts) -> PipelineResult {
+    let use_color = stderr_is_tty();
+    let max_errors = opts.max_errors;
+    
+    // Step 1: Parse module tree
+    match parse_module_tree(opts.file, Nil) {
+        Err(err_msg) => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++ ": " ++ err_msg);
+            PipelineErr(1)
+        },
+        Ok(result) => {
+            let (module, _visited) = result;
+            check_parsed_module(module, opts, use_color, max_errors)
+        }
+    }
+}
+
+/// Check a parsed module for errors, then elaborate if clean.
+fn check_parsed_module(module: ParsedModule, opts: CheckOpts, 
+                       use_color: Bool, max_errors: Nat) -> PipelineResult {
+    let lex_errs = parsed_module_lex_errors(module);
+    let parse_errs = parsed_module_parse_errors(module);
+    
+    if has_errors(lex_errs) || parse_has_errors(parse_errs) {
+        let total_errs = error_count(lex_errs) + parse_error_count(parse_errs);
+        render_lex_parse_errors(module, max_errors, use_color);
+        PipelineErr(total_errs)
+    } else {
+        elaborate_parsed_module(module, opts, use_color, max_errors)
+    }
+}
+
+/// Elaborate a cleanly-parsed module.
+fn elaborate_parsed_module(module: ParsedModule, opts: CheckOpts,
+                           use_color: Bool, max_errors: Nat) -> PipelineResult {
+    // Build module info and elaborate per-module (W6.3a)
+    let _workspace_root = find_workspace_root(opts.file);
+    let _sibling_paths = discover_sibling_modules(_workspace_root);
+    let module_info = build_module_info(module);
+    let elab_result = elaborate_module_tree(module, module_info, opts.elab_mode);
+    
+    handle_elab_result(elab_result, module, opts, use_color, max_errors)
+}
+
+/// Handle elaboration result: success or render errors.
+fn handle_elab_result(elab_result: ElabResult, module: ParsedModule, opts: CheckOpts,
+                      use_color: Bool, max_errors: Nat) -> PipelineResult {
+    if elab_result_ok(elab_result) {
+        let def_count = elab_result_def_count(elab_result);
+        // Run diagnostics if requested
+        run_diagnostics(elab_result.defs, opts);
+        if opts.verbose {
+            println(colorize_bold("success", ColorGreen, use_color) ++ 
+                   ": checked " ++ nat_to_string(def_count) ++ " definitions")
+        };
+        PipelineOk(def_count)
+    } else {
+        let source = get_module_source(module);
+        let src_info = source_info_new(opts.file, source);
+        let deduped = errors_deduplicate(elab_result.errors);
+        let rendered = render_diagnostics_limited(deduped, src_info, max_errors, use_color);
+        eprintln(rendered);
+        PipelineErr(elab_result_error_count(elab_result))
+    }
+}
+
+// ===========================================================================
+// DIAGNOSTICS
+// ===========================================================================
+
+/// Run post-elaboration diagnostics based on CLI flags.
+fn run_diagnostics(defs: List<ElabDef>, opts: CheckOpts) -> Unit {
+    // --dump-core PATTERN
+    match opts.dump_core {
+        Some(pattern) => dump_core_defs(defs, pattern),
+        None() => ()
+    };
+    // --check-tyvar-escape
+    if opts.check_tyvar_escape {
+        check_tyvar_escapes(defs)
+    } else {
+        ()
+    }
+}
+
+/// Dump Core IR for definitions matching a pattern.
+fn dump_core_defs(defs: List<ElabDef>, pattern: String) -> Unit {
+    match defs {
+        Nil() => (),
+        Cons(def, rest) => {
+            if string_eq(pattern, "*") || string_eq(pattern, def.name) {
+                dump_one_core_def(def)
+            } else {
+                ()
+            };
+            dump_core_defs(rest, pattern)
+        }
+    }
+}
+
+fn dump_one_core_def(def: ElabDef) -> Unit {
+    match diagnostic_dump_core(def.name, def.term, def.ty) {
+        Some(output) => eprintln(output),
+        None() => ()
+    }
+}
+
+/// Check all definitions for TyVar escapes and report.
+fn check_tyvar_escapes(defs: List<ElabDef>) -> Unit {
+    let counts = check_tyvar_escapes_acc(defs, 0, 0);
+    let (def_count, escape_count) = counts;
+    if def_count > 0 {
+        eprintln("");
+        eprintln("[tyvar-escape] Summary: " ++ nat_to_string(def_count) ++ 
+                 " definition(s) with TyVar escapes (" ++ nat_to_string(escape_count) ++ 
+                 " total occurrence(s))")
+    } else {
+        ()
+    }
+}
+
+/// Accumulate TyVar escape counts across definitions.
+fn check_tyvar_escapes_acc(defs: List<ElabDef>, def_count: Nat, escape_count: Nat) -> (Nat, Nat) {
+    match defs {
+        Nil() => (def_count, escape_count),
+        Cons(def, rest) =>
+            check_tyvar_escape_one(def, rest, def_count, escape_count)
+    }
+}
+
+fn check_tyvar_escape_one(def: ElabDef, rest: List<ElabDef>, def_count: Nat, escape_count: Nat) -> (Nat, Nat) {
+    match diagnostic_check_tyvar_escape(def.term) {
+        Some(escaped_vars) => {
+            eprintln("[tyvar-escape] " ++ def.name ++ ": body contains free TyVar(s): " ++ escaped_vars);
+            check_tyvar_escapes_acc(rest, def_count + 1, escape_count + 1)
+        },
+        None() => check_tyvar_escapes_acc(rest, def_count, escape_count)
+    }
+}

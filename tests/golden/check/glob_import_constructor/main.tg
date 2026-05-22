@@ -1,0 +1,10 @@
+// Test: glob import brings ADT constructor names into scope.
+
+pub mod shapes;
+
+use shapes::*;
+
+fn main() -> Nat {
+    let s: Shape = Circle(5);
+    area(s)
+}

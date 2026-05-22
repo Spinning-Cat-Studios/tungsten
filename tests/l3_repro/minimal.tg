@@ -1,0 +1,32 @@
+// Minimal reproducer for L3 module-ordering E0999 errors (ADR 21.5.26b).
+// Tests the Result<(List<T>, Cursor), Error> + Ok((Nil, cur)) pattern
+// that fails in parser/* modules when checked by tungsten1 without the
+// resolve_inner_foralls fix.
+//
+// The type-annotated let bindings ARE the assertions — if they type-check,
+// the forall instantiation in Ok((Nil, cur)) resolved correctly.
+//
+// Run: tungsten test tests/l3_repro/minimal.tg --check-only
+
+type Result<T, E> = Ok(T) | Err(E)
+type List<T> = Nil | Cons(T, List<T>)
+type Cursor = MkCursor(Nat)
+type ParseError = MkParseError(String)
+
+fn test_inner_forall_nat() -> Unit {
+    let cur = MkCursor(0);
+    let _r: Result<(List<Nat>, Cursor), ParseError> = Ok((Nil, cur));
+    ()
+}
+
+fn test_inner_forall_string() -> Unit {
+    let cur = MkCursor(0);
+    let _r: Result<(List<String>, Cursor), ParseError> = Ok((Nil, cur));
+    ()
+}
+
+fn test_inner_forall_nested() -> Unit {
+    let cur = MkCursor(0);
+    let _r: Result<(List<List<Nat>>, Cursor), ParseError> = Ok((Cons(Nil, Nil), cur));
+    ()
+}

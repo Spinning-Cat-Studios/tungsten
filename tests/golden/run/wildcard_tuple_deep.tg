@@ -1,0 +1,8 @@
+// Golden test: deeply nested wildcard — let (a, (_, (d, e))) = complex
+// Verifies correct projection through multiple nesting levels.
+
+fn main() -> Nat {
+    let complex = (10, (20, (30, 40)));
+    let (a, (_, (d, e))) = complex;
+    a + d + e
+}

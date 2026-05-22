@@ -1,0 +1,155 @@
+// Phase A.5 deduplication helpers for type and constructor exports.
+//
+// Removes duplicate type definitions and constructors that can appear
+// when Phase A stubs coexist with real definitions from Phase A.5
+// collection. Prefers non-stub entries over stubs.
+//
+// See ADR 6.5.26e §2.2, ADR 20.5.26e §2.3.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_reverse};
+use elab::env::defs::{TypeDefInfo, ConstructorInfo, type_def_is_stub};
+
+// ===========================================================================
+// CONSTRUCTOR DEDUP
+// ===========================================================================
+
+/// Remove duplicate constructors, keeping the first occurrence per
+/// (name, parent_type). Phase A stubs are appended after real constructors,
+/// so the first match is always the fully elaborated version.
+pub fn dedup_constructors(ctors: List<ConstructorInfo>) -> List<ConstructorInfo> {
+    dedup_constructors_acc(ctors, Nil)
+}
+
+fn dedup_constructors_acc(
+    ctors: List<ConstructorInfo>,
+    seen: List<ConstructorInfo>
+) -> List<ConstructorInfo> {
+    dedup_constructors_acc_impl(ctors, seen, Nil)
+}
+
+fn dedup_constructors_acc_impl(
+    ctors: List<ConstructorInfo>,
+    seen: List<ConstructorInfo>,
+    acc: List<ConstructorInfo>
+) -> List<ConstructorInfo> {
+    match ctors {
+        Nil() => list_reverse(acc),
+        Cons(info, rest) =>
+            if ctor_name_seen(seen, info.name, info.parent_type) {
+                dedup_constructors_acc_impl(rest, seen, acc)
+            } else {
+                dedup_constructors_acc_impl(
+                    rest, Cons(info, seen), Cons(info, acc)
+                )
+            }
+    }
+}
+
+/// Check if a (name, parent_type) pair has already been seen.
+fn ctor_name_seen(seen: List<ConstructorInfo>, name: String, parent: String) -> Bool {
+    match seen {
+        Nil() => false,
+        Cons(info, rest) =>
+            if info.name == name && info.parent_type == parent {
+                true
+            } else {
+                ctor_name_seen(rest, name, parent)
+            }
+    }
+}
+
+// ===========================================================================
+// TYPE DEDUP
+// ===========================================================================
+
+/// Remove duplicate type definitions, keeping the best entry per name.
+/// Prefers non-stub entries over stubs. If only stubs exist for a name,
+/// keeps the first stub.
+pub fn dedup_types(types: List<TypeDefInfo>) -> List<TypeDefInfo> {
+    // Pass 1: collect non-stub entries (first per name)
+    let reals = collect_real_types(types, Nil);
+    // Pass 2: add stubs for names not covered by reals
+    let real_names = extract_type_names(reals);
+    let missing_stubs = collect_missing_stubs(types, real_names, Nil);
+    append_type_lists(reals, missing_stubs)
+}
+
+/// Collect non-stub types, first occurrence per name.
+fn collect_real_types(types: List<TypeDefInfo>, seen: List<String>) -> List<TypeDefInfo> {
+    collect_real_types_acc(types, seen, Nil)
+}
+
+fn collect_real_types_acc(types: List<TypeDefInfo>, seen: List<String>, acc: List<TypeDefInfo>) -> List<TypeDefInfo> {
+    match types {
+        Nil() => list_reverse(acc),
+        Cons(info, rest) =>
+            if type_def_is_stub(info) {
+                collect_real_types_acc(rest, seen, acc)
+            } else {
+                if string_list_contains(seen, info.name) {
+                    collect_real_types_acc(rest, seen, acc)
+                } else {
+                    collect_real_types_acc(rest, Cons(info.name, seen), Cons(info, acc))
+                }
+            }
+    }
+}
+
+/// Collect stub types for names not already in the real list.
+fn collect_missing_stubs(types: List<TypeDefInfo>, real_names: List<String>, seen: List<String>) -> List<TypeDefInfo> {
+    collect_missing_stubs_acc(types, real_names, seen, Nil)
+}
+
+fn collect_missing_stubs_acc(types: List<TypeDefInfo>, real_names: List<String>, seen: List<String>, acc: List<TypeDefInfo>) -> List<TypeDefInfo> {
+    match types {
+        Nil() => list_reverse(acc),
+        Cons(info, rest) =>
+            if string_list_contains(real_names, info.name) {
+                collect_missing_stubs_acc(rest, real_names, seen, acc)
+            } else {
+                if string_list_contains(seen, info.name) {
+                    collect_missing_stubs_acc(rest, real_names, seen, acc)
+                } else {
+                    collect_missing_stubs_acc(rest, real_names, Cons(info.name, seen), Cons(info, acc))
+                }
+            }
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Extract names from a type list.
+fn extract_type_names(types: List<TypeDefInfo>) -> List<String> {
+    list_reverse(extract_type_names_acc(types, Nil))
+}
+
+fn extract_type_names_acc(types: List<TypeDefInfo>, acc: List<String>) -> List<String> {
+    match types {
+        Nil() => acc,
+        Cons(info, rest) => extract_type_names_acc(rest, Cons(info.name, acc))
+    }
+}
+
+/// Append two type lists.
+fn append_type_lists(a: List<TypeDefInfo>, b: List<TypeDefInfo>) -> List<TypeDefInfo> {
+    append_type_lists_acc(list_reverse(a), b)
+}
+
+fn append_type_lists_acc(reversed_a: List<TypeDefInfo>, b: List<TypeDefInfo>) -> List<TypeDefInfo> {
+    match reversed_a {
+        Nil() => b,
+        Cons(head, rest) => append_type_lists_acc(rest, Cons(head, b))
+    }
+}
+
+/// Check if a string is in a list.
+fn string_list_contains(list: List<String>, name: String) -> Bool {
+    match list {
+        Nil() => false,
+        Cons(s, rest) =>
+            if s == name { true } else { string_list_contains(rest, name) }
+    }
+}

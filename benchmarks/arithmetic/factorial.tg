@@ -1,0 +1,82 @@
+// Benchmark: Recursive factorial (Peano ADT)
+//
+// Tests: Peano multiplication cost, recursion depth
+// factorial(7) = 5040
+//
+// Note: Input capped at 7. Peano mul/add recurse O(result) deep;
+// factorial(9)+ overflows the stack (~362K Succ nodes).
+// Default: 500 iterations for ~350ms runtime.
+// Usage: ./factorial [iterations]  (default: 500)
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+pub type PNat = PZero | PSucc(PNat)
+
+fn padd(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => b,
+    PSucc(p) => PSucc(padd(p, b)),
+  }
+}
+
+fn pmul(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => PZero,
+    PSucc(p) => padd(b, pmul(p, b)),
+  }
+}
+
+fn to_nat(n: PNat) -> Nat {
+  match n {
+    PZero() => 0,
+    PSucc(p) => 1 + to_nat(p),
+  }
+}
+
+fn p1() -> PNat { PSucc(PZero) }
+
+fn psub(a: PNat, b: PNat) -> PNat {
+  match b {
+    PZero() => a,
+    PSucc(bp) => match a {
+      PZero() => PZero,
+      PSucc(ap) => psub(ap, bp),
+    },
+  }
+}
+
+fn factorial(n: PNat) -> PNat {
+  match n {
+    PZero() => p1(),
+    PSucc(_) => pmul(n, factorial(psub(n, p1()))),
+  }
+}
+
+fn from_nat(n: Nat) -> PNat {
+  if n == 0 { PZero } else { PSucc(from_nat(n - 1)) }
+}
+
+fn get_iterations() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 500 }
+}
+
+fn main() -> Nat {
+  // Default: 500 iterations of factorial(7)
+  // Total: 500 * 5040 = 2520000
+  repeat_bench(from_nat(get_iterations()), 0)
+}
+
+fn mk_7() -> PNat { PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PZero))))))) }
+
+fn run_once() -> Nat {
+  to_nat(factorial(mk_7()))
+}
+
+fn repeat_bench(n: PNat, acc: Nat) -> Nat {
+  match n {
+    PZero() => acc,
+    PSucc(p) => repeat_bench(p, acc + run_once()),
+  }
+}

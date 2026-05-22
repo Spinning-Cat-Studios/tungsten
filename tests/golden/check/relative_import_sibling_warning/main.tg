@@ -1,0 +1,6 @@
+// Test: sibling import resolution triggers a compiler warning (ADR 10.5.26m P3a)
+mod parent;
+
+fn main() -> String {
+    parent::child::get_value()
+}

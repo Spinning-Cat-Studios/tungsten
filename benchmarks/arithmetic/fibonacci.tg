@@ -1,0 +1,80 @@
+// Benchmark: Naive recursive Fibonacci (Peano ADT)
+//
+// Tests: ADT allocation + recursion depth (exponential)
+// Default: 8 iterations of fib(25) for ~200ms runtime.
+// Usage: ./fibonacci [iterations]  (default: 8)
+// Note: Uses custom PNat since built-in Nat is opaque in standalone files.
+// Note: fib(28)+ overflows the stack due to Peano padd recursion depth.
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+pub type PNat = PZero | PSucc(PNat)
+
+fn padd(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => b,
+    PSucc(p) => PSucc(padd(p, b)),
+  }
+}
+
+fn psub(a: PNat, b: PNat) -> PNat {
+  match b {
+    PZero() => a,
+    PSucc(bp) => match a {
+      PZero() => PZero,
+      PSucc(ap) => psub(ap, bp),
+    },
+  }
+}
+
+fn to_nat(n: PNat) -> Nat {
+  match n {
+    PZero() => 0,
+    PSucc(p) => 1 + to_nat(p),
+  }
+}
+
+fn from_nat(n: Nat) -> PNat {
+  if n == 0 { PZero } else { PSucc(from_nat(n - 1)) }
+}
+
+fn p1() -> PNat { PSucc(PZero) }
+
+fn fib(n: PNat) -> PNat {
+  match n {
+    PZero() => PZero,
+    PSucc(PZero()) => p1(),
+    PSucc(PSucc(_)) => padd(fib(psub(n, p1())), fib(psub(n, PSucc(p1())))),
+  }
+}
+
+fn mk_25() -> PNat {
+  PSucc(PSucc(PSucc(PSucc(PSucc(
+  PSucc(PSucc(PSucc(PSucc(PSucc(
+  PSucc(PSucc(PSucc(PSucc(PSucc(
+  PSucc(PSucc(PSucc(PSucc(PSucc(
+  PSucc(PSucc(PSucc(PSucc(PSucc(
+  PZero)))))))))))))))))))))))))
+}
+
+fn run_once() -> Nat {
+  to_nat(fib(mk_25()))
+}
+
+fn repeat_bench(n: PNat, acc: Nat) -> Nat {
+  match n {
+    PZero() => acc,
+    PSucc(p) => repeat_bench(p, acc + run_once()),
+  }
+}
+
+fn get_iterations() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 8 }
+}
+
+fn main() -> Nat {
+  // Default: 8 iterations of fib(25), each = 75025. Total = 600200
+  repeat_bench(from_nat(get_iterations()), 0)
+}

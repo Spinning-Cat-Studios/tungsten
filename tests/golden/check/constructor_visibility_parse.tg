@@ -1,0 +1,14 @@
+// AC1: pub/pub(crate) modifiers parse on individual ADT constructors.
+// This test verifies the parser accepts visibility on constructors.
+
+pub type Token =
+    | pub Ident
+    | pub(crate) Number
+    | InternalMarker
+
+fn main() -> Nat {
+    let a = Ident;
+    let b = Number;
+    let c = InternalMarker;
+    0
+}

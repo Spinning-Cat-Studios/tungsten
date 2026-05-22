@@ -1,0 +1,11 @@
+[E0001] Error: cannot find value `x` in this scope
+   ╭─[tests/golden/error/undefined_var_hints.tg:3:5]
+   │
+ 3 │     x
+   │     ┬  
+   │     ╰── not found in this scope
+───╯
+  hint: run `tungsten explain error E0001`
+  hint: run `tungsten doctor suggest-tools "name resolution"`
+
+error: aborting due to 1 error

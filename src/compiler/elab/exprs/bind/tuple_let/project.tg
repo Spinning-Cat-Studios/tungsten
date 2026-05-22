@@ -1,0 +1,196 @@
+// Tuple projection builders — Core term and CIR chains for tuple destructuring.
+//
+// Pure construction utilities: no elaboration, no environment threading.
+// Used by both synth-mode and check-mode tuple let elaboration.
+
+use parser::ast::{
+    Pattern, PatTuple, PatVar, PatWildcard,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_let, tg_term_var_named, tg_term_fst, tg_term_snd,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_unit,
+    tg_string_to_cstr
+};
+use elab::cir::{
+    CodegenIR, CIRLet, CIRVar, CIRFst, CIRSnd,
+    ct_unit, type_handle_to_codegen_type
+};
+
+// ===========================================================================
+// CORE TERM PROJECTION BUILDERS
+// ===========================================================================
+
+/// Build Core term chain for tuple projections.
+pub fn build_tuple_projection_terms(
+    pats: List<Pattern>,
+    ty: TypeHandle,
+    tup_name: String,
+    body: TermHandle
+) -> TermHandle {
+    build_tuple_projection_terms_aux(pats, ty, tup_name, body, 0)
+}
+
+fn build_tuple_projection_terms_aux(
+    pats: List<Pattern>,
+    ty: TypeHandle,
+    tup_name: String,
+    body: TermHandle,
+    depth: Nat
+) -> TermHandle {
+    match pats {
+        Nil() => body,
+        Cons(p, rest) =>
+            let elem_ty = if tg_type_is_product(ty) {
+                tg_type_get_product_left(ty)
+            } else {
+                ty
+            };
+            let rest_ty = if tg_type_is_product(ty) {
+                tg_type_get_product_right(ty)
+            } else {
+                tg_type_unit()
+            };
+            
+            // Build projection term
+            let tup_var = tg_term_var_named(tg_string_to_cstr(tup_name));
+            let proj_term = build_index_projection_term(tup_var, depth);
+            
+            // Check if there are more elements
+            let has_rest = match rest { Nil() => false, _ => true };
+            
+            // Build inner term for remaining patterns
+            let inner = build_tuple_projection_terms_aux(rest, rest_ty, tup_name, body, depth + 1);
+            
+            // Wrap with let binding
+            build_pattern_binding_term(p, elem_ty, proj_term, inner)
+    }
+}
+
+/// Build Core let binding for a single pattern.
+fn build_pattern_binding_term(
+    p: Pattern,
+    ty: TypeHandle,
+    value: TermHandle,
+    body: TermHandle
+) -> TermHandle {
+    match p {
+        PatVar(id) =>
+            let name = ident_name(id);
+            tg_term_let(tg_string_to_cstr(name), ty, value, body),
+        PatWildcard(_) =>
+            tg_term_let(tg_string_to_cstr("_"), ty, value, body),
+        PatTuple(sub_pats, _) =>
+            let tup_name = "__tup_nested";
+            let inner = build_tuple_projection_terms(sub_pats, ty, tup_name, body);
+            tg_term_let(tg_string_to_cstr(tup_name), ty, value, inner),
+        _ =>
+            tg_term_let(tg_string_to_cstr("_"), ty, value, body)
+    }
+}
+
+/// Build projection term to access element at index.
+fn build_index_projection_term(base: TermHandle, index: Nat) -> TermHandle {
+    if index == 0 {
+        tg_term_fst(base)
+    } else {
+        tg_term_fst(build_snd_chain_term(base, index))
+    }
+}
+
+/// Build chain of snd applications.
+fn build_snd_chain_term(base: TermHandle, count: Nat) -> TermHandle {
+    if count == 0 {
+        base
+    } else {
+        build_snd_chain_term(tg_term_snd(base), count - 1)
+    }
+}
+
+// ===========================================================================
+// CIR PROJECTION BUILDERS
+// ===========================================================================
+
+/// Build CIR let chain for tuple projections.
+pub fn build_tuple_projection_cir_let(
+    pats: List<Pattern>,
+    ty: TypeHandle,
+    base_cir: CodegenIR,
+    body_cir: CodegenIR
+) -> CodegenIR {
+    build_tuple_projection_cir_let_aux(pats, ty, base_cir, body_cir, 0)
+}
+
+fn build_tuple_projection_cir_let_aux(
+    pats: List<Pattern>,
+    ty: TypeHandle,
+    base_cir: CodegenIR,
+    body_cir: CodegenIR,
+    depth: Nat
+) -> CodegenIR {
+    match pats {
+        Nil() => body_cir,
+        Cons(p, rest) =>
+            let elem_ty = if tg_type_is_product(ty) {
+                tg_type_get_product_left(ty)
+            } else {
+                ty
+            };
+            let rest_ty = if tg_type_is_product(ty) {
+                tg_type_get_product_right(ty)
+            } else {
+                tg_type_unit()
+            };
+            
+            // Build projection CIR
+            let proj_cir = build_index_projection_cir_local(base_cir, depth);
+            
+            // Build inner CIR for remaining patterns
+            let inner = build_tuple_projection_cir_let_aux(rest, rest_ty, base_cir, body_cir, depth + 1);
+            
+            // Wrap with CIR let binding
+            build_pattern_binding_cir_local(p, elem_ty, proj_cir, inner)
+    }
+}
+
+/// Build CIR binding for a single pattern.
+fn build_pattern_binding_cir_local(
+    p: Pattern,
+    ty: TypeHandle,
+    value_cir: CodegenIR,
+    inner_cir: CodegenIR
+) -> CodegenIR {
+    match p {
+        PatVar(id) =>
+            CIRLet(ident_name(id), ct_unit(), value_cir, inner_cir),
+        PatWildcard(_) =>
+            CIRLet("_", ct_unit(), value_cir, inner_cir),
+        PatTuple(sub_pats, _) =>
+            let tup_name = "__tup_nested";
+            let projected = build_tuple_projection_cir_let(sub_pats, ty, CIRVar(tup_name, type_handle_to_codegen_type(ty)), inner_cir);
+            CIRLet(tup_name, ct_unit(), value_cir, projected),
+        _ =>
+            CIRLet("_", ct_unit(), value_cir, inner_cir)
+    }
+}
+
+/// Build CIR projection to access element at index.
+fn build_index_projection_cir_local(base: CodegenIR, index: Nat) -> CodegenIR {
+    if index == 0 {
+        CIRFst(base)
+    } else {
+        CIRFst(build_snd_chain_cir(base, index))
+    }
+}
+
+/// Build CIR chain of snd applications.
+fn build_snd_chain_cir(base: CodegenIR, count: Nat) -> CodegenIR {
+    if count == 0 {
+        base
+    } else {
+        build_snd_chain_cir(CIRSnd(base), count - 1)
+    }
+}

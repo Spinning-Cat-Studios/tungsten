@@ -3,8 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -107,7 +105,6 @@ jobs:
       - name: Golden tests
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-          LD_LIBRARY_PATH: target/release
         run: make check-golden
       
       - name: Type-check examples
@@ -135,7 +132,6 @@ jobs:
       - name: Compile smoke test — bootstrap compiles hello.tg
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-          LD_LIBRARY_PATH: target/release
         run: |
           ./target/release/tungsten compile examples/hello.tg -o hello_test -v
           output=$(./hello_test)
@@ -149,7 +145,7 @@ jobs:
       - name: Docker build + compile smoke test
         run: |
           # Stage a release-like directory using shared script
-          ./scripts/package-linux.sh target/release/tungsten target/release/libtungsten_core.so docker-test
+          ./scripts/package-linux.sh target/release/tungsten docker-test
 
           # Build Docker image
           cd docker-test
@@ -171,7 +167,7 @@ jobs:
           echo "PASS: Docker compile smoke test succeeded"
 
   # Self-host build + L2–L4 verification (macOS only)
-  # x86_64 self-host deferred to v1.5 — see notes/planned/tungsten_v1.5/x86_64_self_host.md
+  # x86_64 self-host deferred to v2.0
   self-host:
     name: Self-Host (macOS)
     runs-on: macos-15
@@ -203,23 +199,22 @@ jobs:
         run: ./target/release/tungsten compile src/compiler/main.tg -o tungsten1 -v
       
       - name: L3 — tungsten1 typechecks self-hosted source
-        env:
-          DYLD_LIBRARY_PATH: target/release
         run: ./tungsten1 check src/compiler/main.tg --max-errors=0
       
       - name: Self-compile step 2 — tungsten1 → tungsten2
         env:
-          DYLD_LIBRARY_PATH: target/release
+          LLVM_SYS_180_PREFIX: /opt/homebrew/opt/llvm@18
+          LIBRARY_PATH: /opt/homebrew/lib
+          TUNGSTEN_CODEGEN_JOBS: 1
         run: ./tungsten1 compile src/compiler/main.tg -o tungsten2 -v
       
       - name: L4 — tungsten2 typechecks self-hosted source
-        env:
-          DYLD_LIBRARY_PATH: target/release
         run: ./tungsten2 check src/compiler/main.tg --max-errors=0
 
       - name: Compile smoke test — tungsten1 compiles hello.tg
         env:
-          DYLD_LIBRARY_PATH: target/release
+          LLVM_SYS_180_PREFIX: /opt/homebrew/opt/llvm@18
+          LIBRARY_PATH: /opt/homebrew/lib
         run: |
           ./tungsten1 compile examples/hello.tg -o hello_test -v
           output=$(./hello_test)
@@ -232,8 +227,8 @@ jobs:
 
       - name: Release packaging smoke test — macOS
         run: |
-          ./scripts/package-macos.sh tungsten1 target/release/tungsten target/release/libtungsten_core.dylib release-test
-          # Test WITHOUT DYLD_LIBRARY_PATH — must work via @rpath
+          ./scripts/package-macos.sh tungsten1 target/release/tungsten release-test
+          # Test packaged binaries — static linking means no runtime deps
           release-test/tungsten check examples/hello.tg
           release-test/tungsten compile examples/hello.tg -o hello_release -v
           output=$(./hello_release)

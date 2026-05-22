@@ -1,0 +1,12 @@
+// W1 regression test: ADT match returning a value
+// Verifies that match on ADT types evaluates correctly
+
+pub type Maybe<T> = Nothing | Just(T)
+
+pub fn main() -> Nat {
+    let x: Maybe<Nat> = Just(42);
+    match x {
+        Nothing() => 0,
+        Just(n) => n
+    }
+}

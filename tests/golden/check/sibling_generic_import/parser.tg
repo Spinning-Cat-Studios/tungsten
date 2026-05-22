@@ -1,0 +1,12 @@
+// Parser module — uses a generic type from sibling 'tokens'.
+// Without Phase A arity-correct stubs, this would fail with
+// "type Container is not generic".
+use tokens::{Container, wrap};
+
+pub fn count() -> Nat {
+    let c: Container<Nat> = wrap(42);
+    match c {
+        Empty() => 0,
+        Holding(n) => n
+    }
+}

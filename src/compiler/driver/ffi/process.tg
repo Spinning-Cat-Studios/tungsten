@@ -1,0 +1,147 @@
+// Process control, CLI arguments, and console output FFI wrappers.
+
+use driver::ffi::types::{
+    CString, Int, Ptr, Never,
+    string_to_cstring, cstring_to_string, cstring_is_null,
+    string_len,
+    tg_free_string,
+    List, Nil, Cons, ffi_list_reverse
+};
+
+// --- Raw FFI Declarations ---
+
+extern "C" fn tg_argc() -> Int
+extern "C" fn tg_argv(index: Int) -> CString
+extern "C" fn tg_print(s: CString, len: Nat) -> Unit
+extern "C" fn tg_println(s: CString, len: Nat) -> Unit
+extern "C" fn tg_eprintln(s: CString, len: Nat) -> Unit
+extern "C" fn tg_exit(code: Int) -> Never
+extern "C" fn tg_exec_process(program: CString, args: CString) -> Int
+extern "C" fn tg_getenv(name: CString) -> CString
+extern "C" fn tg_current_exe_dir() -> CString
+extern "C" fn tg_stdout_is_tty() -> Int
+extern "C" fn tg_stderr_is_tty() -> Int
+
+// --- CLI Argument Wrappers ---
+
+pub fn argc() -> Nat {
+    tg_argc()
+}
+
+pub fn argv(index: Nat) -> Option<String> {
+    let result_c = tg_argv(index);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let arg = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(arg)
+    }
+}
+
+pub fn get_args() -> List<String> {
+    get_args_acc(0, argc(), Nil)
+}
+
+fn get_args_acc(i: Nat, n: Nat, acc: List<String>) -> List<String> {
+    if i >= n {
+        ffi_list_reverse(acc)
+    } else {
+        match argv(i) {
+            Some(arg) => get_args_acc(i + 1, n, Cons(arg, acc)),
+            None() => get_args_acc(i + 1, n, acc)
+        }
+    }
+}
+
+// --- Console Output Wrappers ---
+
+pub fn print(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_print(c, len);
+    tg_free_string(c);
+}
+
+pub fn println(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_println(c, len);
+    tg_free_string(c);
+}
+
+pub fn eprintln(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_eprintln(c, len);
+    tg_free_string(c);
+}
+
+// --- Process Control Wrappers ---
+
+pub fn process_exit(code: Nat) -> Never {
+    tg_exit(code)
+}
+
+pub fn exec_process(program: String, args: List<String>) -> Int {
+    let program_c = string_to_cstring(program);
+    let args_str = join_with_newline(args);
+    let args_c = string_to_cstring(args_str);
+    let code = tg_exec_process(program_c, args_c);
+    tg_free_string(program_c);
+    tg_free_string(args_c);
+    code
+}
+
+pub fn get_env_var(name: String) -> Option<String> {
+    let name_c = string_to_cstring(name);
+    let result_c = tg_getenv(name_c);
+    tg_free_string(name_c);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let val = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(val)
+    }
+}
+
+pub fn current_exe_dir() -> Option<String> {
+    let result_c = tg_current_exe_dir();
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let dir = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(dir)
+    }
+}
+
+// --- TTY Detection Wrappers ---
+
+pub fn stdout_is_tty() -> Bool {
+    tg_stdout_is_tty() == 1
+}
+
+pub fn stderr_is_tty() -> Bool {
+    tg_stderr_is_tty() == 1
+}
+
+// --- Helpers ---
+
+fn join_with_newline(strs: List<String>) -> String {
+    match strs {
+        Nil() => "",
+        Cons(first, rest) => join_with_newline_acc(rest, first)
+    }
+}
+
+fn join_with_newline_acc(strs: List<String>, acc: String) -> String {
+    match strs {
+        Nil() => acc,
+        Cons(s, rest) => {
+            let new_acc = acc ++ "\n" ++ s;
+            join_with_newline_acc(rest, new_acc)
+        }
+    }
+}

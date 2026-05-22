@@ -1,0 +1,73 @@
+// src/compiler/driver/modules/build/register.tg
+// Shared registration helpers for ModuleInfo building.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option, Some, None};
+use driver::modules::path::{ModulePath};
+use driver::modules::info::{
+    ModuleInfo, ModuleItemNames,
+    module_info_register_item, module_info_get_module,
+    module_info_update_contents,
+    module_item_names_add_type, module_item_names_add_value,
+    module_item_names_add_ctor
+};
+use parser::ast::nodes::{
+    TypeDefBody, TypeDefAdt, TypeDefRecord, TypeDefAlias,
+    Variant
+};
+
+/// Index a type declaration into a module's ModuleItemNames (Phase 0: source indexing).
+pub fn index_type_decl(info: ModuleInfo, name: String, module_path: ModulePath) -> ModuleInfo {
+    let info2 = module_info_register_item(info, name, module_path);
+    match module_info_get_module(info2, module_path) {
+        None() => info2,
+        Some(contents) =>
+            let new_contents = module_item_names_add_type(contents, name);
+            module_info_update_contents(info2, module_path, new_contents)
+    }
+}
+
+/// Index a value declaration into a module's ModuleItemNames (Phase 0: source indexing).
+pub fn index_value_decl(info: ModuleInfo, name: String, module_path: ModulePath) -> ModuleInfo {
+    let info2 = module_info_register_item(info, name, module_path);
+    match module_info_get_module(info2, module_path) {
+        None() => info2,
+        Some(contents) =>
+            let new_contents = module_item_names_add_value(contents, name);
+            module_info_update_contents(info2, module_path, new_contents)
+    }
+}
+
+/// Index constructors from a type body into a module's ModuleItemNames (Phase 0: source indexing).
+pub fn index_type_constructors(
+    info: ModuleInfo,
+    body: TypeDefBody,
+    module_path: ModulePath
+) -> ModuleInfo {
+    match body {
+        TypeDefAdt(variants) => index_variants(info, variants, module_path),
+        TypeDefRecord(_) => info,
+        TypeDefAlias(_) => info
+    }
+}
+
+/// Index each variant name as a constructor in the module info (Phase 0: source indexing).
+fn index_variants(
+    info: ModuleInfo,
+    variants: List<Variant>,
+    module_path: ModulePath
+) -> ModuleInfo {
+    match variants {
+        Nil() => info,
+        Cons(variant, rest) =>
+            let name = variant.name.name;
+            let info2 = module_info_register_item(info, name, module_path);
+            let info3 = match module_info_get_module(info2, module_path) {
+                None() => info2,
+                Some(contents) =>
+                    let new_contents = module_item_names_add_ctor(contents, name);
+                    module_info_update_contents(info2, module_path, new_contents)
+            };
+            index_variants(info3, rest, module_path)
+    }
+}

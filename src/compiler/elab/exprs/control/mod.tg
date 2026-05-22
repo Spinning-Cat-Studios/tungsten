@@ -1,0 +1,16 @@
+// src/compiler/elab/exprs/control/mod.tg
+// Control flow elaboration: if-then-else, return, try operator, let-else, if-let.
+
+pub mod if_else;
+pub mod return_expr;
+pub mod try_expr;
+pub mod try_block;
+pub mod let_else;
+pub mod if_let;
+
+pub use elab::exprs::control::if_else::*;
+pub use elab::exprs::control::return_expr::*;
+pub use elab::exprs::control::try_expr::synth_try_full;
+pub use elab::exprs::control::try_block::{synth_try_block, check_try_block};
+pub use elab::exprs::control::let_else::build_let_else_match;
+pub use elab::exprs::control::if_let::{build_if_let_match, build_if_let_chain_match};

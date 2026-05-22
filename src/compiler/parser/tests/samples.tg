@@ -273,3 +273,28 @@ fn test_empty_match_body(b: Bool) -> Nat {
 fn deeply_nested_expression() -> Nat {
     ((((1 + 2) * 3) - 4) / 5)
 }
+
+// ============================================================================
+// ITEMS: Theorems, Lemmas, Axioms — colon and arrow syntax
+// ============================================================================
+
+theorem thm_colon(): Nat { 0 }
+
+theorem thm_arrow() -> Nat { 0 }
+
+pub theorem thm_pub_arrow() -> Nat { 0 }
+
+lemma lem_colon(): Nat { 0 }
+
+lemma lem_arrow() -> Nat { 0 }
+
+axiom ax_colon(): Nat
+
+axiom ax_arrow() -> Nat
+
+// ============================================================================
+// ITEMS: == sugar in type position
+// ============================================================================
+
+fn eq_sugar_int() -> 0 == 0 { refl }
+fn eq_sugar_bool() -> true == true { refl }

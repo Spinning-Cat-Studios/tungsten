@@ -1,0 +1,2 @@
+// Module B also provides Foo (different definition).
+pub type Foo = Bool

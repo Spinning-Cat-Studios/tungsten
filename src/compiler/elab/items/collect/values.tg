@@ -1,0 +1,293 @@
+// Phase 2: Value signature collection.
+//
+// Collects function, theorem, axiom, and extern signatures.
+// All types are fully elaborated at this point, so signatures
+// can reference any type.
+
+use lexer::span::Span;
+use parser::ast::{
+    Item, ItemFn, ItemType, ItemTypeAlias, ItemTheorem, ItemLemma,
+    ItemAxiom, ItemExtern, ItemMod, ItemUse, ItemError,
+    FunctionDef, TheoremDef, AxiomDef, ExternFnDef,
+    Param, ExternParam, TypeParam,
+    TypeExpr, TyUnit,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    Visibility,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle,
+    tg_type_unit, tg_type_arrow, tg_type_forall,
+    tg_string_to_cstr
+};
+use elab::env::{
+    Env, env_register_value,
+    ValueDefInfo, value_def_info_new
+};
+use elab::types::{
+    ElabTypeResult, ElabTypeOk, ElabTypeErr, elab_type
+};
+use elab::cir::{
+    CodegenType, CTUnit, CTArrow
+};
+use elab::items::result::{
+    ElabContext, elab_context_with_env, elab_context_add_error
+};
+use elab::error::elab_error_simple;
+use elab::items::collect::types::helpers::{push_type_params, pop_type_params};
+
+// ===========================================================================
+// PHASE 2: COLLECT VALUE SIGNATURES
+// ===========================================================================
+
+/// Collect function, theorem, and extern signatures.
+/// All types are now fully elaborated, so signatures can reference any type.
+pub fn collect_phase_2(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    match items {
+        Nil() => {
+            ctx
+        },
+        Cons(item, rest) => {
+            let ctx2 = collect_value_signature(ctx, item);
+            collect_phase_2(ctx2, rest)
+        }
+    }
+}
+
+/// Collect a value signature from an item.
+fn collect_value_signature(ctx: ElabContext, item: Item) -> ElabContext {
+    match item {
+        ItemFn(def) => {
+            collect_fn_signature(ctx, def)
+        },
+        ItemTheorem(def) => {
+            collect_theorem_signature(ctx, def, "theorem")
+        },
+        ItemLemma(def) => {
+            collect_theorem_signature(ctx, def, "lemma")
+        },
+        ItemAxiom(def) => {
+            collect_axiom_signature(ctx, def)
+        },
+        ItemExtern(def) => collect_extern_signature(ctx, def),
+        _ => {
+            ctx  // Not a value definition
+        }
+    }
+}
+
+/// Collect a function signature.
+fn collect_fn_signature(ctx: ElabContext, def: FunctionDef) -> ElabContext {
+    let fn_name = ident_name(def.name);
+    
+    // Push type parameters
+    let ctx2 = push_type_params(ctx, def.type_params);
+    
+    // Build the function type from parameters and return type
+    match build_fn_type(ctx2, def.params, def.return_type, def.span) {
+        ElabTypeErr(err) => {
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            pop_type_params(ctx3, def.type_params)
+        },
+        ElabTypeOk(fn_type, _) => {
+            // Wrap in foralls for type parameters
+            let final_type = wrap_foralls(fn_type, def.type_params);
+            // Register the value
+            let info = value_def_info_new(fn_name, final_type, def.vis, def.span);
+            let env3 = env_register_value(ctx2.env, info);
+            let ctx3 = elab_context_with_env(ctx2, env3);
+            pop_type_params(ctx3, def.type_params)
+        }
+    }
+}
+
+/// Build a function type from parameters and return type.
+/// Made public to allow reuse in elaborate.tg to avoid O(n) env lookup.
+pub fn build_fn_type(
+    ctx: ElabContext,
+    params: List<Param>,
+    return_type: MaybeTypeExpr,
+    span: Span
+) -> ElabTypeResult {
+    // Elaborate return type
+    let ret_ty = match return_type {
+        NoTypeExpr() => {
+            ElabTypeOk(tg_type_unit(), CTUnit())  // Default to Unit
+        },
+        SomeTypeExpr(ty) => {
+            elab_type(ctx.env, ty)
+        }
+    };
+    
+    match ret_ty {
+        ElabTypeErr(e) => {
+            ElabTypeErr(e)
+        },
+        ElabTypeOk(ret_handle, _) => {
+            // Build arrow types from right to left
+            let result = build_arrow_chain(ctx.env, params, ret_handle);
+            result
+        }
+    }
+}
+
+/// Build a chain of arrow types for function parameters.
+fn build_arrow_chain(env: Env, params: List<Param>, ret: TypeHandle) -> ElabTypeResult {
+    match params {
+        Nil() => ElabTypeOk(ret, CTUnit()),
+        Cons(param, rest) =>
+            build_arrow_chain_param(env, param, rest, ret)
+    }
+}
+
+fn build_arrow_chain_param(env: Env, param: Param, rest: List<Param>, ret: TypeHandle) -> ElabTypeResult {
+    match build_arrow_chain(env, rest, ret) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(rest_type, _) =>
+            build_arrow_chain_type(env, param, rest_type)
+    }
+}
+
+fn build_arrow_chain_type(env: Env, param: Param, rest_type: TypeHandle) -> ElabTypeResult {
+    match elab_type(env, param.ty) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(param_type, param_ct) =>
+            let arrow = tg_type_arrow(param_type, rest_type);
+            let arrow_ct = CTArrow(param_ct, CTUnit());
+            ElabTypeOk(arrow, arrow_ct)
+    }
+}
+
+/// Wrap a type in foralls for type parameters.
+/// Made public to allow reuse in elaborate.tg.
+pub fn wrap_foralls(ty: TypeHandle, params: List<TypeParam>) -> TypeHandle {
+    match params {
+        Nil() => ty,
+        Cons(param, rest) =>
+            let inner = wrap_foralls(ty, rest);
+            let name_ptr = tg_string_to_cstr(ident_name(param.name));
+            tg_type_forall(name_ptr, inner)
+    }
+}
+
+/// Collect a theorem or lemma signature.
+fn collect_theorem_signature(ctx: ElabContext, def: TheoremDef, kind: String) -> ElabContext {
+    let thm_name = ident_name(def.name);
+    let ctx2 = push_type_params(ctx, def.type_params);
+    match elab_type(ctx2.env, def.prop) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            pop_type_params(ctx3, def.type_params),
+        ElabTypeOk(prop_type, _) =>
+            collect_theorem_with_prop(ctx2, def, thm_name, prop_type)
+    }
+}
+
+fn collect_theorem_with_prop(ctx: ElabContext, def: TheoremDef, thm_name: String, prop_type: TypeHandle) -> ElabContext {
+    match build_fn_type_from_params(ctx.env, def.params, prop_type) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx2 = elab_context_add_error(ctx, elab_err);
+            pop_type_params(ctx2, def.type_params),
+        ElabTypeOk(thm_type, _) =>
+            let final_type = wrap_foralls(thm_type, def.type_params);
+            let info = value_def_info_new(thm_name, final_type, def.vis, def.span);
+            let env2 = env_register_value(ctx.env, info);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            pop_type_params(ctx2, def.type_params)
+    }
+}
+
+/// Build function type from params (without return type annotation).
+fn build_fn_type_from_params(env: Env, params: List<Param>, ret: TypeHandle) -> ElabTypeResult {
+    build_arrow_chain(env, params, ret)
+}
+
+/// Collect an axiom signature.
+fn collect_axiom_signature(ctx: ElabContext, def: AxiomDef) -> ElabContext {
+    let axiom_name = ident_name(def.name);
+    let ctx2 = push_type_params(ctx, def.type_params);
+    match elab_type(ctx2.env, def.prop) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            pop_type_params(ctx3, def.type_params),
+        ElabTypeOk(prop_type, _) =>
+            collect_axiom_with_prop(ctx2, def, axiom_name, prop_type)
+    }
+}
+
+fn collect_axiom_with_prop(ctx: ElabContext, def: AxiomDef, axiom_name: String, prop_type: TypeHandle) -> ElabContext {
+    match build_fn_type_from_params(ctx.env, def.params, prop_type) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx2 = elab_context_add_error(ctx, elab_err);
+            pop_type_params(ctx2, def.type_params),
+        ElabTypeOk(axiom_type, _) =>
+            let final_type = wrap_foralls(axiom_type, def.type_params);
+            let info = value_def_info_new(axiom_name, final_type, def.vis, def.span);
+            let env2 = env_register_value(ctx.env, info);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            pop_type_params(ctx2, def.type_params)
+    }
+}
+
+/// Collect an extern function signature.
+fn collect_extern_signature(ctx: ElabContext, def: ExternFnDef) -> ElabContext {
+    let fn_name = ident_name(def.name);
+    
+    // Build extern function type from params and return type
+    // Unwrap optional return type - default to unit
+    let ret_type = match def.return_type {
+        SomeTypeExpr(t) => t,
+        NoTypeExpr() => TyUnit(def.span)
+    };
+    match build_extern_fn_type(ctx.env, def.params, ret_type) {
+        ElabTypeErr(err) =>
+            let elab_err = elab_error_simple(err.message, err.span);
+            elab_context_add_error(ctx, elab_err),
+        ElabTypeOk(fn_type, _) =>
+            let info = value_def_info_new(fn_name, fn_type, def.vis, def.span);
+            let env2 = env_register_value(ctx.env, info);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+/// Build extern function type.
+fn build_extern_fn_type(env: Env, params: List<ExternParam>, ret: TypeExpr) -> ElabTypeResult {
+    match elab_type(env, ret) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(ret_handle, ret_ct) =>
+            build_extern_arrow_chain(env, params, ret_handle, ret_ct)
+    }
+}
+
+/// Build arrow chain for extern params.
+fn build_extern_arrow_chain(env: Env, params: List<ExternParam>, ret: TypeHandle, ret_ct: CodegenType) -> ElabTypeResult {
+    match params {
+        Nil() => ElabTypeOk(ret, ret_ct),
+        Cons(param, rest) =>
+            build_extern_arrow_param(env, param, rest, ret, ret_ct)
+    }
+}
+
+fn build_extern_arrow_param(env: Env, param: ExternParam, rest: List<ExternParam>, ret: TypeHandle, ret_ct: CodegenType) -> ElabTypeResult {
+    match build_extern_arrow_chain(env, rest, ret, ret_ct) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(rest_type, rest_ct) =>
+            build_extern_arrow_type(env, param, rest_type, rest_ct)
+    }
+}
+
+fn build_extern_arrow_type(env: Env, param: ExternParam, rest_type: TypeHandle, rest_ct: CodegenType) -> ElabTypeResult {
+    match elab_type(env, param.ty) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(param_type, param_ct) =>
+            let arrow = tg_type_arrow(param_type, rest_type);
+            let arrow_ct = CTArrow(param_ct, rest_ct);
+            ElabTypeOk(arrow, arrow_ct)
+    }
+}

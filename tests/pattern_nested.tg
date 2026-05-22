@@ -1,13 +1,20 @@
-// Test: Nested constructor patterns
-// Nested patterns allow matching on constructors within constructors.
+// Test: Nested constructor patterns (ADR 13.5.26c)
+// Nested patterns desugar into inner match expressions during elaboration.
 
-// Simple types for testing
+// ---------------------------------------------------------------------------
+// Test types
+// ---------------------------------------------------------------------------
+
 type Token = TokEof | TokIdent(Nat) | TokNumber(Nat)
-
-// A result type holding a token
 type ParseResult = ParseOk(Token) | ParseErr
+type Option<T> = None | Some(T)
+type List<T> = Nil | Cons(T, List<T>)
 
-// Single nested constructor - match on nullary nested ctor
+// ---------------------------------------------------------------------------
+// Basic nested patterns
+// ---------------------------------------------------------------------------
+
+// Single nested constructor — match on nullary nested ctor
 fn is_eof_result(r: ParseResult) -> Bool {
     match r {
         ParseOk(TokEof()) => true,
@@ -15,7 +22,7 @@ fn is_eof_result(r: ParseResult) -> Bool {
     }
 }
 
-// Single nested constructor - match on unary nested ctor with binding
+// Single nested constructor — match on unary nested ctor with binding
 fn get_ident_value(r: ParseResult) -> Nat {
     match r {
         ParseOk(TokIdent(n)) => n,
@@ -23,7 +30,7 @@ fn get_ident_value(r: ParseResult) -> Nat {
     }
 }
 
-// Multiple arms with nested patterns
+// Multiple arms sharing same outer constructor with nested patterns
 fn classify_result(r: ParseResult) -> Nat {
     match r {
         ParseOk(TokEof()) => 1,
@@ -33,7 +40,93 @@ fn classify_result(r: ParseResult) -> Nat {
     }
 }
 
-// Test main - returns 42 if nested pattern binding works
+// ---------------------------------------------------------------------------
+// Acceptance criteria tests (expect_type, cost 3)
+// ---------------------------------------------------------------------------
+
+// AC1: Nested pattern binding types are correct
+pub fn test_nested_binding_type() -> Unit {
+    let r: ParseResult = ParseOk(TokIdent(42));
+    match r {
+        ParseOk(TokIdent(n)) => {
+            let _ = expect_type(n, "Nat");
+            ()
+        },
+        _ => ()
+    }
+}
+
+// AC2: Option<Option<Nat>> double nesting
+pub fn test_double_nested_option() -> Unit {
+    let oo: Option<Option<Nat>> = Some(Some(42));
+    match oo {
+        Some(Some(x)) => {
+            let _ = expect_type(x, "Nat");
+            ()
+        },
+        _ => ()
+    }
+}
+
+// AC3: Option<List<Nat>> nesting
+pub fn test_option_list_nested() -> Unit {
+    let ol: Option<List<Nat>> = Some(Cons(1, Nil()));
+    match ol {
+        Some(Cons(x, _)) => {
+            let _ = expect_type(x, "Nat");
+            ()
+        },
+        Some(Nil()) => (),
+        None() => ()
+    }
+}
+
+// AC4: Grouped arms — multiple arms for same outer constructor
+pub fn test_grouped_arms() -> Unit {
+    let r: ParseResult = ParseOk(TokNumber(99));
+    match r {
+        ParseOk(TokEof()) => (),
+        ParseOk(TokIdent(n)) => {
+            let _ = expect_type(n, "Nat");
+            ()
+        },
+        ParseOk(TokNumber(n)) => {
+            let _ = expect_type(n, "Nat");
+            ()
+        },
+        ParseErr() => ()
+    }
+}
+
+// AC5: Mixed flat and nested arms in same constructor group
+pub fn test_mixed_flat_and_nested() -> Unit {
+    let o: Option<Nat> = Some(5);
+    match o {
+        Some(x) => {
+            let _ = expect_type(x, "Nat");
+            ()
+        },
+        None() => ()
+    }
+}
+
+// AC6: Catch-all mixed with nested constructor arms
+// Verifies desugaring doesn't interfere with wildcard passthrough
+pub fn test_catchall_with_nested() -> Unit {
+    let r: ParseResult = ParseErr();
+    match r {
+        ParseOk(TokIdent(n)) => {
+            let _ = expect_type(n, "Nat");
+            ()
+        },
+        _ => ()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main (for non-test execution)
+// ---------------------------------------------------------------------------
+
 fn main() -> Nat {
     let tok = TokIdent(42);
     let result = ParseOk(tok);

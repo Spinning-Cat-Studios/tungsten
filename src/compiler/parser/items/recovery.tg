@@ -32,19 +32,21 @@ fn synchronize_loop(cur: Cursor) -> Cursor {
 pub fn is_item_start(cur: Cursor) -> Bool {
     match cursor_peek_kind(cur) {
         None() => false,
-        Some(kind) => {
-            match kind {
-                TokPub() => true,
-                TokFn() => true,
-                TokType() => true,
-                TokExtern() => true,
-                TokMod() => true,
-                TokUse() => true,
-                TokTheorem() => true,
-                TokLemma() => true,
-                TokAxiom() => true,
-                _ => false
-            }
-        }
+        Some(kind) => is_item_start_kind(kind)
+    }
+}
+
+fn is_item_start_kind(kind: TokenKind) -> Bool {
+    match kind {
+        TokPub() => true,
+        TokFn() => true,
+        TokType() => true,
+        TokExtern() => true,
+        TokMod() => true,
+        TokUse() => true,
+        TokTheorem() => true,
+        TokLemma() => true,
+        TokAxiom() => true,
+        _ => false
     }
 }

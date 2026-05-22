@@ -1,0 +1,9 @@
+// Golden test: wildcard tuple projection — let (_, b) = pair
+// Verifies that the wildcard correctly skips fst and binds snd.
+// Bug: prior to fix, (_, b) projected fst instead of snd.
+
+fn main() -> Nat {
+    let pair = (10, 20);
+    let (_, b) = pair;
+    b
+}

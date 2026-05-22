@@ -1,0 +1,148 @@
+// src/compiler/elab/cir/free_vars.tg
+// Free-variable analysis for CodegenIR expressions.
+//
+// Computes the set of variables referenced by a CIR expression body
+// that are not bound by enclosing lambda/fix/let binders. The result
+// is a deduplicated, lexicographically sorted CIRCaptureList suitable
+// for populating CIRLambda/CIRFix capture fields.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::lists::list_contains_string;
+use elab::cir::types::{
+    CodegenIR, CodegenType,
+    CIRUnit, CIRNatLit, CIRTrue, CIRFalse, CIRString, CIRZero, CIRSucc,
+    CIRVar, CIRGlobal,
+    CIRLet, CIRApp, CIRLambda, CIRFix,
+    CIRFst, CIRSnd, CIRPair,
+    CIRInl, CIRInr, CIRCase,
+    CIRFold, CIRUnfold,
+    CIRNatAdd, CIRNatSub, CIRNatMul, CIRNatDiv, CIRNatMod,
+    CIRNatEq, CIRNatLt, CIRNatLe, CIRNatGt, CIRNatGe,
+    CIRBoolAnd, CIRBoolOr, CIRBoolNot,
+    CIRStrConcat, CIRStrEq, CIRStrLen,
+    CIRIf,
+    CIRRefNew, CIRRefGet, CIRRefSet,
+    CIRRefl, CIRSorry,
+    CIRTypeAbs, CIRTypeApp,
+    CIRExternCall,
+    CIRAnnot,
+    CIRStmtLet, CIRStmtExpr, CIRStmtList,
+    CIRCaptureList, CIRCaptureNil, CIRCaptureCons,
+    CIRCapture, ElabStmtInfo
+};
+use elab::cir::capture::{
+    cir_captures_empty, cir_captures_add,
+    cir_captures_dedupe, cir_captures_sort
+};
+
+/// Compute the free variables of a CIR expression.
+///
+/// `bound` is the list of variable names that are in scope (bound by
+/// enclosing lambda params, fix self-names, or let bindings).
+///
+/// Returns a deduplicated, lexicographically sorted capture list.
+pub fn free_vars(expr: CodegenIR, bound: List<String>) -> CIRCaptureList {
+    let raw = free_vars_raw(expr, bound);
+    cir_captures_sort(cir_captures_dedupe(raw))
+}
+
+/// Internal: collect free variables without dedup/sort.
+fn free_vars_raw(expr: CodegenIR, bound: List<String>) -> CIRCaptureList {
+    match expr {
+        // Literals — no free vars
+        CIRZero() => cir_captures_empty(),
+        CIRSucc(inner) => free_vars_raw(inner, bound),
+        CIRUnit() => cir_captures_empty(),
+        CIRTrue() => cir_captures_empty(),
+        CIRFalse() => cir_captures_empty(),
+        CIRNatLit(_) => cir_captures_empty(),
+        CIRString(_) => cir_captures_empty(),
+        CIRGlobal(_) => cir_captures_empty(),
+        CIRSorry(_) => cir_captures_empty(),
+        // Variable — free if not bound
+        CIRVar(name, ty) =>
+            if list_contains_string(bound, name) { cir_captures_empty() }
+            else { cir_captures_add(name, ty, cir_captures_empty()) },
+        // Binding forms
+        CIRLet(name, _, rhs, body) =>
+            union2(free_vars_raw(rhs, bound), free_vars_raw(body, Cons(name, bound))),
+        CIRApp(f, a, _, _) =>
+            union2(free_vars_raw(f, bound), free_vars_raw(a, bound)),
+        CIRLambda(param, _, body, _, _) =>
+            free_vars_raw(body, Cons(param, bound)),
+        CIRFix(self_name, _, body, _) =>
+            free_vars_raw(body, Cons(self_name, bound)),
+        // Products
+        CIRPair(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRFst(inner) => free_vars_raw(inner, bound),
+        CIRSnd(inner) => free_vars_raw(inner, bound),
+        // Sums
+        CIRInl(inner, _) => free_vars_raw(inner, bound),
+        CIRInr(inner, _) => free_vars_raw(inner, bound),
+        CIRCase(scrut, _, l_name, l_body, r_name, r_body, _) =>
+            union2(free_vars_raw(scrut, bound),
+                union2(free_vars_raw(l_body, Cons(l_name, bound)),
+                       free_vars_raw(r_body, Cons(r_name, bound)))),
+        // Recursive types
+        CIRFold(_, inner) => free_vars_raw(inner, bound),
+        CIRUnfold(_, inner) => free_vars_raw(inner, bound),
+        // Arithmetic
+        CIRNatAdd(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRNatSub(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRNatMul(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRNatDiv(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRNatMod(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        // Comparison
+        CIRNatEq(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRNatLt(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRNatLe(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRNatGt(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRNatGe(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        // Boolean ops
+        CIRBoolAnd(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRBoolOr(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRBoolNot(inner) => free_vars_raw(inner, bound),
+        // String ops
+        CIRStrConcat(a, b) => union2(free_vars_raw(a, bound), free_vars_raw(b, bound)),
+        CIRStrEq(a, b) => union2(free_vars_raw(a, bound), free_vars_raw(b, bound)),
+        CIRStrLen(s) => free_vars_raw(s, bound),
+        // Control flow
+        CIRIf(cond, then_br, else_br) =>
+            union2(free_vars_raw(cond, bound),
+                union2(free_vars_raw(then_br, bound), free_vars_raw(else_br, bound))),
+        // References
+        CIRRefNew(inner) => free_vars_raw(inner, bound),
+        CIRRefGet(inner) => free_vars_raw(inner, bound),
+        CIRRefSet(r, v) => union2(free_vars_raw(r, bound), free_vars_raw(v, bound)),
+        // Proof terms
+        CIRRefl(_, inner) => free_vars_raw(inner, bound),
+        // Polymorphism
+        CIRTypeAbs(_, body) => free_vars_raw(body, bound),
+        CIRTypeApp(inner, _) => free_vars_raw(inner, bound),
+        // FFI
+        CIRExternCall(_, args) => free_vars_list(args, bound),
+        // Annotations
+        CIRAnnot(inner, _) => free_vars_raw(inner, bound),
+        // Statements (should not appear in closure bodies, but handle gracefully)
+        CIRStmtLet(_, _, rhs) => free_vars_raw(rhs, bound),
+        CIRStmtExpr(inner) => free_vars_raw(inner, bound),
+        CIRStmtList(_) => cir_captures_empty()
+    }
+}
+
+/// Concatenate two capture lists.
+fn union2(a: CIRCaptureList, b: CIRCaptureList) -> CIRCaptureList {
+    match a {
+        CIRCaptureNil() => b,
+        CIRCaptureCons(cap, rest) =>
+            CIRCaptureCons(cap, union2(rest, b))
+    }
+}
+
+/// Collect free vars from a list of CIR expressions.
+fn free_vars_list(exprs: List<CodegenIR>, bound: List<String>) -> CIRCaptureList {
+    match exprs {
+        Nil() => cir_captures_empty(),
+        Cons(e, rest) => union2(free_vars_raw(e, bound), free_vars_list(rest, bound))
+    }
+}

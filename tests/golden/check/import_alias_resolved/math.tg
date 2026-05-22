@@ -1,0 +1,2 @@
+pub fn add(a: Nat, b: Nat) -> Nat { a + b }
+pub fn sub(a: Nat, b: Nat) -> Nat { a - b }

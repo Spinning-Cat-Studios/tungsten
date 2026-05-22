@@ -36,6 +36,7 @@ pub(super) struct SavedLambdaState<'ctx> {
     pub(super) current_fn: Option<FunctionValue<'ctx>>,
     pub(super) env: HashMap<String, (BasicValueEnum<'ctx>, Type)>,
     pub(super) insert_block: Option<BasicBlock<'ctx>>,
+    pub(super) in_tail_position: bool,
 }
 
 /// Information about captured variables for a lambda.
@@ -54,7 +55,7 @@ pub(super) struct CaptureInfo<'ctx> {
 
 /// Check if a function term represents a known noreturn function.
 ///
-/// Returns true for functions named "exit" or containing "tg_exit",
+/// Returns true for functions named "exit" or containing "`tg_exit`",
 /// which are wrappers around the exit system call.
 pub(super) fn is_noreturn_function_name(func: &Term) -> bool {
     match func {

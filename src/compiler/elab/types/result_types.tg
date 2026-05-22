@@ -1,0 +1,23 @@
+// Result types for type elaboration.
+
+use lexer::span::Span;
+use elab::ffi::TypeHandle;
+use elab::cir::CodegenType;
+
+pub type ElabTypeResult =
+    | ElabTypeOk(TypeHandle, CodegenType)
+    | ElabTypeErr(ElabTypeError)
+
+pub type ElabTypeError = {
+    message: String,
+    span: Span,
+    code: String
+}
+
+pub fn elab_type_error(message: String, span: Span) -> ElabTypeError {
+    { message: message, span: span, code: "" }
+}
+
+pub fn elab_type_error_coded(message: String, span: Span, code: String) -> ElabTypeError {
+    { message: message, span: span, code: code }
+}

@@ -9,18 +9,16 @@ use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cu
     cursor_is_eof, token_kind_name};
 use parser::option::{Option, None, Some};
 use parser::ast::nodes::Item;
-use result::{ParseResultItem, ParseOkItem, ParseErrItem,
-    ParseResultItemList, ParseOkItemList, ParseErrItemList,
-    ParseResultVisibility, ParseOkVisibility, ParseErrVisibility,
-    item_list_reverse};
-use visibility::{parse_visibility};
-use functions::{parse_fn};
+use parser::items::result::{item_list_reverse};
+use parser::items::shared::visibility::{parse_visibility};
+use parser::items::decls::functions::{parse_fn};
 use parser::types::{parse_type_item};
-use theorems::{parse_theorem, parse_lemma, parse_axiom};
-use extern_fn::{parse_extern};
-use use_decl::{parse_mod, parse_use_item};
+use parser::items::decls::theorems::{parse_theorem, parse_lemma, parse_axiom};
+use parser::items::decls::extern_fn::{parse_extern};
+use parser::items::use_decl::{parse_mod, parse_use_item};
 use parser::items::recovery::{synchronize};
 use driver::ffi::{List, Nil, Cons};
+use driver::util::{Result, Ok, Err};
 
 // ===========================================================================
 // TOP-LEVEL ITEM LIST PARSING
@@ -28,20 +26,20 @@ use driver::ffi::{List, Nil, Cons};
 
 /// Parse a list of items (top-level declarations).
 /// Recovers from errors to continue parsing subsequent items.
-pub fn parse_items(cur: Cursor) -> ParseResultItemList {
+pub fn parse_items(cur: Cursor) -> Result<(List<Item>, Cursor), ParseError> {
     parse_items_acc(cur, Nil)
 }
 
 /// Accumulator-based item list parsing with error recovery.
-fn parse_items_acc(cur: Cursor, acc: List<Item>) -> ParseResultItemList {
+fn parse_items_acc(cur: Cursor, acc: List<Item>) -> Result<(List<Item>, Cursor), ParseError> {
     if cursor_is_eof(cur) || cursor_check(cur, TokEof()) {
-        ParseOkItemList(item_list_reverse(acc), cur)
+        Ok((item_list_reverse(acc), cur))
     } else {
         match parse_item(cur) {
-            ParseOkItem(item, cur2) => {
+            Ok((item, cur2)) => {
                 parse_items_acc(cur2, Cons(item, acc))
             },
-            ParseErrItem(e) => {
+            Err(e) => {
                 // Error recovery: skip to next item boundary
                 let cur2 = synchronize(cur);
                 // Continue parsing, but report the first error
@@ -61,36 +59,36 @@ fn parse_items_acc(cur: Cursor, acc: List<Item>) -> ParseResultItemList {
 /// Grammar:
 ///   Item = Visibility? ItemKind
 ///   ItemKind = FnDef | TypeDef | Theorem | Lemma | Axiom | Extern | Mod | Use
-pub fn parse_item(cur: Cursor) -> ParseResultItem {
+pub fn parse_item(cur: Cursor) -> Result<(Item, Cursor), ParseError> {
     let start_span = cursor_peek_span(cur);
     
     // Parse optional visibility modifier
     let vis_result = parse_visibility(cur);
-    match vis_result {
-        ParseErrVisibility(e) => ParseErrItem(e),
-        ParseOkVisibility(vis, cur2) => dispatch_item(cur2, vis, start_span)
-    }
+    let (vis, cur2) = vis_result?;
+    dispatch_item(cur2, vis, start_span)
 }
 
 /// Dispatch to the appropriate item parser based on keyword.
-fn dispatch_item(cur: Cursor, vis: Visibility, start_span: Span) -> ParseResultItem {
+fn dispatch_item(cur: Cursor, vis: Visibility, start_span: Span) -> Result<(Item, Cursor), ParseError> {
     match cursor_peek_kind(cur) {
-        None() => ParseErrItem(parse_error_unexpected_eof(start_span)),
-        Some(kind) => {
-            match kind {
-                TokFn() => parse_fn(cur, vis, start_span),
-                TokType() => parse_type_item(cur, vis, start_span),
-                TokTheorem() => parse_theorem(cur, vis, start_span),
-                TokLemma() => parse_lemma(cur, vis, start_span),
-                TokAxiom() => parse_axiom(cur, vis, start_span),
-                TokExtern() => parse_extern(cur, vis, start_span),
-                TokMod() => parse_mod(cur, vis, start_span),
-                TokUse() => parse_use_item(cur, vis, start_span),
-                _ => {
-                    let found = token_kind_name(kind);
-                    ParseErrItem(parse_error_expected("item", found, cursor_peek_span(cur)))
-                }
-            }
+        None() => Err(parse_error_unexpected_eof(start_span)),
+        Some(kind) => dispatch_item_kind(cur, vis, start_span, kind)
+    }
+}
+
+fn dispatch_item_kind(cur: Cursor, vis: Visibility, start_span: Span, kind: TokenKind) -> Result<(Item, Cursor), ParseError> {
+    match kind {
+        TokFn() => parse_fn(cur, vis, start_span),
+        TokType() => parse_type_item(cur, vis, start_span),
+        TokTheorem() => parse_theorem(cur, vis, start_span),
+        TokLemma() => parse_lemma(cur, vis, start_span),
+        TokAxiom() => parse_axiom(cur, vis, start_span),
+        TokExtern() => parse_extern(cur, vis, start_span),
+        TokMod() => parse_mod(cur, vis, start_span),
+        TokUse() => parse_use_item(cur, vis, start_span),
+        _ => {
+            let found = token_kind_name(kind);
+            Err(parse_error_expected("item", found, cursor_peek_span(cur)))
         }
     }
 }

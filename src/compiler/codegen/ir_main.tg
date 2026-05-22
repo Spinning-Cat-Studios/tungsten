@@ -1,0 +1,22 @@
+// src/compiler/codegen/ir_main.tg
+// Main wrapper generation.
+//
+// Emits a `main(argc, argv)` C entry point that calls the user's `tungsten_main`.
+
+use codegen::ir_builder::{IRState, emit_line, emit_blank};
+
+// ===========================================================================
+// MAIN WRAPPER
+// ===========================================================================
+
+/// Emit the C-level main() that calls tungsten_main and exits.
+pub fn emit_main_wrapper(st: IRState) -> IRState {
+    let st = emit_line(st, "; Entry point wrapper");
+    let st = emit_line(st, "define i64 @main(i32 %argc, ptr %argv) {");
+    let st = emit_line(st, "entry:");
+    // Call tungsten_main (closure wrapper returns { ptr, ptr }, we call $direct)
+    let st = emit_line(st, "  %result = call i64 @tungsten_main$direct(ptr null)");
+    let st = emit_line(st, "  ret i64 0");
+    let st = emit_line(st, "}");
+    emit_blank(st)
+}

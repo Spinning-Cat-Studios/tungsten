@@ -1,58 +1,8 @@
 // src/compiler/parser/exprs/result.tg
 // Parse result types for expression parsing.
+// These types have been migrated to Result<(T, Cursor), ParseError>.
 
-use lexer::span::{Span, span_empty};
-use parser::error::ParseError;
-use parser::cursor::Cursor;
-use parser::option::{Option, None, Some};
 use parser::ast::common::BinOp;
-use parser::ast::nodes::{Expr, MaybeExpr, Stmt,
-    LambdaParam, FieldInit, MatchArm};
-use driver::ffi::List;
-
-// ===========================================================================
-// PARSE RESULT TYPES FOR EXPRESSIONS
-// ===========================================================================
-
-/// Result of parsing an expression.
-pub type ParseResultExpr =
-    | ParseOkExpr(Expr, Cursor)
-    | ParseErrExpr(ParseError)
-
-/// Result of parsing a statement.
-pub type ParseResultStmt =
-    | ParseOkStmt(Stmt, Cursor)
-    | ParseErrStmt(ParseError)
-
-/// Result of parsing an expression list.
-pub type ParseResultExprList =
-    | ParseOkExprList(List<Expr>, Cursor)
-    | ParseErrExprList(ParseError)
-
-/// Result of parsing a match arm.
-pub type ParseResultMatchArm =
-    | ParseOkMatchArm(MatchArm, Cursor)
-    | ParseErrMatchArm(ParseError)
-
-/// Result of parsing a match arm list.
-pub type ParseResultMatchArmList =
-    | ParseOkMatchArmList(List<MatchArm>, Cursor)
-    | ParseErrMatchArmList(ParseError)
-
-/// Result of parsing a lambda parameter list.
-pub type ParseResultLambdaParams =
-    | ParseOkLambdaParams(List<LambdaParam>, Cursor)
-    | ParseErrLambdaParams(ParseError)
-
-/// Result of parsing a field initialization list.
-pub type ParseResultFieldInits =
-    | ParseOkFieldInits(List<FieldInit>, Cursor)
-    | ParseErrFieldInits(ParseError)
-
-/// Result of parsing a statement list and optional final expression.
-pub type ParseResultBlock =
-    | ParseOkBlock(List<Stmt>, MaybeExpr, Cursor)
-    | ParseErrBlock(ParseError)
 
 // ===========================================================================
 // OPTION TYPES FOR BINARY OPERATORS

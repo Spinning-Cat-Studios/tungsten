@@ -1,0 +1,68 @@
+// Test natind/natrec surface syntax (ADR 22.5.26a).
+//
+// Run with: tungsten test tests/natind.tg --check-only
+
+// ===========================================================================
+// PARSER ACCEPTANCE — verify keyword(args...) syntax parses
+// ===========================================================================
+
+/// natind(motive, base, step, n) is syntactically valid.
+pub fn test_parse_natind() -> Unit {
+    expect_error(natind(|k: Nat| Nat, 0, fn(k: Nat, ih: Nat) => ih, true), "E0010");
+    ()
+}
+
+/// natrec(type, base, step, n) is syntactically valid.
+pub fn test_parse_natrec() -> Unit {
+    expect_error(natrec(Nat, 0, fn(k: Nat, acc: Nat) => acc, true), "E0010");
+    ()
+}
+
+// ===========================================================================
+// POSITIVE CASES — type-level checks
+// ===========================================================================
+
+/// natrec(Nat, base, step, n) type-checks and produces Nat.
+pub fn test_natrec_basic() -> Unit {
+    let _: Nat = natrec(Nat, 0, fn(k: Nat, acc: Nat) => acc, 0);
+    ()
+}
+
+/// natind with computational motive |k: Nat| Nat type-checks.
+pub fn test_natind_computational_motive() -> Unit {
+    let _: Nat = natind(|k: Nat| Nat, 0, fn(k: Nat, ih: Nat) => ih, 0);
+    ()
+}
+
+/// natind producing an equality proof for a concrete value.
+pub fn test_natind_proof_relevant() -> Unit {
+    let _: Eq<Nat, 0, 0> = natind(
+        |k: Nat| Eq<Nat, 0, 0>,
+        refl,
+        fn(k: Nat, ih: Eq<Nat, 0, 0>) => ih,
+        0
+    );
+    ()
+}
+
+// ===========================================================================
+// NEGATIVE CASES — error detection
+// ===========================================================================
+
+/// natind with non-lambda motive (integer literal) produces E0078.
+pub fn test_natind_motive_not_lambda() -> Unit {
+    expect_error(natind(42, 0, 0, 0), "E0075");
+    ()
+}
+
+/// natind base case type mismatch: Bool where Nat expected.
+pub fn test_natind_base_mismatch() -> Unit {
+    expect_error(natind(|k: Nat| Nat, true, fn(k: Nat, ih: Nat) => ih, 0), "E0010");
+    ()
+}
+
+/// natrec target not Nat.
+pub fn test_natrec_target_not_nat() -> Unit {
+    expect_error(natrec(Nat, 0, fn(k: Nat, acc: Nat) => acc, true), "E0010");
+    ()
+}

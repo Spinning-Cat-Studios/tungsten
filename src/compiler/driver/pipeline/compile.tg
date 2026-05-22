@@ -1,0 +1,116 @@
+// src/compiler/driver/pipeline/compile.tg
+// Compile pipeline: check + codegen.
+//
+// Delegates codegen to the bootstrap compiler binary via subprocess.
+// The self-hosted check runs first for diagnostics; if it passes,
+// the bootstrap binary produces the actual binary.
+
+use driver::ffi::{
+    eprintln, stderr_is_tty,
+    List, Nil, Cons,
+    exec_process, get_env_var, current_exe_dir,
+    file_exists, path_join, string_len
+};
+use driver::util::{
+    Option, Some, None,
+    string_eq, nat_to_string, list_reverse
+};
+use driver::cli::{CheckOpts, CompileOpts};
+use driver::modules::build::{strip_tg_extension};
+use elab::env::types::{ElabCompile};
+use elab::error::render::colors::{colorize_bold, ColorRed, ColorCyan};
+use elab::error::{default_max_errors};
+use driver::pipeline::{PipelineResult, PipelineOk, PipelineErr};
+use driver::pipeline::check::run_check;
+
+// ===========================================================================
+// COMPILE PIPELINE
+// ===========================================================================
+
+/// Run the compile pipeline: check + codegen.
+pub fn run_compile(opts: CompileOpts) -> PipelineResult {
+    let use_color = stderr_is_tty();
+    
+    // First, run the check pipeline
+    let max_errors = default_max_errors();
+    let check_opts: CheckOpts = { file: opts.file, verbose: opts.verbose, max_errors: max_errors, dump_core: None, check_tyvar_escape: false, elab_mode: ElabCompile };
+    let check_result = run_check(check_opts);
+    
+    match check_result {
+        PipelineErr(n) => PipelineErr(n),
+        PipelineOk(def_count) => {
+            // Check succeeded — delegate codegen to bootstrap binary
+            let bootstrap = find_bootstrap_binary();
+            
+            // Use sentinel: empty string means "not specified", derive from file
+            let output = if string_eq(opts.output, "") {
+                strip_tg_extension(opts.file)
+            } else {
+                opts.output
+            };
+            
+            // Build argument list
+            let args = Cons("compile", Cons(opts.file, Cons("-o", Cons(output, Nil))));
+            let args = if opts.verbose { append(args, Cons("-v", Nil)) } else { args };
+            let args = if opts.emit_llvm { append(args, Cons("--emit-llvm", Nil)) } else { args };
+            
+            if opts.verbose {
+                eprintln(colorize_bold("info", ColorCyan, use_color) ++
+                        ": delegating codegen to bootstrap (" ++ bootstrap ++ ")")
+            };
+            
+            let exit_code = exec_process(bootstrap, args);
+            
+            if exit_code == 0 {
+                if opts.verbose {
+                    eprintln(colorize_bold("info", ColorCyan, use_color) ++
+                            ": compilation succeeded (" ++ nat_to_string(def_count) ++ " definitions)")
+                };
+                PipelineOk(def_count)
+            } else {
+                eprintln(colorize_bold("error", ColorRed, use_color) ++
+                        ": bootstrap codegen failed (exit code " ++ nat_to_string(exit_code) ++ ")");
+                PipelineErr(1)
+            }
+        }
+    }
+}
+
+/// Find the bootstrap compiler binary.
+///
+/// Resolution order:
+/// 1. TUNGSTEN_BOOTSTRAP_BIN env var (explicit override)
+/// 2. <exe_dir>/tungsten-bootstrap (release archive layout)
+/// 3. ./target/release/tungsten (dev fallback)
+pub fn find_bootstrap_binary() -> String {
+    match get_env_var("TUNGSTEN_BOOTSTRAP_BIN") {
+        Some(path) => path,
+        None() => find_bootstrap_beside_exe()
+    }
+}
+
+fn find_bootstrap_beside_exe() -> String {
+    match current_exe_dir() {
+        Some(dir) => {
+            let candidate = path_join(dir, "tungsten-bootstrap");
+            if file_exists(candidate) {
+                candidate
+            } else {
+                "./target/release/tungsten"
+            }
+        },
+        None() => "./target/release/tungsten"
+    }
+}
+
+/// Append two lists.
+fn append<T>(xs: List<T>, ys: List<T>) -> List<T> {
+    append_acc(list_reverse(xs), ys)
+}
+
+fn append_acc<T>(reversed_xs: List<T>, ys: List<T>) -> List<T> {
+    match reversed_xs {
+        Nil() => ys,
+        Cons(x, rest) => append_acc(rest, Cons(x, ys))
+    }
+}

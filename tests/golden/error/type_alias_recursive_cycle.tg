@@ -1,0 +1,2 @@
+// AC7: Recursive alias cycle should be rejected
+type Foo = Foo

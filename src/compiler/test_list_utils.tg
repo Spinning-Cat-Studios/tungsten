@@ -1,0 +1,134 @@
+// Unit tests for driver/util/lists.tg functions.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_bool, assert_eq_nat};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{
+    list_len, list_is_empty, list_contains_string,
+    list_eq_string, list_is_prefix_or_eq_string
+};
+use parser::option::{Option, Some, None};
+use driver::util::{list_get};
+
+// ---------------------------------------------------------------------------
+// list_len
+// ---------------------------------------------------------------------------
+
+pub fn test_list_len_empty() -> Unit {
+    let xs: List<Nat> = Nil;
+    assert_eq_nat(list_len(xs), 0)
+}
+
+pub fn test_list_len_three() -> Unit {
+    let xs = Cons(1, Cons(2, Cons(3, Nil)));
+    assert_eq_nat(list_len(xs), 3)
+}
+
+// ---------------------------------------------------------------------------
+// list_is_empty
+// ---------------------------------------------------------------------------
+
+pub fn test_list_is_empty_true() -> Unit {
+    let xs: List<Nat> = Nil;
+    assert_eq_bool(list_is_empty(xs), true)
+}
+
+pub fn test_list_is_empty_false() -> Unit {
+    assert_eq_bool(list_is_empty(Cons(1, Nil)), false)
+}
+
+// ---------------------------------------------------------------------------
+// list_contains_string
+// ---------------------------------------------------------------------------
+
+pub fn test_list_contains_string_found() -> Unit {
+    let xs = Cons("alpha", Cons("beta", Cons("gamma", Nil)));
+    assert_eq_bool(list_contains_string(xs, "beta"), true)
+}
+
+pub fn test_list_contains_string_not_found() -> Unit {
+    let xs = Cons("alpha", Cons("beta", Nil));
+    assert_eq_bool(list_contains_string(xs, "delta"), false)
+}
+
+pub fn test_list_contains_string_empty_list() -> Unit {
+    assert_eq_bool(list_contains_string(Nil, "x"), false)
+}
+
+// ---------------------------------------------------------------------------
+// list_eq_string
+// ---------------------------------------------------------------------------
+
+pub fn test_list_eq_string_same() -> Unit {
+    let xs = Cons("a", Cons("b", Nil));
+    let ys = Cons("a", Cons("b", Nil));
+    assert_eq_bool(list_eq_string(xs, ys), true)
+}
+
+pub fn test_list_eq_string_different() -> Unit {
+    let xs = Cons("a", Cons("b", Nil));
+    let ys = Cons("a", Cons("c", Nil));
+    assert_eq_bool(list_eq_string(xs, ys), false)
+}
+
+pub fn test_list_eq_string_different_length() -> Unit {
+    let xs = Cons("a", Nil);
+    let ys = Cons("a", Cons("b", Nil));
+    assert_eq_bool(list_eq_string(xs, ys), false)
+}
+
+// ---------------------------------------------------------------------------
+// list_is_prefix_or_eq_string
+// ---------------------------------------------------------------------------
+
+pub fn test_list_is_prefix_or_eq_string_prefix() -> Unit {
+    let prefix = Cons("driver", Nil);
+    let full = Cons("driver", Cons("cli", Nil));
+    assert_eq_bool(list_is_prefix_or_eq_string(prefix, full), true)
+}
+
+pub fn test_list_is_prefix_or_eq_string_equal() -> Unit {
+    let xs = Cons("a", Cons("b", Nil));
+    let ys = Cons("a", Cons("b", Nil));
+    assert_eq_bool(list_is_prefix_or_eq_string(xs, ys), true)
+}
+
+pub fn test_list_is_prefix_or_eq_string_not() -> Unit {
+    let xs = Cons("x", Nil);
+    let ys = Cons("y", Cons("z", Nil));
+    assert_eq_bool(list_is_prefix_or_eq_string(xs, ys), false)
+}
+
+// ---------------------------------------------------------------------------
+// list_get
+// ---------------------------------------------------------------------------
+
+pub fn test_list_get_first() -> Unit {
+    let xs = Cons(10, Cons(20, Cons(30, Nil)));
+    match list_get(xs, 0) {
+        Some(v) => assert_eq_nat(v, 10),
+        None() => assert_eq_bool(true, false)
+    }
+}
+
+pub fn test_list_get_middle() -> Unit {
+    let xs = Cons(10, Cons(20, Cons(30, Nil)));
+    match list_get(xs, 1) {
+        Some(v) => assert_eq_nat(v, 20),
+        None() => assert_eq_bool(true, false)
+    }
+}
+
+pub fn test_list_get_out_of_bounds() -> Unit {
+    let xs = Cons(10, Nil);
+    match list_get(xs, 5) {
+        Some(_) => assert_eq_bool(true, false),
+        None() => assert_eq_bool(true, true)
+    }
+}
+
+pub fn main() -> Nat { 0 }

@@ -1,0 +1,6 @@
+// Sibling import: `helper` resolves via sibling as `parent::helper`
+use helper::value;
+
+pub fn get_value() -> String {
+    value()
+}

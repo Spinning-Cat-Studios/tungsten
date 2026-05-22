@@ -1,0 +1,82 @@
+// Evaluator bridge — FFI for the `run` command.
+
+use driver::ffi::types::{
+    CString,
+    string_to_cstring, cstring_to_string, cstring_is_null,
+    tg_free_string,
+    invalid_handle
+};
+use elab::ffi::TermHandle;
+
+// --- Evaluation Environment ---
+
+pub type EvalEnvHandle = Nat
+
+pub fn invalid_env_handle() -> EvalEnvHandle { 18446744073709551615 }
+
+// --- Raw FFI Declarations ---
+
+extern "C" fn tg_eval_env_new() -> EvalEnvHandle
+extern "C" fn tg_eval_env_add(env: EvalEnvHandle, name: CString, term: TermHandle) -> Int
+extern "C" fn tg_eval_env_free(env: EvalEnvHandle) -> Unit
+extern "C" fn tg_eval_run(term: TermHandle, env: EvalEnvHandle) -> TermHandle
+extern "C" fn tg_eval_run_with_limit(term: TermHandle, env: EvalEnvHandle, limit: Nat) -> TermHandle
+extern "C" fn tg_eval_display(term: TermHandle) -> CString
+extern "C" fn tg_eval_display_value(term: TermHandle) -> CString
+
+// --- Safe Wrappers ---
+
+pub fn eval_env_new() -> EvalEnvHandle {
+    tg_eval_env_new()
+}
+
+pub fn eval_env_add(env: EvalEnvHandle, name: String, term: TermHandle) -> Bool {
+    let name_c = string_to_cstring(name);
+    let result = tg_eval_env_add(env, name_c, term);
+    tg_free_string(name_c);
+    result == 1
+}
+
+pub fn eval_env_free(env: EvalEnvHandle) -> Unit {
+    tg_eval_env_free(env)
+}
+
+pub fn eval_run(term: TermHandle, env: EvalEnvHandle) -> Option<TermHandle> {
+    let result = tg_eval_run(term, env);
+    if result == invalid_handle() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+pub fn eval_run_with_limit(term: TermHandle, env: EvalEnvHandle, limit: Nat) -> Option<TermHandle> {
+    let result = tg_eval_run_with_limit(term, env, limit);
+    if result == invalid_handle() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
+pub fn eval_display(term: TermHandle) -> Option<String> {
+    let result_c = tg_eval_display(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+pub fn eval_display_value(term: TermHandle) -> Option<String> {
+    let result_c = tg_eval_display_value(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}

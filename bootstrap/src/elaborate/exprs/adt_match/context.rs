@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::ast;
+use tungsten_core::Type;
 
 use crate::elaborate::env as elab_env;
 
@@ -33,4 +34,38 @@ pub(crate) struct ClassifiedArms<'a> {
     pub ctor_arms: HashMap<usize, Vec<&'a ast::MatchArm>>,
     /// Optional catch-all arm (wildcard `_` or variable binding)
     pub catch_all: Option<&'a ast::MatchArm>,
+}
+
+/// Codegen context for ADT match tree construction.
+///
+/// Bundles the ADT identity, arm mapping, and type parameters
+/// that are threaded through every recursive call during match codegen.
+pub(crate) struct AdtCodegenCtx<'a> {
+    pub ctor_arms: &'a HashMap<usize, Vec<&'a ast::MatchArm>>,
+    pub catch_all_arm: Option<&'a ast::MatchArm>,
+    pub constructors: &'a [elab_env::Constructor],
+    pub adt_type: &'a Type,
+    pub type_params: &'a [String],
+    pub adt_name: &'a str,
+}
+
+/// ADT identity context for arm elaboration.
+///
+/// Bundles the ADT's type, type parameters, and name — the three
+/// fields that every arm elaboration and codegen function needs.
+pub(crate) struct AdtIdentity<'a> {
+    pub adt_type: &'a Type,
+    pub type_params: &'a [String],
+    pub adt_name: &'a str,
+}
+
+impl<'a> AdtCodegenCtx<'a> {
+    /// Extract the ADT identity from this codegen context.
+    pub fn identity(&self) -> AdtIdentity<'a> {
+        AdtIdentity {
+            adt_type: self.adt_type,
+            type_params: self.type_params,
+            adt_name: self.adt_name,
+        }
+    }
 }

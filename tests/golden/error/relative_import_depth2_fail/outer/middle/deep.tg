@@ -1,0 +1,8 @@
+// Depth 2 module: outer::middle::deep
+// Attempts `use target::secret_fn` — should fail since `target` is at
+// outer::target, two levels up (grandparent's child).
+use target::secret_fn;
+
+pub fn wrapper() -> String {
+    secret_fn()
+}

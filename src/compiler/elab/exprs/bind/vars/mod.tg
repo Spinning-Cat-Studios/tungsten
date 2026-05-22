@@ -1,0 +1,58 @@
+// src/compiler/elab/exprs/bind/vars/mod.tg
+// Variable and path elaboration.
+// Produces both Core terms (TermHandle) and CodegenIR in lockstep.
+
+pub mod constructors;
+pub mod cir_constructors;
+
+use lexer::span::Span;
+use parser::ast::{Path, path_span};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_var_named, tg_term_global,
+    tg_string_to_cstr
+};
+use elab::env::{
+    Env, env_resolve_value_path,
+    ValuePathResult, ValuePathOk, ValuePathErr,
+    ResolvedValue, ResolvedLocal, ResolvedGlobal, ResolvedConstructor,
+    ConstructorInfo
+};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error_coded};
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CIRVar, CIRGlobal,
+    type_handle_to_codegen_type
+};
+use elab::exprs::bind::vars::constructors::synth_constructor;
+
+// ===========================================================================
+// VARIABLE ELABORATION
+// ===========================================================================
+
+/// Synthesize a path (variable lookup).
+pub fn synth_path(env: Env, path: Path) -> ElabExprResult {
+    let span = path_span(path);
+    let result = env_resolve_value_path(env, path);
+    match result {
+        ValuePathOk(resolved) =>
+            synth_resolved_value(env, resolved, span),
+        ValuePathErr(err) =>
+            ElabExprErr(elab_expr_error_coded(err.message, err.span, err.code))
+    }
+}
+
+fn synth_resolved_value(env: Env, resolved: ResolvedValue, span: Span) -> ElabExprResult {
+    match resolved {
+        ResolvedLocal(index, ty, name) =>
+            let term = tg_term_var_named(tg_string_to_cstr(name));
+            let cir = CIRVar(name, type_handle_to_codegen_type(ty));
+            ElabExprOk(env, term, ty, cir),
+        ResolvedGlobal(name, ty) =>
+            let term = tg_term_global(tg_string_to_cstr(name));
+            let cir = CIRGlobal(name);
+            ElabExprOk(env, term, ty, cir),
+        ResolvedConstructor(info) =>
+            synth_constructor(env, info, span)
+    }
+}

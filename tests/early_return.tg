@@ -1,0 +1,65 @@
+// tests/early_return.tg
+// Tests for early return (ADR 13.5.26d)
+
+// Basic return — should type-check the return value against the declared return type
+fn test_basic_return() -> Nat {
+    return 42
+}
+
+// Return in conditional — ⊥ unifies with Nat
+fn test_return_in_if(x: Bool) -> Nat {
+    if x { return 1 } else { 2 }
+}
+
+// Return in both branches
+fn test_return_both_branches(x: Bool) -> Nat {
+    if x { return 1 } else { return 2 }
+}
+
+// Nested return in match arm
+type Option<T> = None | Some(T)
+
+fn test_return_in_match(x: Option<Nat>) -> Nat {
+    match x {
+        None => return 0,
+        Some(n) => n
+    }
+}
+
+// Return string from string function
+fn test_return_string() -> String {
+    return "hello"
+}
+
+// Return bool
+fn test_return_bool(x: Nat) -> Bool {
+    if x == 0 { return true } else { return false }
+}
+
+// Dead code after return — should produce W0002 warning
+fn test_dead_code_after_return() -> Nat {
+    return 42;
+    100
+}
+
+// Return in closure checks against closure's return type (§2.3.1)
+fn apply_nat(f: Nat -> Bool) -> Bool { f(42) }
+
+fn test_return_in_closure() -> Nat {
+    apply_nat(fn(x: Nat) => return true);
+    42
+}
+
+// ⊥ in else branch unifies with Nat binding
+fn test_return_in_let_if() -> Nat {
+    let x: Nat = if true { 1 } else { return 0 };
+    x
+}
+
+// Acceptance criterion: return expression has ⊥ (Void) type
+// Note: uses -> Nat because `return 42` checks 42 against the return type.
+// Verified via `tungsten test --check-only` or the Rust test_return_type_is_void.
+fn test_return_type_is_void() -> Nat {
+    expect_type(return 42, "Void");
+    0
+}

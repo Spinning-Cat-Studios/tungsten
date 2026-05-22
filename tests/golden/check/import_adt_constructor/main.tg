@@ -1,0 +1,15 @@
+// Test: importing ADT constructors by name should work.
+// Both the type name and constructor names should resolve.
+
+pub mod colors;
+
+use colors::{Color, Red, Green, Blue};
+
+fn main() -> Nat {
+    let c: Color = Red;
+    match c {
+        Red() => 0,
+        Green() => 1,
+        Blue() => 2
+    }
+}

@@ -1,0 +1,280 @@
+// src/compiler/test_codegen.tg
+// Unit tests for the self-hosted LLVM IR text emitter (ADR 13.5.26j).
+//
+// Run with: tungsten test src/compiler/test_codegen.tg
+// All tests are cost 5 (assert_eq_* needs LLVM) — run in devcontainer.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+mod codegen;
+
+use driver::ffi::test::{assert_eq_string, assert_eq_nat, assert_eq_bool};
+use codegen::ir_types::{llvm_type, type_size};
+use codegen::ir_builder::{ir_state_new, fresh_name, fresh_label, emit_line, ir_state_to_string};
+use codegen::ir_closures::{emit_lambda, emit_app, emit_fix};
+use elab::cir::types::{
+    CodegenType, CodegenIR,
+    CTNat, CTBool, CTString, CTUnit,
+    CTArrow, CTPair, CTSum, CTMu,
+    CIRVar, CIRNatLit, CIRLambda, CIRApp,
+    CIRCaptureList, CIRCaptureNil, CIRCaptureCons, CIRCapture
+};
+use elab::cir::capture::{cir_captures_empty, cir_captures_add};
+use codegen::capture_layout::{capture_env_type, capture_env_size};
+
+// ===========================================================================
+// llvm_type: CodegenType → LLVM type string
+// ===========================================================================
+
+pub fn test_llvm_type_nat() -> Unit {
+    assert_eq_string(llvm_type(CTNat), "i64")
+}
+
+pub fn test_llvm_type_bool() -> Unit {
+    assert_eq_string(llvm_type(CTBool), "i1")
+}
+
+pub fn test_llvm_type_string() -> Unit {
+    assert_eq_string(llvm_type(CTString), "{ ptr, i64 }")
+}
+
+pub fn test_llvm_type_unit() -> Unit {
+    assert_eq_string(llvm_type(CTUnit), "{}")
+}
+
+pub fn test_llvm_type_pair() -> Unit {
+    assert_eq_string(llvm_type(CTPair(CTNat, CTBool)), "{ i64, i1 }")
+}
+
+pub fn test_llvm_type_arrow() -> Unit {
+    assert_eq_string(llvm_type(CTArrow(CTNat, CTBool)), "{ ptr, ptr }")
+}
+
+pub fn test_llvm_type_sum() -> Unit {
+    // CTSum(CTNat, CTBool): tag i32 + max(8, 1) = 8 bytes payload
+    assert_eq_string(llvm_type(CTSum(CTNat, CTBool)), "{ i32, [8 x i8] }")
+}
+
+pub fn test_llvm_type_mu() -> Unit {
+    // Recursive types are heap-allocated → ptr
+    assert_eq_string(llvm_type(CTMu("List", CTNat)), "ptr")
+}
+
+// ===========================================================================
+// type_size: byte size calculation
+// ===========================================================================
+
+pub fn test_type_size_nat() -> Unit {
+    assert_eq_nat(type_size(CTNat), 8)
+}
+
+pub fn test_type_size_bool() -> Unit {
+    assert_eq_nat(type_size(CTBool), 1)
+}
+
+pub fn test_type_size_string() -> Unit {
+    assert_eq_nat(type_size(CTString), 16)
+}
+
+pub fn test_type_size_unit() -> Unit {
+    assert_eq_nat(type_size(CTUnit), 0)
+}
+
+pub fn test_type_size_pair() -> Unit {
+    // CTNat (8) + CTBool (1) = 9
+    assert_eq_nat(type_size(CTPair(CTNat, CTBool)), 9)
+}
+
+pub fn test_type_size_arrow() -> Unit {
+    // ptr (8) + ptr (8) = 16
+    assert_eq_nat(type_size(CTArrow(CTNat, CTBool)), 16)
+}
+
+// ===========================================================================
+// ir_builder: SSA name generation
+// ===========================================================================
+
+pub fn test_fresh_name_sequential() -> Unit {
+    let st = ir_state_new();
+    let (name0, st) = fresh_name(st);
+    let (name1, _) = fresh_name(st);
+    assert_eq_string(name0, "%0");
+    assert_eq_string(name1, "%1")
+}
+
+pub fn test_fresh_label_sequential() -> Unit {
+    let st = ir_state_new();
+    let (lbl0, st) = fresh_label(st);
+    let (lbl1, _) = fresh_label(st);
+    assert_eq_string(lbl0, "label0");
+    assert_eq_string(lbl1, "label1")
+}
+
+pub fn test_ir_state_to_string() -> Unit {
+    let st = ir_state_new();
+    let st = emit_line(st, "line1");
+    let st = emit_line(st, "line2");
+    assert_eq_string(ir_state_to_string(st), "line1\nline2")
+}
+
+// ===========================================================================
+// emit_sum_inl / emit_sum_inr: sum injection IR
+// ===========================================================================
+
+use codegen::ir_sums::{emit_sum_inl, emit_sum_inr, emit_sum_case};
+use driver::util::string_contains;
+use elab::ffi::tg_string_to_cstr;
+
+pub fn test_emit_sum_inl_tag_zero() -> Unit {
+    let st = ir_state_new();
+    let (result, st) = emit_sum_inl(st, "42", CTSum(CTNat, CTBool));
+    assert_eq_string(result, "%4");
+    let ir = ir_state_to_string(st);
+    // Must contain tag 0 store (inl)
+    assert_eq_bool(string_contains(ir, "store i32 0"), true);
+    // Must contain payload store with concrete type
+    assert_eq_bool(string_contains(ir, "store i64 42"), true);
+    // Must contain alloca for sum struct
+    assert_eq_bool(string_contains(ir, "alloca { i32, [8 x i8] }"), true)
+}
+
+pub fn test_emit_sum_inr_tag_one() -> Unit {
+    let st = ir_state_new();
+    let (result, st) = emit_sum_inr(st, "true", CTSum(CTNat, CTBool));
+    assert_eq_string(result, "%4");
+    let ir = ir_state_to_string(st);
+    // Must contain tag 1 store (inr)
+    assert_eq_bool(string_contains(ir, "store i32 1"), true);
+    // Must contain payload store with concrete type (Bool = i1)
+    assert_eq_bool(string_contains(ir, "store i1 true"), true)
+}
+
+// ===========================================================================
+// type_handle_to_codegen_type: TypeHandle → CodegenType
+// ===========================================================================
+
+use elab::ffi::{
+    tg_type_nat, tg_type_bool, tg_type_sum, tg_type_mu, tg_type_unit,
+    tg_type_arrow
+};
+use elab::cir::constructors::type_handle_to_codegen_type;
+
+pub fn test_type_handle_to_codegen_type_nat() -> Unit {
+    let ct = type_handle_to_codegen_type(tg_type_nat());
+    assert_eq_string(llvm_type(ct), "i64")
+}
+
+pub fn test_type_handle_to_codegen_type_bool() -> Unit {
+    let ct = type_handle_to_codegen_type(tg_type_bool());
+    assert_eq_string(llvm_type(ct), "i1")
+}
+
+pub fn test_type_handle_to_codegen_type_sum() -> Unit {
+    let sum_handle = tg_type_sum(tg_type_nat(), tg_type_bool());
+    let ct = type_handle_to_codegen_type(sum_handle);
+    assert_eq_string(llvm_type(ct), "{ i32, [8 x i8] }")
+}
+
+pub fn test_type_handle_to_codegen_type_unit() -> Unit {
+    let ct = type_handle_to_codegen_type(tg_type_unit());
+    assert_eq_string(llvm_type(ct), "{}")
+}
+
+pub fn test_type_handle_to_codegen_type_arrow() -> Unit {
+    let arrow_handle = tg_type_arrow(tg_type_nat(), tg_type_bool());
+    let ct = type_handle_to_codegen_type(arrow_handle);
+    assert_eq_string(llvm_type(ct), "{ ptr, ptr }")
+}
+
+pub fn test_type_handle_to_codegen_type_mu() -> Unit {
+    let mu_handle = tg_type_mu(tg_string_to_cstr("List"), tg_type_nat());
+    let ct = type_handle_to_codegen_type(mu_handle);
+    assert_eq_string(llvm_type(ct), "ptr")
+}
+
+// ===========================================================================
+// type_size: sum types
+// ===========================================================================
+
+pub fn test_type_size_sum() -> Unit {
+    // CTSum(CTNat, CTBool): 4 (tag) + max(8, 1) = 12 bytes
+    assert_eq_nat(type_size(CTSum(CTNat, CTBool)), 12)
+}
+
+// ===========================================================================
+// emit_sum_case: case analysis IR
+// ===========================================================================
+
+pub fn test_emit_sum_case_switch() -> Unit {
+    let st = ir_state_new();
+    let sum_ty = CTSum(CTNat, CTBool);
+    let result_ty = CTNat;
+    let scrut: CodegenIR = CIRVar("scrut", CTSum(CTNat, CTBool));
+    let left_body: CodegenIR = CIRVar("a", CTNat);
+    let right_body: CodegenIR = CIRVar("b", CTBool);
+    let (_, st) = emit_sum_case(st, scrut, sum_ty, "a", left_body, "b", right_body, result_ty);
+    let ir = ir_state_to_string(st);
+    // Must emit switch on tag
+    assert_eq_bool(string_contains(ir, "switch i32"), true);
+    // Must have unreachable default block
+    assert_eq_bool(string_contains(ir, "unreachable"), true);
+    // Must allocate result via alloca pattern
+    assert_eq_bool(string_contains(ir, "alloca i64"), true)
+}
+
+// ===========================================================================
+// capture_env_type / capture_env_size
+// ===========================================================================
+
+pub fn test_capture_env_type_empty() -> Unit {
+    assert_eq_string(capture_env_type(CIRCaptureNil), "{}")
+}
+
+pub fn test_capture_env_type_one() -> Unit {
+    let caps = cir_captures_add("x", CTNat, cir_captures_empty());
+    assert_eq_string(capture_env_type(caps), "<{ i64 }>")
+}
+
+pub fn test_capture_env_type_two() -> Unit {
+    let caps = cir_captures_add("x", CTNat, cir_captures_add("b", CTBool, cir_captures_empty()));
+    assert_eq_string(capture_env_type(caps), "<{ i64, i1 }>")
+}
+
+pub fn test_capture_env_size_empty() -> Unit {
+    assert_eq_nat(capture_env_size(CIRCaptureNil), 0)
+}
+
+pub fn test_capture_env_size_nat_bool() -> Unit {
+    let caps = cir_captures_add("x", CTNat, cir_captures_add("b", CTBool, cir_captures_empty()));
+    assert_eq_nat(capture_env_size(caps), 9)
+}
+
+// ===========================================================================
+// emit_app: closure application
+// ===========================================================================
+
+pub fn test_emit_app_extracts_and_calls() -> Unit {
+    let st = ir_state_new();
+    let (result, st) = emit_app(st, "%f", "%arg", CTNat, CTBool);
+    let ir = ir_state_to_string(st);
+    // Must extract fn_ptr and env_ptr
+    assert_eq_bool(string_contains(ir, "extractvalue { ptr, ptr }"), true);
+    // Must emit indirect call
+    assert_eq_bool(string_contains(ir, "call i1"), true)
+}
+
+// ===========================================================================
+// emit_lambda: non-capturing lambda
+// ===========================================================================
+
+pub fn test_emit_lambda_non_capturing() -> Unit {
+    let st = ir_state_new();
+    let body: CodegenIR = CIRVar("x", CTNat);
+    let (result, st) = emit_lambda(st, "x", CTNat, body, CIRCaptureNil, CTNat);
+    let ir = ir_state_to_string(st);
+    // Must build closure pair with null env
+    assert_eq_bool(string_contains(ir, "insertvalue { ptr, ptr }"), true);
+    assert_eq_bool(string_contains(ir, "ptr null"), true)
+}

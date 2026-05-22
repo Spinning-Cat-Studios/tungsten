@@ -1,0 +1,14 @@
+warning: Phase A.5 global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0006]: cannot find `NonExistent` in module `mymod` (at 79..97)
+  hint: run `tungsten doctor check phase-a5 <file>` for details
+[E0006] Error: cannot find `NonExistent` in module `mymod`
+   ╭─[tests/golden/error/import_not_found/main.tg:5:5]
+   │
+ 5 │ use mymod::NonExistent;
+   │     ─────────┬────────  
+   │              ╰────────── 
+   │ 
+   │ Note: Phase A.5 global collection failed — this error may be caused by a bad import in another module. Run `tungsten doctor check phase-a5 <file>` for details.
+───╯
+
+error: aborting due to 1 error

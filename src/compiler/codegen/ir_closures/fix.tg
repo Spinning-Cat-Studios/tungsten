@@ -1,0 +1,141 @@
+// src/compiler/codegen/ir_closures/fix.tg
+// Recursive closure (fix) emission.
+//
+// The environment's first slot stores the self closure { ptr, ptr },
+// enabling recursive calls through the normal CIRApp path.
+
+use driver::util::nat_to_string;
+use elab::cir::types::{
+    CodegenIR, CodegenType,
+    CIRCaptureList, CIRCaptureNil, CIRCaptureCons, CIRCapture
+};
+use elab::cir::capture::{cir_captures_len};
+use codegen::capture_layout::{capture_env_type, capture_env_size};
+use codegen::ir_builder::{
+    IRState, fresh_name, fresh_lambda_name,
+    emit_line, emit_deferred, emit_env_type,
+    ir_state_fork_body, ir_state_merge_body, ir_state_to_string
+};
+use codegen::ir_types::{llvm_type};
+use codegen::ir_expr::{emit_expr};
+
+// ===========================================================================
+// FIX EMISSION
+// ===========================================================================
+
+/// Emit a recursive closure (fix point).
+/// The environment always contains the self closure as slot 0.
+/// External captures (if any) occupy slots 1..N.
+pub fn emit_fix(
+    st: IRState, self_name: String, self_type: CodegenType,
+    body: CodegenIR, captures: CIRCaptureList
+) -> (String, IRState) {
+    // Generate unique name
+    let (fix_name, st) = fresh_lambda_name(st);
+    let env_type_name = "%env." ++ nat_to_string(st.next_lambda - 1);
+    let self_ty_str = llvm_type(self_type);
+
+    // Env type: packed struct with self closure in slot 0 + capture fields
+    let env_type_str = match captures {
+        CIRCaptureNil() => env_type_name ++ " = type <{ { ptr, ptr } }>",
+        CIRCaptureCons(_, _) =>
+            let cap_fields = capture_fields_for_fix(captures);
+            env_type_name ++ " = type <{ { ptr, ptr }, " ++ cap_fields ++ " }>"
+    };
+    let st = emit_env_type(st, env_type_str);
+
+    // Fork state: emit body into separate buffer
+    let body_st = ir_state_fork_body(st);
+    // Load self closure from env slot 0
+    let (self_ptr, body_st) = fresh_name(body_st);
+    let body_st = emit_line(body_st, "  " ++ self_ptr ++ " = getelementptr " ++ env_type_name ++ ", ptr %__env, i32 0, i32 0");
+    let body_st = emit_line(body_st, "  %" ++ self_name ++ " = load { ptr, ptr }, ptr " ++ self_ptr);
+    // Load external captures from env slots 1..N
+    let body_st = emit_fix_capture_loads(body_st, captures, env_type_name, 1);
+    let (ret_val, body_st) = emit_expr(body_st, body);
+    let body_ir = ir_state_to_string(body_st);
+
+    // Merge counters back
+    let st = ir_state_merge_body(st, body_st);
+
+    // Emit inner function to deferred buffer
+    let st = emit_deferred(st, "define " ++ self_ty_str ++ " " ++ fix_name ++ "(ptr %__env, " ++ self_ty_str ++ " %__unused) {");
+    let st = emit_deferred(st, "entry:");
+    let st = emit_deferred(st, body_ir);
+    let st = emit_deferred(st, "  ret " ++ self_ty_str ++ " " ++ ret_val);
+    let st = emit_deferred(st, "}");
+    let st = emit_deferred(st, "");
+
+    // Compute env size: 16 (self closure) + capture sizes
+    let env_size = 16 + capture_env_size(captures);
+    let (env_mem, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ env_mem ++ " = call ptr @malloc(i64 " ++ nat_to_string(env_size) ++ ")");
+
+    // Build self closure pair
+    let (c1, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ c1 ++ " = insertvalue { ptr, ptr } undef, ptr " ++ fix_name ++ ", 0");
+    let (c2, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ c2 ++ " = insertvalue { ptr, ptr } " ++ c1 ++ ", ptr " ++ env_mem ++ ", 1");
+
+    // Store self closure into env slot 0
+    let (self_slot, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ self_slot ++ " = getelementptr " ++ env_type_name ++ ", ptr " ++ env_mem ++ ", i32 0, i32 0");
+    let st = emit_line(st, "  store { ptr, ptr } " ++ c2 ++ ", ptr " ++ self_slot);
+
+    // Store external captures into env slots 1..N
+    let st = emit_fix_capture_stores(st, captures, env_type_name, env_mem, 1);
+
+    (c2, st)
+}
+
+/// Build comma-separated LLVM type fields for external captures.
+fn capture_fields_for_fix(captures: CIRCaptureList) -> String {
+    match captures {
+        CIRCaptureNil() => "",
+        CIRCaptureCons(cap, rest) =>
+            let field = llvm_type(cap.ty);
+            if fix_capture_list_is_empty(rest) {
+                field
+            } else {
+                field ++ ", " ++ capture_fields_for_fix(rest)
+            }
+    }
+}
+
+fn fix_capture_list_is_empty(list: CIRCaptureList) -> Bool {
+    match list {
+        CIRCaptureNil() => true,
+        CIRCaptureCons(_, _) => false
+    }
+}
+
+/// Emit GEP+load for each external capture inside the inner function body.
+fn emit_fix_capture_loads(
+    st: IRState, captures: CIRCaptureList, env_type_name: String, idx: Nat
+) -> IRState {
+    match captures {
+        CIRCaptureNil() => st,
+        CIRCaptureCons(cap, rest) =>
+            let ty_str = llvm_type(cap.ty);
+            let (ptr, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ ptr ++ " = getelementptr " ++ env_type_name ++ ", ptr %__env, i32 0, i32 " ++ nat_to_string(idx));
+            let st = emit_line(st, "  %" ++ cap.name ++ " = load " ++ ty_str ++ ", ptr " ++ ptr);
+            emit_fix_capture_loads(st, rest, env_type_name, idx + 1)
+    }
+}
+
+/// Emit GEP+store for each external capture at the call site.
+fn emit_fix_capture_stores(
+    st: IRState, captures: CIRCaptureList, env_type_name: String,
+    env_mem: String, idx: Nat
+) -> IRState {
+    match captures {
+        CIRCaptureNil() => st,
+        CIRCaptureCons(cap, rest) =>
+            let ty_str = llvm_type(cap.ty);
+            let (slot_ptr, st) = fresh_name(st);
+            let st = emit_line(st, "  " ++ slot_ptr ++ " = getelementptr " ++ env_type_name ++ ", ptr " ++ env_mem ++ ", i32 0, i32 " ++ nat_to_string(idx));
+            let st = emit_line(st, "  store " ++ ty_str ++ " %" ++ cap.name ++ ", ptr " ++ slot_ptr);
+            emit_fix_capture_stores(st, rest, env_type_name, env_mem, idx + 1)
+    }
+}

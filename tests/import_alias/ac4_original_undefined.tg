@@ -1,0 +1,12 @@
+// AC4: Original name should be undefined after aliasing
+mod math;
+
+use math::add as plus;
+
+fn test_alias() -> Nat {
+    plus(1, 2)
+}
+
+fn test_original() -> Nat {
+    add(1, 2)
+}

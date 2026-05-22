@@ -1,0 +1,9 @@
+[E9999] Error: expect_type: expected 2 arguments, found 1
+   ╭─[tests/golden/error/expect_type_wrong_arity.tg:4:5]
+   │
+ 4 │     expect_type(42);
+   │     ───────┬───────  
+   │            ╰───────── 
+───╯
+
+error: aborting due to 1 error

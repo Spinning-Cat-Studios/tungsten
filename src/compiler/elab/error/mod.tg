@@ -31,6 +31,8 @@ pub use elab::error::kinds::{
     ErrInexhaustiveMatch, ErrUnreachablePattern, ErrConstructorNotFound,
     ErrDuplicateField, ErrMissingField, ErrExtraField, ErrMultiArmMatch,
     ErrProofRequired, ErrSorryInProd, ErrInvalidRefl,
+    ErrSubstExpectedEquality, ErrTransEndpointMismatch, ErrCongExpectedFunction,
+    ErrMotiveNotPredicate, ErrMotiveDomainMismatch, ErrMotiveBodyNotType,
     ErrRefInPureContext, ErrCannotMutate,
     ErrNoReturnContext, ErrNoMainFunction, ErrInvalidMainSig,
     ErrRecursionLimitExceeded, ErrPhase1Violation, ErrNotImplemented, ErrOther,
@@ -219,8 +221,11 @@ pub fn elab_error_with_help(err: ElabError, help: String) -> ElabError {
 }
 
 /// Create a duplicate import error with both import locations.
+/// `name` is the local alias that clashed; `source_name` is the actual item
+/// name in the second module (may differ when `as` aliasing is used).
 pub fn elab_error_duplicate_import(
     name: String,
+    source_name: String,
     first_span: Span,
     second_span: Span,
     first_module: String,
@@ -230,17 +235,8 @@ pub fn elab_error_duplicate_import(
         ErrDuplicateImport(name, first_span, second_span, first_module, second_module),
         second_span
     );
-    // Add help text suggesting `as` rename
-    let help_text = "use `as` to rename one import: `use " ++ second_module ++ "::" ++ name ++ " as " ++ name ++ "_alias;`";
+    // Add help text suggesting `as` rename — use source_name for the path
+    // so `use b::Bar as Foo` suggests `use b::Bar as bar_alias`, not `use b::Foo ...`
+    let help_text = "use `as` to rename one import: `use " ++ second_module ++ "::" ++ source_name ++ " as " ++ source_name ++ "_alias;`";
     elab_error_with_help(err, help_text)
-}
-
-/// Create a private access error with module context.
-pub fn elab_error_private_access(
-    item_name: String,
-    defined_in: String,
-    accessed_from: String,
-    span: Span
-) -> ElabError {
-    elab_error_new(ErrPrivateAccess(item_name, defined_in, accessed_from), span)
 }

@@ -1,0 +1,215 @@
+// Name resolution for the elaboration environment.
+//
+// Provides both single-name resolution (for unqualified names) and
+// path resolution (for qualified paths like module::Type).
+// Handles imports, re-exports, and visibility checking.
+
+use parser::ast::{
+    Ident, ident_name,
+    Path, MkPath,
+    ident_list_len,
+    VisPrivate, VisCrate, VisPublic
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::INVALID_HANDLE;
+use elab::env::types::{Env, MaybeTypeHandle, env_current_module_contents};
+use elab::env::ops::env_is_type_var;
+use elab::env::scope::{scope_stack_lookup, MaybeLocalBinding, NoLocalBinding, SomeLocalBinding};
+use elab::env::defs::{
+    TypeDefInfo, type_def_list_lookup,
+    ValueDefInfo, value_def_list_lookup, value_def_info_new,
+    ConstructorInfo, constructor_list_lookup,
+    MaybeTypeDef, NoTypeDef, SomeTypeDef,
+    MaybeValueDef, NoValueDef, SomeValueDef,
+    MaybeConstructor, NoConstructor, SomeConstructor
+};
+use elab::env::defs::{
+    MaybeResolvedValue, NoResolvedValue, SomeResolvedValue,
+    MaybeResolvedType, NoResolvedType, SomeResolvedType,
+    ResolvedValue, ResolvedLocal, ResolvedGlobal, ResolvedConstructor,
+    ResolvedType, ResolvedTypeDef, ResolvedTypeVar,
+    TypePathResult, TypePathOk, TypePathErr,
+    ValuePathResult, ValuePathOk, ValuePathErr,
+    EnvError, env_error_new
+};
+use elab::env::module::{
+    ElabModulePath, MkElabModulePath,
+    ModuleMap, ModuleMapNil, ModuleMapCons,
+    ModuleContents,
+    MaybeModuleContents, NoModuleContents, SomeModuleContents,
+    module_map_lookup,
+    elab_module_path_to_string,
+    Import
+};
+use elab::env::ops::env_check_visibility;
+use driver::util::list_is_prefix_or_eq_string;
+
+// ===========================================================================
+// SINGLE-NAME RESOLUTION
+// ===========================================================================
+
+/// Resolve a simple (unqualified) type name.
+pub fn env_resolve_type(env: Env, name: String) -> MaybeResolvedType {
+    // First check type variables
+    if env_is_type_var(env, name) {
+        SomeResolvedType(ResolvedTypeVar(name))
+    } else {
+        // Then check current module's types
+        let contents = env_current_module_contents(env);
+        match type_def_list_lookup(contents.types, name) {
+            SomeTypeDef(def) => SomeResolvedType(ResolvedTypeDef(def)),
+            NoTypeDef() =>
+                // Check imports
+                env_resolve_type_via_imports(env, contents.imports, name)
+        }
+    }
+}
+
+/// Helper: resolve type through imports.
+fn env_resolve_type_via_imports(env: Env, imports: List<Import>, name: String) -> MaybeResolvedType {
+    match imports {
+        Nil() => NoResolvedType,
+        Cons(imp, rest) =>
+            if imp.local_name == name {
+                // Found matching import, resolve in source module
+                let SomeModuleContents(contents) = module_map_lookup(env.modules, imp.source_path) else {
+                    return env_resolve_type_via_imports(env, rest, name)
+                };
+                let SomeTypeDef(def) = type_def_list_lookup(contents.types, imp.source_name) else {
+                    // Try source module's imports (re-exports)
+                    return env_resolve_type_via_source_imports(env, contents.imports, imp.source_name, rest, name)
+                };
+                SomeResolvedType(ResolvedTypeDef(def))
+            } else {
+                env_resolve_type_via_imports(env, rest, name)
+            }
+    }
+}
+
+/// Helper: resolve type through a source module's imports (for re-exports).
+fn env_resolve_type_via_source_imports(
+    env: Env,
+    source_imports: List<Import>,
+    source_name: String,
+    rest: List<Import>,
+    original_name: String
+) -> MaybeResolvedType {
+    match source_imports {
+        Nil() => 
+            // Not found in source module's imports, continue with rest
+            env_resolve_type_via_imports(env, rest, original_name),
+        Cons(imp, source_rest) =>
+            if imp.local_name == source_name {
+                // Found matching re-export, resolve in its source module
+                let SomeModuleContents(contents) = module_map_lookup(env.modules, imp.source_path) else {
+                    return env_resolve_type_via_source_imports(env, source_rest, source_name, rest, original_name)
+                };
+                let SomeTypeDef(def) = type_def_list_lookup(contents.types, imp.source_name) else {
+                    // Could recurse further for chained re-exports, but limit to one level
+                    return env_resolve_type_via_source_imports(env, source_rest, source_name, rest, original_name)
+                };
+                SomeResolvedType(ResolvedTypeDef(def))
+            } else {
+                env_resolve_type_via_source_imports(env, source_rest, source_name, rest, original_name)
+            }
+    }
+}
+
+/// Look up a local variable by name.
+/// Returns de Bruijn index, type, and source name if found.
+pub fn env_lookup_local(env: Env, name: String) -> MaybeResolvedValue {
+    match scope_stack_lookup(env.scopes, name) {
+        NoLocalBinding() => {
+            NoResolvedValue
+        },
+        SomeLocalBinding(binding) => {
+            // Calculate de Bruijn index: depth - binding_level - 1
+            let index = env.depth - binding.level - 1;
+            // Return name for CIR generation
+            SomeResolvedValue(ResolvedLocal(index, binding.ty, binding.name))
+        }
+    }
+}
+
+/// Resolve a simple (unqualified) value name.
+pub fn env_resolve_value(env: Env, name: String) -> MaybeResolvedValue {
+    // First check local bindings
+    match env_lookup_local(env, name) {
+        SomeResolvedValue(resolved) => SomeResolvedValue(resolved),
+        NoResolvedValue() =>
+            // Then check current module's values
+            let contents = env_current_module_contents(env);
+            match value_def_list_lookup(contents.values, name) {
+                SomeValueDef(def) => SomeResolvedValue(ResolvedGlobal(def.name, def.ty)),
+                NoValueDef() =>
+                    // Check constructors
+                    match constructor_list_lookup(contents.constructors, name) {
+                        SomeConstructor(info) => SomeResolvedValue(ResolvedConstructor(info)),
+                        NoConstructor() =>
+                            // Check imports
+                            env_resolve_value_via_imports(env, contents.imports, name)
+                    }
+            }
+    }
+}
+
+/// Try to resolve a value or constructor from module contents.
+/// Returns NoResolvedValue if not found in either namespace.
+fn resolve_value_or_ctor(contents: ModuleContents, name: String) -> MaybeResolvedValue {
+    match value_def_list_lookup(contents.values, name) {
+        SomeValueDef(def) => SomeResolvedValue(ResolvedGlobal(def.name, def.ty)),
+        NoValueDef() =>
+            match constructor_list_lookup(contents.constructors, name) {
+                SomeConstructor(info) => SomeResolvedValue(ResolvedConstructor(info)),
+                NoConstructor() => NoResolvedValue
+            }
+    }
+}
+
+/// Helper: resolve value through imports.
+fn env_resolve_value_via_imports(env: Env, imports: List<Import>, name: String) -> MaybeResolvedValue {
+    match imports {
+        Nil() => NoResolvedValue,
+        Cons(imp, rest) =>
+            if imp.local_name == name {
+                let SomeModuleContents(contents) = module_map_lookup(env.modules, imp.source_path) else {
+                    return env_resolve_value_via_imports(env, rest, name)
+                };
+                let SomeResolvedValue(v) = resolve_value_or_ctor(contents, imp.source_name) else {
+                    // Try source module's imports (re-exports)
+                    return env_resolve_value_via_source_imports(env, contents.imports, imp.source_name, rest, name)
+                };
+                SomeResolvedValue(v)
+            } else {
+                env_resolve_value_via_imports(env, rest, name)
+            }
+    }
+}
+
+/// Helper: resolve value through a source module's imports (for re-exports).
+fn env_resolve_value_via_source_imports(
+    env: Env,
+    source_imports: List<Import>,
+    source_name: String,
+    rest: List<Import>,
+    original_name: String
+) -> MaybeResolvedValue {
+    match source_imports {
+        Nil() => 
+            // Not found in source module's imports, continue with rest
+            env_resolve_value_via_imports(env, rest, original_name),
+        Cons(imp, source_rest) =>
+            if imp.local_name == source_name {
+                // Found matching re-export, resolve in its source module
+                let SomeModuleContents(contents) = module_map_lookup(env.modules, imp.source_path) else {
+                    return env_resolve_value_via_source_imports(env, source_rest, source_name, rest, original_name)
+                };
+                let SomeResolvedValue(v) = resolve_value_or_ctor(contents, imp.source_name) else {
+                    return env_resolve_value_via_source_imports(env, source_rest, source_name, rest, original_name)
+                };
+                SomeResolvedValue(v)
+            } else {
+                env_resolve_value_via_source_imports(env, source_rest, source_name, rest, original_name)
+            }
+    }
+}

@@ -1,0 +1,274 @@
+// src/compiler/parser/cursor/mod.tg
+// Token cursor for the Tungsten parser.
+//
+// The Cursor type provides an immutable view over a List<Token>,
+// supporting O(1) peek and advance operations.
+
+pub mod token_kinds;
+
+pub use parser::cursor::token_kinds::*;
+
+use lexer::token::{
+    Token, TokenKind, token_kind, token_span,
+    TokIdent, TokFn, TokLet, TokIf, TokElse, TokMatch, TokReturn,
+    TokType, TokStruct, TokEnum, TokTrue, TokFalse,
+    TokTheorem, TokLemma, TokAxiom, TokBy, TokHave, TokShow,
+    TokAssume, TokForall, TokExists, TokProp, TokSorry, TokRefl,
+    TokBool, TokNat, TokUnit, TokVoid, TokExtern, TokRef, TokMod,
+    TokPub, TokUse, TokAs, TokCrate, TokUnderscore,
+    TokLParen, TokRParen, TokLBrace, TokRBrace, TokLBracket, TokRBracket,
+    TokLAngle, TokRAngle, TokComma, TokSemi, TokColon, TokColonColon,
+    TokDot, TokDotDot, TokDotDotDot, TokArrow, TokFatArrow, TokAt,
+    TokHash, TokQuestion, TokEq, TokBangEq, TokLe, TokGe,
+    TokPlus, TokMinus, TokStar, TokSlash, TokPercent,
+    TokAmp, TokAmpAmp, TokPipe, TokPipePipe, TokPipeRight, TokBang,
+    TokCaret, TokTilde, TokEof, TokError, TokIntLit, TokStringLit
+};
+use driver::ffi::{List, Nil, Cons};
+use lexer::span::{Span, span_empty};
+use parser::error::{ParseError, parse_error_expected, parse_error_eof};
+use parser::option::{Option, None, Some};
+use parser::cursor::token_kinds::{token_kind_eq, token_kind_name};
+use driver::util::{Result, Ok, Err};
+
+// ---------------------------------------------------------------------------
+// CURSOR TYPE
+// ---------------------------------------------------------------------------
+
+pub type Cursor = {
+    remaining: List<Token>,
+    position: Nat,
+    filename: String
+}
+
+// ---------------------------------------------------------------------------
+// MAYBE TYPES
+// ---------------------------------------------------------------------------
+
+pub type MaybeCursor =
+    | NoCursor
+    | SomeCursor(Cursor)
+
+pub type EatIdentResult =
+    | NoIdentResult
+    | SomeIdentResult(String, Cursor)
+
+pub type EatIntResult =
+    | NoIntResult
+    | SomeIntResult(Nat, Cursor)
+
+pub type EatStringResult =
+    | NoStringResult
+    | SomeStringResult(String, Cursor)
+
+// ---------------------------------------------------------------------------
+// CURSOR ACCESSORS
+// ---------------------------------------------------------------------------
+
+pub fn cursor_new(tokens: List<Token>, filename: String) -> Cursor {
+    { remaining: tokens, position: 0, filename: filename }
+}
+
+pub fn cursor_remaining(c: Cursor) -> List<Token> {
+    c.remaining
+}
+
+pub fn cursor_position(c: Cursor) -> Nat {
+    c.position
+}
+
+pub fn cursor_filename(c: Cursor) -> String {
+    c.filename
+}
+
+// ---------------------------------------------------------------------------
+// PEEK OPERATIONS
+// ---------------------------------------------------------------------------
+
+pub fn cursor_peek(c: Cursor) -> Option<Token> {
+    match c.remaining {
+        Nil() => None,
+        Cons(tok, _) => Some(tok)
+    }
+}
+
+pub fn cursor_peek_kind(c: Cursor) -> Option<TokenKind> {
+    match cursor_peek(c) {
+        None() => None,
+        Some(tok) => Some(tok.kind)
+    }
+}
+
+pub fn cursor_peek_span(c: Cursor) -> Span {
+    match cursor_peek(c) {
+        None() => span_empty(c.position, c.filename),
+        Some(tok) => tok.span
+    }
+}
+
+pub fn cursor_is_eof(c: Cursor) -> Bool {
+    match c.remaining {
+        Nil() => true,
+        Cons(tok, _) => match tok.kind {
+            TokEof() => true,
+            _ => false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CHECK OPERATIONS
+// ---------------------------------------------------------------------------
+
+pub fn cursor_check(c: Cursor, kind: TokenKind) -> Bool {
+    match cursor_peek_kind(c) {
+        None() => false,
+        Some(k) => token_kind_eq(k, kind)
+    }
+}
+
+pub fn cursor_check_ident(c: Cursor) -> Bool {
+    match cursor_peek_kind(c) {
+        None() => false,
+        Some(k) => match k {
+            TokIdent(_) => true,
+            _ => false
+        }
+    }
+}
+
+pub fn cursor_check_int(c: Cursor) -> Bool {
+    match cursor_peek_kind(c) {
+        None() => false,
+        Some(k) => match k {
+            TokIntLit(_) => true,
+            _ => false
+        }
+    }
+}
+
+pub fn cursor_check_string(c: Cursor) -> Bool {
+    match cursor_peek_kind(c) {
+        None() => false,
+        Some(k) => match k {
+            TokStringLit(_) => true,
+            _ => false
+        }
+    }
+}
+
+pub fn cursor_check_ahead(c: Cursor, kind: TokenKind) -> Bool {
+    let c2 = cursor_advance(c);
+    cursor_check(c2, kind)
+}
+
+pub fn cursor_check_ahead_n(c: Cursor, n: Nat, kind: TokenKind) -> Bool {
+    if n == 0 {
+        cursor_check(c, kind)
+    } else {
+        cursor_check_ahead_n(cursor_advance(c), n - 1, kind)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADVANCE OPERATIONS
+// ---------------------------------------------------------------------------
+
+pub fn cursor_advance(c: Cursor) -> Cursor {
+    match c.remaining {
+        Nil() => c,
+        Cons(_, rest) => {
+            let result: Cursor = { remaining: rest, position: c.position + 1, filename: c.filename };
+            result
+        }
+    }
+}
+
+pub fn cursor_eat(c: Cursor, kind: TokenKind) -> MaybeCursor {
+    if cursor_check(c, kind) {
+        SomeCursor(cursor_advance(c))
+    } else {
+        NoCursor
+    }
+}
+
+pub fn cursor_eat_ident(c: Cursor) -> EatIdentResult {
+    match c.remaining {
+        Nil() => NoIdentResult,
+        Cons(tok, _) => match tok.kind {
+            TokIdent(name) => SomeIdentResult(name, cursor_advance(c)),
+            _ => NoIdentResult
+        }
+    }
+}
+
+pub fn cursor_eat_int(c: Cursor) -> EatIntResult {
+    match c.remaining {
+        Nil() => NoIntResult,
+        Cons(tok, _) => match tok.kind {
+            TokIntLit(n) => SomeIntResult(n, cursor_advance(c)),
+            _ => NoIntResult
+        }
+    }
+}
+
+pub fn cursor_eat_string(c: Cursor) -> EatStringResult {
+    match c.remaining {
+        Nil() => NoStringResult,
+        Cons(tok, _) => match tok.kind {
+            TokStringLit(s) => SomeStringResult(s, cursor_advance(c)),
+            _ => NoStringResult
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EXPECT OPERATIONS
+// ---------------------------------------------------------------------------
+
+pub fn cursor_expect(c: Cursor, kind: TokenKind) -> Result<(Token, Cursor), ParseError> {
+    match c.remaining {
+        Nil() => Err(parse_error_eof(token_kind_name(kind), span_empty(c.position, c.filename))),
+        Cons(tok, _) => {
+            if token_kind_eq(tok.kind, kind) {
+                Ok((tok, cursor_advance(c)))
+            } else {
+                Err(parse_error_expected(
+                    token_kind_name(kind),
+                    token_kind_name(tok.kind),
+                    tok.span
+                ))
+            }
+        }
+    }
+}
+
+pub fn cursor_expect_ident(c: Cursor) -> Result<(String, Cursor), ParseError> {
+    match c.remaining {
+        Nil() => Err(parse_error_eof("identifier", span_empty(c.position, c.filename))),
+        Cons(tok, _) => match tok.kind {
+            TokIdent(name) => Ok((name, cursor_advance(c))),
+            _ => Err(parse_error_expected("identifier", token_kind_name(tok.kind), tok.span))
+        }
+    }
+}
+
+pub fn cursor_expect_int(c: Cursor) -> Result<(Nat, Cursor), ParseError> {
+    match c.remaining {
+        Nil() => Err(parse_error_eof("integer literal", span_empty(c.position, c.filename))),
+        Cons(tok, _) => match tok.kind {
+            TokIntLit(n) => Ok((n, cursor_advance(c))),
+            _ => Err(parse_error_expected("integer literal", token_kind_name(tok.kind), tok.span))
+        }
+    }
+}
+
+pub fn cursor_expect_string(c: Cursor) -> Result<(String, Cursor), ParseError> {
+    match c.remaining {
+        Nil() => Err(parse_error_eof("string literal", span_empty(c.position, c.filename))),
+        Cons(tok, _) => match tok.kind {
+            TokStringLit(s) => Ok((s, cursor_advance(c))),
+            _ => Err(parse_error_expected("string literal", token_kind_name(tok.kind), tok.span))
+        }
+    }
+}

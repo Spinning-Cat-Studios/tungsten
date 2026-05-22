@@ -1,0 +1,8 @@
+// Golden test: two leading wildcards in triple — let (_, _, c) = triple
+// Verifies that c binds to the third element.
+
+fn main() -> Nat {
+    let triple = (10, 20, 30);
+    let (_, _, c) = triple;
+    c
+}

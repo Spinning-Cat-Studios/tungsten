@@ -4,17 +4,16 @@
 //! about sibling modules for cross-module imports. This module provides functions
 //! to discover and parse sibling modules at the workspace root level.
 
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::cache::BuildCache;
 use crate::elaborate::ModulePath;
 
-use super::info::{
-    build_module_info_recursive, get_module_name, process_pub_use_reexports, ModuleInfo,
-};
+use super::info::{build_module_info_recursive, get_module_name, ModuleInfo};
+use super::info_reexports::process_pub_use_reexports;
 use super::parse::parse_module_tree;
 use super::ParsedModule;
 
@@ -27,6 +26,12 @@ use super::ParsedModule;
 ///
 /// This allows checking files like `elab/env/mod.tg` to find sibling modules
 /// like `lexer` and `parser` at the workspace root level.
+///
+/// **Sibling re-parse caveat:** Test entry points (e.g., `test_string_utils.tg`)
+/// may declare `mod driver; mod parser; mod elab;`, causing the same source files
+/// to be re-parsed under different path prefixes. The resulting `ModuleInfo` is
+/// merged via [`merge_module_info`], where the priority argument wins for
+/// duplicate keys. See ADR 8.5.26a for details.
 pub fn find_workspace_root(file_path: &Path) -> PathBuf {
     let file_dir = file_path.parent().unwrap_or(Path::new("."));
 
@@ -85,18 +90,22 @@ pub fn discover_sibling_modules(workspace_root: &Path) -> Vec<PathBuf> {
         }
     }
 
+    modules.sort();
     modules
 }
-
-/// Parse all sibling module trees at the workspace root.
 ///
 /// This is used for workspace-aware resolution: when checking a single file,
 /// we also parse its sibling modules so cross-module imports can be resolved.
 ///
+/// **Important:** Sibling modules may re-declare overlapping `mod` subtrees,
+/// causing the same source files to be parsed multiple times under different
+/// path prefixes. The resulting module info must be merged with
+/// [`merge_module_info`], where the main file's info takes priority.
+///
 /// Returns a vector of parsed module trees, one for each sibling module.
 pub fn parse_workspace_modules(
     workspace_root: &Path,
-    cache: Option<&RefCell<BuildCache>>,
+    cache: Option<&Mutex<BuildCache>>,
 ) -> Vec<ParsedModule> {
     let module_paths = discover_sibling_modules(workspace_root);
     let mut modules = Vec::new();
@@ -149,53 +158,56 @@ pub fn build_workspace_module_info(modules: &[ParsedModule]) -> ModuleInfo {
 /// Merge two ModuleInfo structures.
 ///
 /// Used to combine the file-specific module info with workspace-wide module info.
-/// The `base` (main file's module info) takes priority for file_to_module mappings,
-/// ensuring canonical paths are based on the main module registration.
-pub fn merge_module_info(mut base: ModuleInfo, other: ModuleInfo) -> ModuleInfo {
-    // Merge file_to_module FIRST (base/main wins - canonical paths)
+/// `priority` (typically the main file's module info) wins for all duplicate keys
+/// via `or_insert` — entries from `fallback` are only added when not already
+/// present in `priority`. This ensures canonical paths come from the main
+/// module registration, not from workspace siblings that may re-parse the
+/// same source files under different path prefixes (ADR 8.5.26a).
+pub fn merge_module_info(mut priority: ModuleInfo, fallback: ModuleInfo) -> ModuleInfo {
+    // Merge file_to_module FIRST (priority/main wins - canonical paths)
     // This is critical for canonicalization: main's paths are the canonical ones
-    for (file, path) in other.file_to_module {
-        base.file_to_module.entry(file).or_insert(path);
+    for (file, path) in fallback.file_to_module {
+        priority.file_to_module.entry(file).or_insert(path);
     }
 
     // Merge modules registry
-    for (path, contents) in other.modules {
-        base.modules.entry(path).or_insert(contents);
+    for (path, contents) in fallback.modules {
+        priority.modules.entry(path).or_insert(contents);
     }
 
     // Merge item_modules (item name → module path)
     // Sort by name for deterministic merge order when same item exists in
     // multiple modules (prevents non-deterministic E0016 diagnostic paths).
-    let mut sorted_item_modules: Vec<_> = other.item_modules.into_iter().collect();
+    let mut sorted_item_modules: Vec<_> = fallback.item_modules.into_iter().collect();
     sorted_item_modules.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (name, path) in sorted_item_modules {
-        base.item_modules.entry(name).or_insert(path);
+        priority.item_modules.entry(name).or_insert(path);
     }
 
     // Merge module_visibility
-    for (path, vis) in other.module_visibility {
-        base.module_visibility.entry(path).or_insert(vis);
+    for (path, vis) in fallback.module_visibility {
+        priority.module_visibility.entry(path).or_insert(vis);
     }
 
     // Merge use_statement_modules (keyed by (file_path, span_start))
-    for (key, path) in other.use_statement_modules {
-        base.use_statement_modules.entry(key).or_insert(path);
+    for (key, path) in fallback.use_statement_modules {
+        priority.use_statement_modules.entry(key).or_insert(path);
     }
 
     // Merge use_statement_by_span (keyed by full span)
-    for (span, path) in other.use_statement_by_span {
-        base.use_statement_by_span.entry(span).or_insert(path);
+    for (span, path) in fallback.use_statement_by_span {
+        priority.use_statement_by_span.entry(span).or_insert(path);
     }
 
     // Merge module_files
-    for (path, file_path) in other.module_files {
-        base.module_files.entry(path).or_insert(file_path);
+    for (path, file_path) in fallback.module_files {
+        priority.module_files.entry(path).or_insert(file_path);
     }
 
     // Note: item_index_to_file is not merged here - it's set directly from build_combined_ast
     // The index→file mapping is specific to the combined AST being elaborated
 
-    base
+    priority
 }
 
 /// Public wrapper for get_module_name (for verbose logging in driver).

@@ -1,0 +1,98 @@
+// src/compiler/elab/exprs/matches/patterns/predicates.tg
+// Pattern predicates: Bool type check, newtype unwrap detection.
+
+use parser::ast::{
+    Pattern, PatVar, PatWildcard, PatConstructor, MatchArm,
+    Ident
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle,
+    tg_type_bool, tg_types_equal
+};
+use elab::env::{Env, env_resolve_value, env_count_constructors};
+use elab::env::defs::{
+    MaybeResolvedValue, NoResolvedValue, SomeResolvedValue,
+    ResolvedValue, ResolvedConstructor
+};
+use elab::exprs::matches::patterns::{
+    is_catch_all_pattern, pattern_constructor_name
+};
+use elab::exprs::records::deep_types_equal;
+
+// ===========================================================================
+// TYPE PREDICATES
+// ===========================================================================
+
+/// Check if a type is Bool.
+pub fn is_bool_type(ty: TypeHandle) -> Bool {
+    tg_types_equal(ty, tg_type_bool())
+}
+
+// ===========================================================================
+// NEWTYPE UNWRAP DETECTION
+// ===========================================================================
+
+/// Check if a match arm is a newtype unwrap.
+/// Returns true when ALL safety constraints hold:
+///   1. Constructor belongs to a type with exactly 1 constructor
+///   2. That constructor takes exactly 1 field
+///   3. The scrutinee type is definitionally equal (after normalization) to the field type
+///   4. The pattern is exactly Ctor(x) — no nested sub-patterns
+pub fn is_newtype_unwrap(env: Env, arm: MatchArm, scrut_ty: TypeHandle) -> Bool {
+    let ctor_name = pattern_constructor_name(arm.pattern);
+    if ctor_name == "" {
+        false
+    } else {
+        is_newtype_unwrap_resolved(env, arm, scrut_ty, ctor_name)
+    }
+}
+
+fn is_newtype_unwrap_resolved(env: Env, arm: MatchArm, scrut_ty: TypeHandle, ctor_name: String) -> Bool {
+    match env_resolve_value(env, ctor_name) {
+        NoResolvedValue() => false,
+        SomeResolvedValue(resolved) =>
+            is_newtype_unwrap_info(env, arm, scrut_ty, resolved)
+    }
+}
+
+fn is_newtype_unwrap_info(env: Env, arm: MatchArm, scrut_ty: TypeHandle, resolved: ResolvedValue) -> Bool {
+    match resolved {
+        ResolvedConstructor(info) => {
+            let total = env_count_constructors(env, info.parent_type);
+            if total != 1 {
+                false
+            } else if info.arity != 1 {
+                false
+            } else {
+                if deep_types_equal(env, scrut_ty, info.field_types) {
+                    is_flat_constructor_pattern(arm.pattern)
+                } else {
+                    false
+                }
+            }
+        },
+        _ => false
+    }
+}
+
+/// Check if a constructor pattern has only simple (non-constructor) sub-patterns.
+fn is_flat_constructor_pattern(p: Pattern) -> Bool {
+    match p {
+        PatConstructor(_, sub_pats, _) => all_simple_patterns(sub_pats),
+        _ => false
+    }
+}
+
+/// Check that all patterns in a list are simple (variable or wildcard).
+fn all_simple_patterns(pats: List<Pattern>) -> Bool {
+    match pats {
+        Nil() => true,
+        Cons(p, rest) =>
+            if is_catch_all_pattern(p) {
+                all_simple_patterns(rest)
+            } else {
+                false
+            }
+    }
+}

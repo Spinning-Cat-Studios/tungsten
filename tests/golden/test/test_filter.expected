@@ -1,0 +1,7 @@
+
+running 2 tests
+
+test test_add ... ok
+test test_addition_overflow ... ok
+
+result: ok. 2 passed; 0 failed; 0 skipped; finished in 0.00s

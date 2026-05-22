@@ -5,7 +5,7 @@ use lexer::span::Span;
 use parser::ast::Visibility;
 use driver::ffi::{List, Nil, Cons};
 use driver::util::{list_append_string, list_eq_string};
-use elab::env::defs::{TypeDefInfo, ValueDefInfo, ConstructorInfo};
+use elab::env::defs::{TypeDefInfo, ValueDefInfo, ConstructorInfo, constructor_list_contains_exact};
 
 // ===========================================================================
 // MODULE PATH (ELABORATOR VERSION)
@@ -55,13 +55,15 @@ pub fn elab_module_path_to_string(path: ElabModulePath) -> String {
 
 /// Join a string list with a separator (local helper).
 fn join_strings_with_sep(list: List<String>, sep: String) -> String {
+    join_strings_with_sep_acc(list, sep, "")
+}
+
+fn join_strings_with_sep_acc(list: List<String>, sep: String, acc: String) -> String {
     match list {
-        Nil() => "",
+        Nil() => acc,
         Cons(s, rest) =>
-            match rest {
-                Nil() => s,
-                Cons(_, _) => s ++ sep ++ join_strings_with_sep(rest, sep)
-            }
+            let new_acc = if acc == "" { s } else { acc ++ sep ++ s };
+            join_strings_with_sep_acc(rest, sep, new_acc)
     }
 }
 
@@ -154,13 +156,19 @@ pub fn module_contents_add_value(contents: ModuleContents, def: ValueDefInfo) ->
 }
 
 /// Add a constructor to module contents.
+/// Idempotent: skips if an identical entry already exists (ADR 7.5.26f).
+/// "Identical" means matching (parent_type, name, index, arity, field_types).
 pub fn module_contents_add_constructor(contents: ModuleContents, info: ConstructorInfo) -> ModuleContents {
-    {
-        path: contents.path,
-        types: contents.types,
-        values: contents.values,
-        constructors: Cons(info, contents.constructors),
-        imports: contents.imports
+    if constructor_list_contains_exact(contents.constructors, info) {
+        contents
+    } else {
+        {
+            path: contents.path,
+            types: contents.types,
+            values: contents.values,
+            constructors: Cons(info, contents.constructors),
+            imports: contents.imports
+        }
     }
 }
 
@@ -172,6 +180,33 @@ pub fn module_contents_add_import(contents: ModuleContents, imp: Import) -> Modu
         values: contents.values,
         constructors: contents.constructors,
         imports: Cons(imp, contents.imports)
+    }
+}
+
+/// Add multiple types to module contents in one step.
+pub fn module_contents_add_types(contents: ModuleContents, defs: List<TypeDefInfo>) -> ModuleContents {
+    match defs {
+        Nil() => contents,
+        Cons(def, rest) =>
+            module_contents_add_types(module_contents_add_type(contents, def), rest)
+    }
+}
+
+/// Add multiple values to module contents in one step.
+pub fn module_contents_add_values(contents: ModuleContents, defs: List<ValueDefInfo>) -> ModuleContents {
+    match defs {
+        Nil() => contents,
+        Cons(def, rest) =>
+            module_contents_add_values(module_contents_add_value(contents, def), rest)
+    }
+}
+
+/// Add multiple constructors to module contents in one step.
+pub fn module_contents_add_constructors(contents: ModuleContents, infos: List<ConstructorInfo>) -> ModuleContents {
+    match infos {
+        Nil() => contents,
+        Cons(info, rest) =>
+            module_contents_add_constructors(module_contents_add_constructor(contents, info), rest)
     }
 }
 
@@ -190,20 +225,23 @@ pub fn module_map_empty() -> ModuleMap {
 }
 
 /// Add or update a module in the map.
+/// Removes any existing entry with the same path, then prepends the new one.
 pub fn module_map_insert(map: ModuleMap, path: ElabModulePath, contents: ModuleContents) -> ModuleMap {
-    
-    // Remove existing entry if present, then add new one
     ModuleMapCons(path, contents, module_map_remove(map, path))
 }
 
-/// Remove a module from the map.
+/// Remove the first entry for a module from the map.
+/// Since module_map_insert always does remove-then-prepend, there is at most
+/// one entry per path. Stopping at the first match lets us share the tail of
+/// the list instead of copying every remaining node — critical for avoiding
+/// O(n*m) allocation when the map is updated frequently (ADR 6.5.26h).
 fn module_map_remove(map: ModuleMap, path: ElabModulePath) -> ModuleMap {
     
     match map {
         ModuleMapNil() => ModuleMapNil,
         ModuleMapCons(p, c, rest) =>
             if elab_module_path_eq(p, path) {
-                module_map_remove(rest, path)
+                rest
             } else {
                 ModuleMapCons(p, c, module_map_remove(rest, path))
             }

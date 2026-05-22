@@ -1,0 +1,16 @@
+// Test: direct (uncurried) calls produce correct results for multi-arg functions.
+// A saturated call to a known-arity function should use the $direct entry point
+// and produce the same result as the closure path.
+
+pub fn add_three(a: Nat, b: Nat, c: Nat) -> Nat {
+    a + b + c
+}
+
+pub fn greet(prefix: String, name: String) -> String {
+    prefix ++ name
+}
+
+fn main() -> Nat {
+    let sum = add_three(10, 20, 30);
+    sum
+}

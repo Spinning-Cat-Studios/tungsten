@@ -1,0 +1,8 @@
+// src/compiler/parser/exprs/compound/mod.tg
+// Compound expression parsing: blocks, control flow, and lambdas.
+
+pub mod blocks;
+pub mod control;
+pub mod if_let;
+pub mod lambdas;
+pub mod try_block;

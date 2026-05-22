@@ -1,0 +1,11 @@
+[E0011] Error: cannot infer type; add a type annotation
+   ╭─[tests/golden/error/try_block_needs_annotation.tg:7:13]
+   │
+ 7 │     let x = try { 42 };
+   │             ─────┬────  
+   │                  ╰────── type cannot be inferred
+   │ 
+   │ Help: add type annotation: `let result: Result<T, E> = try { ... }`
+───╯
+
+error: aborting due to 1 error

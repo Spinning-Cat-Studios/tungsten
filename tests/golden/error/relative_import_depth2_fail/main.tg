@@ -1,0 +1,6 @@
+// Test: depth ≥ 2 failed relative import triggers P3b warning (ADR 10.5.26m)
+mod outer;
+
+fn main() -> String {
+    "ok"
+}

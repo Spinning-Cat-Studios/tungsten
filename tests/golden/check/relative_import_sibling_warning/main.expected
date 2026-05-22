@@ -1,0 +1,5 @@
+warning: relative import `helper` resolved via sibling as `parent::helper` from `parent::child`
+  = help: use absolute import: `parent::helper`
+warning: relative import `helper` resolved via sibling as `parent::helper` from `parent::child`
+  = help: use absolute import: `parent::helper`
+✓ tests/golden/check/relative_import_sibling_warning/main.tg: 3 definition(s), all OK

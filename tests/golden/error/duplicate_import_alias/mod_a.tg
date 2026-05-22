@@ -1,0 +1,2 @@
+// Module A provides Foo.
+pub type Foo = Nat

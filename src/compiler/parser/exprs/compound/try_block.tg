@@ -1,0 +1,20 @@
+// src/compiler/parser/exprs/compound/try_block.tg
+// Parse `try { ... }` expressions.
+
+use lexer::span::{Span, span_merge};
+use parser::error::ParseError;
+use parser::cursor::{Cursor, cursor_advance, cursor_peek_kind};
+use parser::ast::nodes::{Expr, ExprTryBlock, expr_span};
+use parser::exprs::compound::blocks::parse_block;
+use parser::exprs::result::cursor_peek_span;
+use driver::util::{Result, Ok, Err};
+
+/// Parse a `try { body }` expression.
+/// The cursor should be pointing at the `try` keyword.
+pub fn parse_try_block(cur: Cursor) -> Result<(Expr, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let cur2 = cursor_advance(cur);
+    let (body, cur3) = parse_block(cur2)?;
+    let span = span_merge(start_span, expr_span(body));
+    Ok((ExprTryBlock(body, span), cur3))
+}

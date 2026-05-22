@@ -1,0 +1,41 @@
+// Warning helpers for relative import/re-export fallback (ADR 10.5.26m).
+//
+// Shared by resolve.tg and reexport_resolve.tg to avoid duplicating
+// the guard + eprintln logic.
+
+use driver::modules::path::{ModulePath, module_path_eq, module_path_display};
+use driver::ffi::process::eprintln;
+
+/// Warn if raw != resolved (successful child/sibling fallback), return resolved.
+/// The `kind` parameter is "import" or "re-export" for message text.
+pub fn warn_relative_fallback(
+    kind: String,
+    strategy: String,
+    raw: ModulePath,
+    resolved: ModulePath,
+    current: ModulePath
+) -> ModulePath {
+    if module_path_eq(raw, resolved) {
+        resolved
+    } else {
+        let _ = eprintln("warning: relative " ++ kind ++ " `" ++ module_path_display(raw)
+            ++ "` resolved via " ++ strategy ++ " as `" ++ module_path_display(resolved)
+            ++ "` from `" ++ module_path_display(current) ++ "`");
+        let _ = eprintln("  = help: use absolute " ++ kind ++ ": `"
+            ++ module_path_display(resolved) ++ "`");
+        resolved
+    }
+}
+
+/// Warn when all lookups fail (P3b), return raw.
+pub fn warn_relative_failure(
+    kind: String,
+    raw: ModulePath,
+    current: ModulePath
+) -> ModulePath {
+    let _ = eprintln("warning: relative " ++ kind ++ " `" ++ module_path_display(raw)
+        ++ "` could not be resolved from `" ++ module_path_display(current) ++ "`");
+    let _ = eprintln("  = help: use absolute " ++ kind
+        ++ " rooted at a top-level module (e.g., `parser::`, `elab::`, `driver::`, `lexer::`)");
+    raw
+}

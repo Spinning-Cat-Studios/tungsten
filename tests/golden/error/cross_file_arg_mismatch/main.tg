@@ -1,0 +1,10 @@
+// Test: cross-file argument type mismatch (ADR 15.5.26a)
+// Passing Bool to a function expecting Nat from another module.
+
+pub mod math;
+
+use math::add_one;
+
+fn main() -> Nat {
+    add_one(true)
+}

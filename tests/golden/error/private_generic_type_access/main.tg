@@ -1,0 +1,8 @@
+// Test: E0016 private generic type accessed from another module via type application.
+
+pub mod helper;
+
+fn main() -> Nat {
+    let x: helper::Secret<Nat> = 42;
+    x
+}

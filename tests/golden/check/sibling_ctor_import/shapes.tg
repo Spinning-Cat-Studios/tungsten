@@ -1,0 +1,4 @@
+// Shapes module — exports a sum type with constructors.
+pub type Shape =
+    | Circle(Nat)
+    | Square(Nat)

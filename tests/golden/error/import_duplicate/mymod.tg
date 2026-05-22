@@ -1,0 +1,3 @@
+// Submodule providing Foo type.
+
+pub type Foo = Nat

@@ -1,0 +1,11 @@
+// Regression test: sibling module value import.
+// Verifies that Phase A.5 (global signature collection) makes cross-branch
+// function signatures visible during per-module body elaboration.
+// See ADR 6.5.26e §6, acceptance criterion "sibling value import".
+
+pub mod lexer;
+pub mod driver;
+
+fn main() -> Nat {
+    driver::run()
+}

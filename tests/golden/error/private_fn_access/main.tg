@@ -1,0 +1,7 @@
+// Test: E0016 private function access from another module.
+
+mod helper;
+
+fn main() -> Nat {
+    helper::private_fn()
+}

@@ -1,0 +1,45 @@
+// Let-else desugaring (ADR 13.5.26f).
+//
+// Builds the desugared match expression and emits W0003 for irrefutable patterns.
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, ExprMatch,
+    Pattern, PatVar, PatWildcard,
+    MatchArm, MaybeExpr, NoExpr, SomeExpr,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::ffi::process::eprintln;
+use driver::util::string_concat;
+
+/// Build the desugared match expression for `let P = e else diverge; body`:
+///   `match e { P => body, _ => diverge }`
+///
+/// Also emits W0003 if the pattern is irrefutable (variable or wildcard).
+pub fn build_let_else_match(
+    pat: Pattern,
+    value: Expr,
+    else_expr: Expr,
+    body: Expr,
+    span: Span
+) -> Expr {
+    let _ = warn_if_irrefutable(pat, span);
+    let success_arm: MatchArm = { pattern: pat, guard: NoExpr(), body: body, span: span };
+    let fallback_arm: MatchArm = { pattern: PatWildcard(span), guard: NoExpr(), body: else_expr, span: span };
+    ExprMatch(value, Cons(success_arm, Cons(fallback_arm, Nil())), span)
+}
+
+/// Emit W0003 if the pattern is irrefutable (variable or wildcard).
+fn warn_if_irrefutable(pat: Pattern, span: Span) -> Nat {
+    match pat {
+        PatVar(id) =>
+            let name = ident_name(id);
+            let _ = eprintln(string_concat("[W0003] warning: irrefutable pattern `", string_concat(name, "` in `let`-`else`; `else` branch is unreachable")));
+            0,
+        PatWildcard(_) =>
+            let _ = eprintln("[W0003] warning: irrefutable pattern `_` in `let`-`else`; `else` branch is unreachable");
+            0,
+        _ => 0
+    }
+}

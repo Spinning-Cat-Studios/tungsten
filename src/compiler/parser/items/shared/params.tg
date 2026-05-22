@@ -1,0 +1,170 @@
+// src/compiler/parser/items/params.tg
+// Function and extern parameter parsing.
+
+use lexer::token::{TokenKind, TokLParen, TokRParen, TokComma, TokColon};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new};
+use parser::ast::nodes::{Pattern, TypeExpr, type_expr_span,
+    Param,
+    ExternParam};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use driver::util::{Result, Ok, Err};
+use parser::types::{parse_type};
+use parser::patterns::{parse_pattern};
+
+// ===========================================================================
+// FUNCTION PARAMETER PARSING
+// ===========================================================================
+
+/// Parse function parameters: `(x: T, y: U)`.
+///
+/// Grammar:
+///   Params = "(" (Param ("," Param)* ","?)? ")"
+///   Param = Pattern ":" TypeExpr
+pub fn parse_params(cur: Cursor) -> Result<(List<Param>, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokLParen())?;
+    parse_params_inner(cur2)
+}
+
+fn parse_params_inner(cur: Cursor) -> Result<(List<Param>, Cursor), ParseError> {
+    // Check for empty ()
+    if cursor_check(cur, TokRParen()) {
+        let cur2 = cursor_advance(cur);
+        Ok((Nil, cur2))
+    } else {
+        // Parse first parameter
+        let (param, cur2) = parse_param(cur)?;
+        parse_params_rest(cur2, Cons(param, Nil))
+    }
+}
+
+/// Parse a single function parameter: `pattern: Type`.
+fn parse_param(cur: Cursor) -> Result<(Param, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let (pat, cur2) = parse_pattern(cur)?;
+    parse_param_colon(start_span, pat, cur2)
+}
+
+fn parse_param_colon(start_span: Span, pat: Pattern, cur: Cursor) -> Result<(Param, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokColon())?;
+    parse_param_type(start_span, pat, cur2)
+}
+
+fn parse_param_type(start_span: Span, pat: Pattern, cur: Cursor) -> Result<(Param, Cursor), ParseError> {
+    let (ty, cur2) = parse_type(cur)?;
+    let end_span = type_expr_span(ty);
+    let param: Param = {
+        pattern: pat,
+        ty: ty,
+        span: span_merge(start_span, end_span)
+    };
+    Ok((param, cur2))
+}
+
+/// Parse rest of parameter list.
+fn parse_params_rest(cur: Cursor, acc: List<Param>) -> Result<(List<Param>, Cursor), ParseError> {
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma
+        if cursor_check(cur2, TokRParen()) {
+            let cur3 = cursor_advance(cur2);
+            Ok((list_reverse(acc), cur3))
+        } else {
+            let (param, cur3) = parse_param(cur2)?;
+            parse_params_rest(cur3, Cons(param, acc))
+        }
+    } else if cursor_check(cur, TokRParen()) {
+        let cur2 = cursor_advance(cur);
+        Ok((list_reverse(acc), cur2))
+    } else {
+        let found = match cursor_peek_kind(cur) {
+            None() => "end of file",
+            Some(k) => token_kind_name(k)
+        };
+        Err(parse_error_expected("',' or ')'", found, cursor_peek_span(cur)))
+    }
+}
+
+// ===========================================================================
+// EXTERN PARAMETER PARSING
+// ===========================================================================
+
+/// Parse extern function parameters: `(name: T, name: U)`.
+pub fn parse_extern_params(cur: Cursor) -> Result<(List<ExternParam>, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokLParen())?;
+    parse_extern_params_inner(cur2)
+}
+
+fn parse_extern_params_inner(cur: Cursor) -> Result<(List<ExternParam>, Cursor), ParseError> {
+    if cursor_check(cur, TokRParen()) {
+        let cur2 = cursor_advance(cur);
+        Ok((Nil, cur2))
+    } else {
+        let (param, cur2) = parse_extern_param(cur)?;
+        parse_extern_params_rest(cur2, Cons(param, Nil))
+    }
+}
+
+/// Parse a single extern parameter: `name: T`.
+fn parse_extern_param(cur: Cursor) -> Result<(ExternParam, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    match cursor_eat_ident(cur) {
+        NoIdentResult() =>
+            parse_extern_param_no_ident(cur),
+        SomeIdentResult(name, cur2) =>
+            parse_extern_param_colon(start_span, name, cur2)
+    }
+}
+
+fn parse_extern_param_no_ident(cur: Cursor) -> Result<(ExternParam, Cursor), ParseError> {
+    let found = match cursor_peek_kind(cur) {
+        None() => "end of file",
+        Some(k) => token_kind_name(k)
+    };
+    Err(parse_error_expected("parameter name", found, cursor_peek_span(cur)))
+}
+
+fn parse_extern_param_colon(start_span: Span, name: String, cur: Cursor) -> Result<(ExternParam, Cursor), ParseError> {
+    let (_, cur2) = cursor_expect(cur, TokColon())?;
+    parse_extern_param_type(start_span, name, cur2)
+}
+
+fn parse_extern_param_type(start_span: Span, name: String, cur: Cursor) -> Result<(ExternParam, Cursor), ParseError> {
+    let (ty, cur2) = parse_type(cur)?;
+    let end_span = type_expr_span(ty);
+    let param: ExternParam = {
+        name: ident_new(name, start_span),
+        ty: ty,
+        span: span_merge(start_span, end_span)
+    };
+    Ok((param, cur2))
+}
+
+/// Parse rest of extern parameters.
+fn parse_extern_params_rest(cur: Cursor, acc: List<ExternParam>) -> Result<(List<ExternParam>, Cursor), ParseError> {
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        if cursor_check(cur2, TokRParen()) {
+            let cur3 = cursor_advance(cur2);
+            Ok((list_reverse(acc), cur3))
+        } else {
+            let (param, cur3) = parse_extern_param(cur2)?;
+            parse_extern_params_rest(cur3, Cons(param, acc))
+        }
+    } else if cursor_check(cur, TokRParen()) {
+        let cur2 = cursor_advance(cur);
+        Ok((list_reverse(acc), cur2))
+    } else {
+        let found = match cursor_peek_kind(cur) {
+            None() => "end of file",
+            Some(k) => token_kind_name(k)
+        };
+        Err(parse_error_expected("',' or ')'", found, cursor_peek_span(cur)))
+    }
+}

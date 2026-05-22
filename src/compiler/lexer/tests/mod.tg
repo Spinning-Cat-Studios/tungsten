@@ -1,0 +1,269 @@
+// src/compiler/lexer/tests/mod.tg
+// Tests for the Tungsten lexer.
+
+mod numbers;
+mod errors;
+
+use lexer::token::{
+    TokenKind, Token, token_kind,
+    TokIntLit, TokStringLit, TokCharLit, TokIdent, TokUnderscore,
+    TokFn, TokLet, TokIf, TokElse, TokMatch, TokReturn,
+    TokType, TokStruct, TokEnum, TokTrue, TokFalse,
+    TokTheorem, TokLemma, TokAxiom, TokBy, TokHave, TokShow,
+    TokAssume, TokForall, TokExists, TokProp, TokSorry, TokRefl,
+    TokBool, TokNat, TokUnit, TokVoid, TokExtern, TokRef, TokMod,
+    TokPub, TokUse, TokAs, TokCrate, TokReserved,
+    TokLParen, TokRParen, TokLBrace, TokRBrace, TokLBracket, TokRBracket,
+    TokLAngle, TokRAngle, TokComma, TokSemi, TokColon, TokColonColon,
+    TokDot, TokDotDot, TokDotDotDot, TokArrow, TokFatArrow, TokAt,
+    TokHash, TokQuestion, TokEq, TokEqEq, TokBangEq, TokLe, TokGe,
+    TokPlus, TokPlusPlus, TokMinus, TokStar, TokSlash, TokPercent,
+    TokAmp, TokAmpAmp, TokPipe, TokPipePipe, TokPipeRight, TokBang,
+    TokCaret, TokTilde, TokWhitespace, TokLineComment, TokBlockComment,
+    TokDocComment, TokEof, TokError
+};
+use lexer::scanner::{LexResult, tokenize,
+    lex_result_tokens, lex_result_errors, tokenize_no_trivia};
+use driver::ffi::{List, Nil, Cons};
+use lexer::tests::numbers::{run_number_tests};
+use lexer::tests::errors::{run_error_tests};
+use lexer::error::{has_errors};
+
+pub fn count_tokens(toks: List<Token>) -> Nat {
+    match toks {
+        Nil() => 0,
+        Cons(_, rest) => 1 + count_tokens(rest)
+    }
+}
+
+pub fn first_token_kind(toks: List<Token>) -> TokenKind {
+    match toks {
+        Nil() => TokEof,
+        Cons(t, _) => token_kind(t)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BASIC TESTS
+// ---------------------------------------------------------------------------
+
+fn test_empty_input() -> Bool {
+    let result = tokenize("", "test.tg");
+    count_tokens(lex_result_tokens(result)) == 1
+}
+
+fn test_identifier() -> Bool {
+    let result = tokenize("foo", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIdent(name) => name == "foo",
+        _ => false
+    }
+}
+
+fn test_keyword_fn() -> Bool {
+    let result = tokenize("fn", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokFn() => true,
+        _ => false
+    }
+}
+
+fn test_keyword_let() -> Bool {
+    let result = tokenize("let", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokLet() => true,
+        _ => false
+    }
+}
+
+fn test_keyword_if() -> Bool {
+    let result = tokenize("if", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIf() => true,
+        _ => false
+    }
+}
+
+fn test_keyword_mod() -> Bool {
+    let result = tokenize("mod", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokMod() => true,
+        _ => false
+    }
+}
+
+fn test_number() -> Bool {
+    let result = tokenize("42", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 42,
+        _ => false
+    }
+}
+
+fn test_string() -> Bool {
+    let result = tokenize("\"hello\"", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokStringLit(s) => s == "hello",
+        _ => false
+    }
+}
+
+fn test_arrow() -> Bool {
+    let result = tokenize("->", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokArrow() => true,
+        _ => false
+    }
+}
+
+fn test_fat_arrow() -> Bool {
+    let result = tokenize("=>", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokFatArrow() => true,
+        _ => false
+    }
+}
+
+fn test_eq_eq() -> Bool {
+    let result = tokenize("==", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokEqEq() => true,
+        _ => false
+    }
+}
+
+fn test_bang_eq() -> Bool {
+    let result = tokenize("!=", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokBangEq() => true,
+        _ => false
+    }
+}
+
+fn test_line_comment() -> Bool {
+    let result = tokenize("// comment\nx", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokLineComment(_) => true,
+        TokDocComment(_) => true,
+        _ => false
+    }
+}
+
+fn test_function_signature() -> Bool {
+    let result = tokenize("fn add(x: Nat) -> Nat", "test.tg");
+    count_tokens(lex_result_tokens(result)) == 10
+}
+
+fn test_reserved_keyword() -> Bool {
+    let result = tokenize("async", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokReserved(kw) => kw == "async",
+        _ => false
+    }
+}
+
+fn test_underscore() -> Bool {
+    let result = tokenize("_", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokUnderscore() => true,
+        _ => false
+    }
+}
+
+fn test_underscore_ident() -> Bool {
+    let result = tokenize("_foo", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIdent(name) => name == "_foo",
+        _ => false
+    }
+}
+
+fn test_self_lex() -> Bool {
+    let code = "fn span_new(start: Nat, end: Nat, file: String) -> Span { { start: start, end: end, file: file } }";
+    let result = tokenize(code, "self.tg");
+    let tokens = lex_result_tokens(result);
+    let errors = lex_result_errors(result);
+    if has_errors(errors) { false }
+    else { count_tokens(tokens) > 20 }
+}
+
+// ---------------------------------------------------------------------------
+// EDGE CASE TESTS
+// ---------------------------------------------------------------------------
+
+fn test_zero() -> Bool {
+    let result = tokenize("0", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 0,
+        _ => false
+    }
+}
+
+fn test_leading_zeros() -> Bool {
+    let result = tokenize("007", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokIntLit(n) => n == 7,
+        _ => false
+    }
+}
+
+fn test_string_with_escape() -> Bool {
+    let result = tokenize("\"hello\\nworld\"", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokStringLit(s) => s == "hello\\nworld",
+        _ => false
+    }
+}
+
+fn test_char_backslash_n() -> Bool {
+    let result = tokenize("'\\n'", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokCharLit(_) => true,
+        _ => false
+    }
+}
+
+fn test_doc_comment() -> Bool {
+    let result = tokenize("/// doc comment", "test.tg");
+    match first_token_kind(lex_result_tokens(result)) {
+        TokDocComment(_) => true,
+        _ => false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TEST HARNESS
+// ---------------------------------------------------------------------------
+
+fn run_tests() -> Nat {
+    let passed = 0;
+    // Basic tests
+    let passed = if test_empty_input() { passed + 1 } else { passed };
+    let passed = if test_identifier() { passed + 1 } else { passed };
+    let passed = if test_keyword_fn() { passed + 1 } else { passed };
+    let passed = if test_keyword_let() { passed + 1 } else { passed };
+    let passed = if test_keyword_if() { passed + 1 } else { passed };
+    let passed = if test_keyword_mod() { passed + 1 } else { passed };
+    let passed = if test_number() { passed + 1 } else { passed };
+    let passed = if test_string() { passed + 1 } else { passed };
+    let passed = if test_arrow() { passed + 1 } else { passed };
+    let passed = if test_fat_arrow() { passed + 1 } else { passed };
+    let passed = if test_eq_eq() { passed + 1 } else { passed };
+    let passed = if test_bang_eq() { passed + 1 } else { passed };
+    let passed = if test_line_comment() { passed + 1 } else { passed };
+    let passed = if test_function_signature() { passed + 1 } else { passed };
+    let passed = if test_reserved_keyword() { passed + 1 } else { passed };
+    let passed = if test_underscore() { passed + 1 } else { passed };
+    let passed = if test_underscore_ident() { passed + 1 } else { passed };
+    let passed = if test_self_lex() { passed + 1 } else { passed };
+    // Edge case tests
+    let passed = if test_zero() { passed + 1 } else { passed };
+    let passed = if test_leading_zeros() { passed + 1 } else { passed };
+    let passed = if test_string_with_escape() { passed + 1 } else { passed };
+    let passed = if test_char_backslash_n() { passed + 1 } else { passed };
+    let passed = if test_doc_comment() { passed + 1 } else { passed };
+    // Delegated test groups
+    let passed = passed + run_number_tests();
+    let passed = passed + run_error_tests();
+    passed
+}

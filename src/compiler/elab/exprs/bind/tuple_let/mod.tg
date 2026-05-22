@@ -1,0 +1,134 @@
+// Tuple pattern destructuring for let bindings.
+// Desugars `let (a, b) = expr` into fst/snd projection chains.
+
+pub mod project;
+pub use elab::exprs::bind::tuple_let::project::*;
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr,
+    Pattern, PatTuple, PatVar, PatWildcard,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_unit,
+    tg_string_to_cstr
+};
+use elab::env::{Env, env_bind_local};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, pattern_to_name, TermInfo
+};
+use elab::cir::{
+    CodegenIR, CIRLet, CIRVar,
+    ct_unit, type_handle_to_codegen_type
+};
+use elab::exprs::{synth};
+use elab::exprs::bind::{SynthLetCont};
+
+// ===========================================================================
+// SYNTH-MODE TUPLE LET
+// ===========================================================================
+
+/// Synthesize a let binding with tuple pattern.
+/// 
+/// Desugars `let (a, b) = expr; body` to:
+///   let __tup = expr;
+///   let a = fst(__tup);
+///   let b = snd(__tup);
+///   body
+pub fn synth_let_tuple(
+    env: Env,
+    sub_pats: List<Pattern>,
+    ty_annot: MaybeTypeExpr,
+    rhs: Expr,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    match ty_annot {
+        SomeTypeExpr(_) =>
+            ElabExprErr(elab_expr_error(
+                "type annotations not supported on tuple patterns",
+                cont.span
+            )),
+        NoTypeExpr() =>
+            synth_let_tuple_rhs(env, sub_pats, rhs, cont)
+    }
+}
+
+fn synth_let_tuple_rhs(
+    env: Env,
+    sub_pats: List<Pattern>,
+    rhs: Expr,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    match synth(env, rhs) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, rhs_term, rhs_ty, rhs_cir) =>
+            let rhs_info: TermInfo = { term: rhs_term, ty: rhs_ty, cir: rhs_cir };
+            synth_let_tuple_body(env2, sub_pats, rhs_info, cont)
+    }
+}
+
+fn synth_let_tuple_body(
+    env: Env,
+    sub_pats: List<Pattern>,
+    rhs: TermInfo,
+    cont: SynthLetCont
+) -> ElabExprResult {
+    let env2 = bind_tuple_pattern(env, sub_pats, rhs.ty);
+    match synth(env2, cont.body) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env3, body_term, body_ty, body_cir) =>
+            let tup_name = "__tup";
+            let tup_name_ptr = tg_string_to_cstr(tup_name);
+            let projected_body_term = build_tuple_projection_terms(
+                sub_pats, rhs.ty, tup_name, body_term
+            );
+            let let_term = tg_term_let(tup_name_ptr, rhs.ty, rhs.term, projected_body_term);
+            let projected_body_cir = build_tuple_projection_cir_let(
+                sub_pats, rhs.ty, CIRVar(tup_name, type_handle_to_codegen_type(rhs.ty)), body_cir
+            );
+            let let_cir = CIRLet(tup_name, ct_unit(), rhs.cir, projected_body_cir);
+            ElabExprOk(env3, let_term, body_ty, let_cir)
+    }
+}
+
+// ===========================================================================
+// TUPLE PATTERN BINDING
+// ===========================================================================
+
+/// Bind tuple pattern elements to environment.
+pub fn bind_tuple_pattern(env: Env, pats: List<Pattern>, ty: TypeHandle) -> Env {
+    match pats {
+        Nil() => env,
+        Cons(p, rest) =>
+            let pat_name = pattern_to_name(p);
+            let is_prod = tg_type_is_product(ty);
+            let elem_ty = if is_prod {
+                tg_type_get_product_left(ty)
+            } else {
+                ty
+            };
+            let rest_ty = if is_prod {
+                tg_type_get_product_right(ty)
+            } else {
+                tg_type_unit()
+            };
+            let env2 = bind_single_pattern(env, p, elem_ty);
+            bind_tuple_pattern(env2, rest, rest_ty)
+    }
+}
+
+/// Bind a single pattern element to environment.
+fn bind_single_pattern(env: Env, p: Pattern, ty: TypeHandle) -> Env {
+    match p {
+        PatVar(id) => env_bind_local(env, ident_name(id), ty),
+        PatWildcard(_) => env,
+        PatTuple(sub_pats, _) => bind_tuple_pattern(env, sub_pats, ty),
+        _ => env
+    }
+}

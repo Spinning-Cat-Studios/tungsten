@@ -1,0 +1,129 @@
+// Benchmark: Polymorphic list operations (monomorphization overhead)
+//
+// Tests: Multiple ADT types, function-type parameters, type conversion
+// Uses monomorphic map functions over different types.
+//
+// Note: Uses monomorphic maps instead of generic `map<A,B>` due to a codegen
+// TyVar fallthrough issue with polymorphic function-type parameters.
+// Default: 10000 iterations for ~200ms runtime.
+// Usage: ./generic_map [iterations]  (default: 10000)
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+pub type PNat = PZero | PSucc(PNat)
+pub type PBool = PTrue | PFalse
+pub type PNatList = PNNil | PNCons(PNat, PNatList)
+pub type PBoolList = PBNil | PBCons(PBool, PBoolList)
+
+fn padd(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => b,
+    PSucc(p) => PSucc(padd(p, b)),
+  }
+}
+
+fn to_nat(n: PNat) -> Nat {
+  match n {
+    PZero() => 0,
+    PSucc(p) => 1 + to_nat(p),
+  }
+}
+
+fn nat_to_bool(n: PNat) -> PBool {
+  match n {
+    PZero() => PFalse,
+    PSucc(_) => PTrue,
+  }
+}
+
+fn bool_to_nat(b: PBool) -> PNat {
+  match b {
+    PTrue() => PSucc(PZero),
+    PFalse() => PZero,
+  }
+}
+
+fn map_nat_to_bool(f: PNat -> PBool, xs: PNatList) -> PBoolList {
+  match xs {
+    PNNil() => PBNil,
+    PNCons(h, t) => PBCons(f(h), map_nat_to_bool(f, t)),
+  }
+}
+
+fn map_bool_to_nat(f: PBool -> PNat, xs: PBoolList) -> PNatList {
+  match xs {
+    PBNil() => PNNil,
+    PBCons(h, t) => PNCons(f(h), map_bool_to_nat(f, t)),
+  }
+}
+
+fn plength_nat(xs: PNatList) -> PNat {
+  match xs {
+    PNNil() => PZero,
+    PNCons(_, t) => PSucc(plength_nat(t)),
+  }
+}
+
+fn plength_bool(xs: PBoolList) -> PNat {
+  match xs {
+    PBNil() => PZero,
+    PBCons(_, t) => PSucc(plength_bool(t)),
+  }
+}
+
+fn prange(n: PNat) -> PNatList {
+  match n {
+    PZero() => PNNil,
+    PSucc(p) => PNCons(n, prange(p)),
+  }
+}
+
+fn bool_list(n: PNat) -> PBoolList {
+  match n {
+    PZero() => PBNil,
+    PSucc(p) => PBCons(PTrue, bool_list(p)),
+  }
+}
+
+fn pmul(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => PZero,
+    PSucc(p) => padd(b, pmul(p, b)),
+  }
+}
+
+fn mk_5() -> PNat { PSucc(PSucc(PSucc(PSucc(PSucc(PZero))))) }
+fn mk_10() -> PNat { PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PZero)))))))))) }
+fn mk_50() -> PNat { pmul(mk_10(), mk_5()) }
+
+fn run_once() -> Nat {
+  let fifty = mk_50();
+  let nats = prange(fifty);
+  let bools = map_nat_to_bool(nat_to_bool, nats);
+  let nats2 = map_bool_to_nat(bool_to_nat, bools);
+  let len1 = plength_nat(nats2);
+  let len2 = plength_bool(bool_list(fifty));
+  to_nat(padd(len1, len2))
+}
+
+fn repeat_bench(n: PNat, acc: Nat) -> Nat {
+  match n {
+    PZero() => acc,
+    PSucc(p) => repeat_bench(p, acc + run_once()),
+  }
+}
+
+fn from_nat(n: Nat) -> PNat {
+  if n == 0 { PZero } else { PSucc(from_nat(n - 1)) }
+}
+
+fn get_iterations() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 10000 }
+}
+
+fn main() -> Nat {
+  // Default: 10000 iterations, each = 100. Total = 1000000
+  repeat_bench(from_nat(get_iterations()), 0)
+}

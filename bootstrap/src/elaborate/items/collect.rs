@@ -8,14 +8,14 @@ use crate::ast;
 use tungsten_core::Type;
 
 use crate::elaborate::env::{Constructor, TypeDef, TypeDefKind, ValueDef};
-use crate::elaborate::error::ElabError;
+use crate::elaborate::error::{ElabError, ElabErrorKind};
 use crate::elaborate::ElabResult;
 use crate::elaborate::Elaborator;
 
 impl<'a> Elaborator<'a> {
     pub(super) fn collect_function(&mut self, func: &ast::FunctionDef) -> ElabResult<()> {
-        // Check for duplicate
-        if self.env.has_value(&func.name.name) {
+        // Check for duplicate (allow overwrite if Phase A stub, ADR 5.5.26c)
+        if self.env.has_value(&func.name.name) && !self.allow_value_overwrite {
             return Err(ElabError::duplicate(func.name.span, &func.name.name));
         }
 
@@ -33,10 +33,13 @@ impl<'a> Elaborator<'a> {
     }
 
     pub(super) fn collect_type_def(&mut self, type_def: &ast::TypeDef) -> ElabResult<()> {
-        // Check for duplicate (but allow replacing stubs from Phase 1a)
+        // Check for duplicate (but allow replacing stubs from Phase 1a
+        // and Phase A placeholders from per-module elaboration, ADR 5.5.26c)
         if let Some(existing) = self.env.lookup_type(&type_def.name.name) {
-            let is_stub = matches!(existing.kind, TypeDefKind::Stub);
-            if !is_stub {
+            let is_overwritable = matches!(existing.kind, TypeDefKind::Stub)
+                || existing.encoded_type.is_none()
+                || existing.defining_module.is_none();
+            if !is_overwritable {
                 return Err(ElabError::duplicate(
                     type_def.name.span,
                     &type_def.name.name,
@@ -74,6 +77,7 @@ impl<'a> Elaborator<'a> {
                         name: variant.name.name.clone(),
                         fields,
                         index,
+                        visibility: variant.visibility,
                         span: variant.span,
                     });
                 }
@@ -96,6 +100,13 @@ impl<'a> Elaborator<'a> {
         }
         self.env.pop_type_var(); // Pop the self-reference type var
 
+        let field_visibilities = match &type_def.body {
+            ast::TypeBody::Record(record_fields) => {
+                record_fields.iter().map(|f| f.visibility).collect()
+            }
+            _ => Vec::new(),
+        };
+
         self.env.define_type(TypeDef {
             name: type_def.name.name.clone(),
             params,
@@ -104,15 +115,20 @@ impl<'a> Elaborator<'a> {
             span: type_def.span,
             defining_module: None,
             encoded_type: None,
+            field_visibilities,
         });
 
         Ok(())
     }
 
     pub(super) fn collect_type_alias(&mut self, alias: &ast::TypeAlias) -> ElabResult<()> {
-        // Check for duplicate (but allow replacing stubs from Phase 1a)
+        // Check for duplicate (but allow replacing stubs from Phase 1a
+        // and Phase A placeholders from per-module elaboration, ADR 5.5.26c)
         if let Some(existing) = self.env.lookup_type(&alias.name.name) {
-            if !matches!(existing.kind, TypeDefKind::Stub) {
+            let is_overwritable = matches!(existing.kind, TypeDefKind::Stub)
+                || existing.encoded_type.is_none()
+                || existing.defining_module.is_none();
+            if !is_overwritable {
                 return Err(ElabError::duplicate(alias.name.span, &alias.name.name));
             }
         }
@@ -137,6 +153,17 @@ impl<'a> Elaborator<'a> {
             self.env.pop_type_var();
         }
 
+        // Reject recursive alias cycles (ADR 15.5.26g §2.4)
+        let at_name = format!("@{}", alias.name.name);
+        if self.type_references_name(&ty, &alias.name.name)
+            || self.type_references_name(&ty, &at_name)
+        {
+            return Err(ElabError::new(
+                alias.span,
+                ElabErrorKind::RecursiveAlias(alias.name.name.clone()),
+            ));
+        }
+
         self.env.define_type(TypeDef {
             name: alias.name.name.clone(),
             params,
@@ -145,14 +172,15 @@ impl<'a> Elaborator<'a> {
             span: alias.span,
             defining_module: None,
             encoded_type: None,
+            field_visibilities: Vec::new(),
         });
 
         Ok(())
     }
 
     pub(super) fn collect_theorem(&mut self, thm: &ast::TheoremDef) -> ElabResult<()> {
-        // Check for duplicate
-        if self.env.has_value(&thm.name.name) {
+        // Check for duplicate (allow overwrite if Phase A stub, ADR 5.5.26c)
+        if self.env.has_value(&thm.name.name) && !self.allow_value_overwrite {
             return Err(ElabError::duplicate(thm.name.span, &thm.name.name));
         }
 
@@ -170,8 +198,8 @@ impl<'a> Elaborator<'a> {
     }
 
     pub(super) fn collect_axiom(&mut self, axiom: &ast::AxiomDef) -> ElabResult<()> {
-        // Check for duplicate
-        if self.env.has_value(&axiom.name.name) {
+        // Check for duplicate (allow overwrite if Phase A stub, ADR 5.5.26c)
+        if self.env.has_value(&axiom.name.name) && !self.allow_value_overwrite {
             return Err(ElabError::duplicate(axiom.name.span, &axiom.name.name));
         }
 

@@ -1,0 +1,8 @@
+// Test fixture: references a mod that doesn't exist on disk,
+// causing parse_module_tree to fail (ADR 13.5.26g).
+
+mod does_not_exist;
+
+fn main() -> Nat {
+    42
+}

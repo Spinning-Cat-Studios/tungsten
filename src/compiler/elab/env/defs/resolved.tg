@@ -1,0 +1,76 @@
+// src/compiler/elab/env/defs/resolved.tg
+// Resolution result types and environment errors.
+
+use driver::ffi::{List, Nil, Cons};
+use lexer::span::Span;
+use elab::ffi::TypeHandle;
+use elab::env::defs::types::TypeDefInfo;
+use elab::env::defs::constructors::ConstructorInfo;
+
+// ===========================================================================
+// RESOLVED VALUE
+// ===========================================================================
+
+/// The result of resolving a name to a value.
+/// For CIR generation, ResolvedLocal now includes the source name.
+pub type ResolvedValue =
+    | ResolvedLocal(Nat, TypeHandle, String)  // de Bruijn index, type, source name for CIR
+    | ResolvedGlobal(String, TypeHandle)      // Global name and type
+    | ResolvedConstructor(ConstructorInfo)    // Constructor
+
+/// Optional resolved value.
+pub type MaybeResolvedValue =
+    | NoResolvedValue
+    | SomeResolvedValue(ResolvedValue)
+
+// ===========================================================================
+// RESOLVED TYPE
+// ===========================================================================
+
+/// The result of resolving a name to a type.
+pub type ResolvedType =
+    | ResolvedTypeVar(String)      // Type variable (from forall binding)
+    | ResolvedTypeDef(TypeDefInfo) // Type definition
+
+/// Optional resolved type.
+pub type MaybeResolvedType =
+    | NoResolvedType
+    | SomeResolvedType(ResolvedType)
+
+// ===========================================================================
+// ENVIRONMENT ERROR
+// ===========================================================================
+
+/// Environment error for path resolution.
+/// The `code` field carries the L2 error code (e.g. "E0101") when available,
+/// or "" when no structured code applies. Propagated to ElabExprError
+/// for `expect_error` matching (ADR 12.5.26c).
+pub type EnvError = {
+    message: String,
+    span: Span,
+    code: String
+}
+
+/// Create an environment error (no structured error code).
+pub fn env_error_new(message: String, span: Span) -> EnvError {
+    { message: message, span: span, code: "" }
+}
+
+/// Create an environment error with a specific error code.
+pub fn env_error_coded(message: String, span: Span, code: String) -> EnvError {
+    { message: message, span: span, code: code }
+}
+
+// ===========================================================================
+// PATH RESOLUTION RESULTS
+// ===========================================================================
+
+/// Result of path resolution (type).
+pub type TypePathResult =
+    | TypePathOk(ResolvedType)
+    | TypePathErr(EnvError)
+
+/// Result of path resolution (value).
+pub type ValuePathResult =
+    | ValuePathOk(ResolvedValue)
+    | ValuePathErr(EnvError)

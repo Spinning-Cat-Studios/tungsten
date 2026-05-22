@@ -1,0 +1,7 @@
+// Pub record type with unannotated fields (all inherit pub).
+
+pub type Config = {
+    name: Nat,
+    internal_id: Nat,
+    secret: Nat
+}

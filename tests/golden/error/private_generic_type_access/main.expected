@@ -1,0 +1,9 @@
+[E0016] Error: type `Secret` is private (defined in `helper`) and cannot be accessed from `<root>`
+   ╭─[tests/golden/error/private_generic_type_access/main.tg:6:12]
+   │
+ 6 │     let x: helper::Secret<Nat> = 42;
+   │            ─────────┬─────────  
+   │                     ╰─────────── 
+───╯
+
+error: aborting due to 1 error

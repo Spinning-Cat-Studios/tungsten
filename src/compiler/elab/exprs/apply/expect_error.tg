@@ -1,0 +1,100 @@
+// src/compiler/elab/exprs/apply/expect_error.tg
+// Handler for the expect_error(expr, "E0001") builtin.
+//
+// expect_error is a compile-time error assertion (ADR 12.5.26c):
+// - In test mode:    elaborate expr in snapshot, capture error, match code
+// - In check mode:   same as test mode
+// - In compile mode: emit error (not allowed)
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span};
+use driver::ffi::{List, Nil, Cons, cstring_to_string};
+use elab::ffi::{
+    TypeHandle, tg_term_unit, tg_type_unit, tg_type_format_display
+};
+use elab::env::{Env};
+use elab::env::types::{ElabMode, ElabCheck, ElabTest, ElabCompile};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    ElabExprError, elab_expr_error, elab_expr_error_coded
+};
+use elab::exprs::{synth};
+use elab::cir::{CIRUnit};
+use elab::exprs::apply::expect_type::{
+    BuiltinArgsParsed, BuiltinArgsOk, BuiltinArgsErr,
+    validate_builtin_string_args
+};
+
+// ===========================================================================
+// EXPECT_ERROR HANDLER
+// ===========================================================================
+
+/// Handle an expect_error(expr, "E0001") call.
+///
+/// Validates arity and argument types, then dispatches based on elab_mode:
+/// - ElabTest/ElabCheck: elaborate expr in snapshot, capture error, match code
+/// - ElabCompile:        emit error
+pub fn handle_expect_error(env: Env, args: List<Expr>, span: Span) -> ElabExprResult {
+    match env.elab_mode {
+        ElabCompile() =>
+            ElabExprErr(elab_expr_error(
+                "expect_error is not allowed in compile/run mode (use `tungsten test` or `tungsten check`)",
+                span
+            )),
+        _ =>
+            handle_expect_error_validated(env, args, span)
+    }
+}
+
+/// Validate arity and arg types, then elaborate.
+fn handle_expect_error_validated(env: Env, args: List<Expr>, span: Span) -> ElabExprResult {
+    match validate_builtin_string_args(args, "expect_error", span) {
+        BuiltinArgsOk(expr_arg, expected_code) =>
+            elaborate_expect_error(env, expr_arg, expected_code, span),
+        BuiltinArgsErr(err) => ElabExprErr(err)
+    }
+}
+
+/// Elaborate the expression in a snapshot environment and check for expected error.
+///
+/// Since .tg Env is an immutable record, passing `env` to synth is already a
+/// natural snapshot — the caller's env is never mutated.
+fn elaborate_expect_error(env: Env, expr: Expr, expected_code: String, span: Span) -> ElabExprResult {
+    match synth(env, expr) {
+        ElabExprOk(_, _term, inferred_ty, _cir) =>
+            // Expression succeeded — that's a test failure
+            let ty_display_ptr = tg_type_format_display(inferred_ty);
+            if ty_display_ptr == 0 {
+                ElabExprErr(elab_expr_error(
+                    "expect_error: expected error " ++ expected_code ++ ", but expression elaborated successfully",
+                    span
+                ))
+            } else {
+                let ty_str = cstring_to_string(ty_display_ptr);
+                ElabExprErr(elab_expr_error(
+                    "expect_error: expected error " ++ expected_code ++ ", but expression elaborated successfully\n  inferred type: " ++ ty_str,
+                    span
+                ))
+            },
+        ElabExprErr(err) =>
+            // Expression failed — check if the error code matches
+            if err.code == expected_code {
+                // Match! Assertion passes.
+                ElabExprOk(env, tg_term_unit(), tg_type_unit(), CIRUnit)
+            } else {
+                if err.code == "" {
+                    // No structured error code available — match by message content
+                    // This is a fallback for errors that don't yet carry codes
+                    ElabExprErr(elab_expr_error(
+                        "expect_error: expected error " ++ expected_code ++ ", but got unstructured error\n  actual error: " ++ err.message,
+                        span
+                    ))
+                } else {
+                    ElabExprErr(elab_expr_error(
+                        "expect_error: expected error " ++ expected_code ++ ", but got " ++ err.code ++ "\n  actual error: " ++ err.message,
+                        span
+                    ))
+                }
+            }
+    }
+}

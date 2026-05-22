@@ -1,0 +1,67 @@
+// tests/let_else.tg — let-else integration tests (ADR 13.5.26f)
+
+type Option<T> = Some(T) | None
+
+type Result<T, E> = Ok(T) | Err(E)
+
+type List<T> = Cons(T, List<T>) | Nil
+
+// === AC #1: let-else binds x when Some ===
+fn test_let_else_some() -> Option<Nat> {
+    let opt = Some(42);
+    let Some(x) = opt else return None();
+    Some(x)
+}
+
+// === AC #2: let-else early-returns when None ===
+fn test_let_else_none() -> Option<Nat> {
+    let opt: Option<Nat> = None();
+    let Some(x) = opt else return None();
+    Some(x + 1)
+}
+
+// === AC #3: let-else with Result ===
+fn test_let_else_result() -> Result<Nat, String> {
+    let res: Result<Nat, String> = Ok(10);
+    let Ok(x) = res else return Err("default error");
+    Ok(x + 1)
+}
+
+// === AC #4: Nested patterns work ===
+fn test_let_else_nested() -> Option<Nat> {
+    let opt: Option<List<Nat>> = Some(Cons(1, Nil()));
+    let Some(Cons(x, _)) = opt else return None();
+    Some(x)
+}
+
+// === AC #5: Non-diverging else branch produces type error ===
+// When the else branch type conflicts with the body type, match desugaring
+// catches it as a type mismatch (E0010).
+fn test_let_else_non_diverging() -> Option<Nat> {
+    let opt = Some(42);
+    // Body returns Option<Nat> but else is "not an option" (String) — mismatch
+    expect_error(
+        {
+            let Some(v) = opt else "not an option";
+            Some(v)
+        },
+        "E0010"
+    );
+    None()
+}
+
+// === AC #7: Variables bound by pattern are in scope for continuation ===
+fn test_let_else_scope() -> Option<Nat> {
+    let opt = Some(5);
+    let Some(x) = opt else return None();
+    let y = x + 10;
+    Some(y)
+}
+
+// === AC #6: Irrefutable pattern emits warning but still compiles ===
+// W0003 is a warning, not an error — the code elaborates successfully.
+fn test_let_else_irrefutable() -> Nat {
+    let opt: Option<Nat> = Some(42);
+    let x = opt else return 0;
+    0
+}

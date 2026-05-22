@@ -1,0 +1,3 @@
+// Source module with a public function.
+
+pub fn secret_fn() -> Nat { 42 }

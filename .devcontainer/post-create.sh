@@ -1,7 +1,13 @@
 #!/bin/bash
 set -e
 
+# Ensure unlimited stack for deep recursive elaboration/codegen
+ulimit -s unlimited
+
 echo "Installing LLVM 18..."
+
+# Ensure log capture directory exists (bind-mounted from host .devcontainer/logs/)
+mkdir -p /var/log/tungsten
 
 # Add LLVM apt repository
 wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
@@ -10,11 +16,13 @@ echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-18 main" | sudo 
 # Update package lists
 sudo apt-get update
 
-echo "Installing Valgrind..."
+echo "Installing Valgrind, GDB, heaptrack, hyperfine..."
 sudo apt-get install -y \
   valgrind \
   valgrind-dbg \
-  gdb
+  gdb \
+  heaptrack \
+  hyperfine
 
 # Install LLVM 18 with all components needed for llvm-sys/inkwell
 sudo apt-get install -y \
@@ -46,6 +54,12 @@ echo "LLVM version:"
 
 echo "Valgrind version:"
 valgrind --version
+
+echo "Heaptrack version:"
+heaptrack --version || echo "(heaptrack installed)"
+
+echo "Hyperfine version:"
+hyperfine --version
 
 echo "Building Tungsten with codegen..."
 cargo build --release

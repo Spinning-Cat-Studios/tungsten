@@ -1,0 +1,199 @@
+// Cross-module definition injection.
+//
+// Two injection modes:
+// 1. Module-map injection: puts exports into owning module's slot in the map
+//    (for prior sibling results — import resolution scopes visibility)
+// 2. Root-scope injection: puts global exports directly into the root scope
+//    (for Phase A.5 global context — makes all defs directly available)
+//
+// See ADR 5.5.26b (W6.3a), ADR 6.5.26e.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::modules::path::{ModulePath};
+use parser::ast::common::{VisPublic};
+use lexer::span::{span_new};
+use elab::env::{Env};
+use elab::env::types::{env_with_module_map};
+use elab::env::defs::{
+    TypeDefInfo, ValueDefInfo, ConstructorInfo,
+    value_def_info_new
+};
+use elab::env::ops::{
+    env_register_types_batch, env_register_values_batch,
+    env_register_constructors_batch
+};
+use elab::env::module::{
+    ElabModulePath, MkElabModulePath,
+    ModuleContents,
+    module_contents_empty,
+    module_contents_add_type,
+    module_contents_add_value,
+    module_contents_add_constructor,
+    module_map_lookup, module_map_insert,
+    MaybeModuleContents, SomeModuleContents, NoModuleContents
+};
+use elab::items::per_module::types::{
+    ModuleElabResult,
+    TypeDefExport, ValueSigExport, ConstructorExport
+};
+use elab::items::per_module::combined::{GlobalExports};
+
+// ===========================================================================
+// INJECTION ENTRY POINT
+// ===========================================================================
+
+/// Inject all prior results' exports into the env's module map.
+/// Uses batch registration (ADR 7.5.26c): one module_map_insert per
+/// result instead of one per export item.
+pub fn inject_prior_results(
+    env: Env,
+    results: List<ModuleElabResult>
+) -> Env {
+    match results {
+        Nil() => env,
+        Cons(result, rest) =>
+            let env = inject_result_batch(env, result);
+            inject_prior_results(env, rest)
+    }
+}
+
+/// Inject a single result's exports into the module map with a single
+/// map insert. All exports within a ModuleElabResult share the same module.
+fn inject_result_batch(env: Env, result: ModuleElabResult) -> Env {
+    let elab_path = driver_to_elab_path(result.path);
+    let contents = get_or_create_contents(env, elab_path);
+    // Fold all types, values, and constructors into the contents
+    let contents = inject_types_into_contents(contents, result.type_defs);
+    let contents = inject_values_into_contents(contents, result.value_sigs);
+    let contents = inject_ctors_into_contents(contents, result.constructor_info);
+    // Single map write
+    let new_map = module_map_insert(env.modules, elab_path, contents);
+    env_with_module_map(env, new_map)
+}
+
+/// Fold type exports into module contents (no map operations).
+fn inject_types_into_contents(
+    contents: ModuleContents,
+    exports: List<TypeDefExport>
+) -> ModuleContents {
+    match exports {
+        Nil() => contents,
+        Cons(export, rest) =>
+            inject_types_into_contents(
+                module_contents_add_type(contents, export.info),
+                rest
+            )
+    }
+}
+
+/// Fold value exports into module contents (no map operations).
+fn inject_values_into_contents(
+    contents: ModuleContents,
+    exports: List<ValueSigExport>
+) -> ModuleContents {
+    match exports {
+        Nil() => contents,
+        Cons(export, rest) =>
+            let info = value_def_info_new(
+                export.name, export.ty,
+                VisPublic, span_new(0, 0, "")
+            );
+            inject_values_into_contents(
+                module_contents_add_value(contents, info),
+                rest
+            )
+    }
+}
+
+/// Fold constructor exports into module contents (no map operations).
+fn inject_ctors_into_contents(
+    contents: ModuleContents,
+    exports: List<ConstructorExport>
+) -> ModuleContents {
+    match exports {
+        Nil() => contents,
+        Cons(export, rest) =>
+            inject_ctors_into_contents(
+                module_contents_add_constructor(contents, export.info),
+                rest
+            )
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Get module contents from the map, or create empty if missing.
+fn get_or_create_contents(
+    env: Env, path: ElabModulePath
+) -> ModuleContents {
+    match module_map_lookup(env.modules, path) {
+        SomeModuleContents(c) => c,
+        NoModuleContents() => module_contents_empty(path)
+    }
+}
+
+/// Convert a driver ModulePath to an elab ElabModulePath.
+pub fn driver_to_elab_path(path: ModulePath) -> ElabModulePath {
+    MkElabModulePath(path.segments)
+}
+
+// ===========================================================================
+// ROOT-SCOPE INJECTION (Phase A.5 global exports)
+// ===========================================================================
+
+/// Seed Phase A.5 global exports into the env's root scope.
+/// This makes all types, values, and constructors from the combined
+/// collection pass directly available without imports.
+///
+/// Uses batch registration (ADR 7.5.26c) to reduce module map insertions
+/// from O(exports) to O(1) per category.
+pub fn seed_global_exports(env: Env, global: GlobalExports) -> Env {
+    let type_infos = extract_type_infos(global.types);
+    let env = env_register_types_batch(env, type_infos);
+    let value_infos = extract_value_infos(global.values);
+    let env = env_register_values_batch(env, value_infos);
+    let ctor_infos = extract_ctor_infos(global.constructors);
+    let env = env_register_constructors_batch(env, ctor_infos);
+    env
+}
+
+/// Extract TypeDefInfo list from type exports.
+fn extract_type_infos(exports: List<TypeDefExport>) -> List<TypeDefInfo> {
+    match exports {
+        Nil() => Nil,
+        Cons(export, rest) => Cons(export.info, extract_type_infos(rest))
+    }
+}
+
+/// Extract ValueDefInfo list from value exports (creating infos from sigs).
+fn extract_value_infos(exports: List<ValueSigExport>) -> List<ValueDefInfo> {
+    match exports {
+        Nil() => Nil,
+        Cons(export, rest) =>
+            let info = value_def_info_new(
+                export.name, export.ty,
+                VisPublic, span_new(0, 0, "")
+            );
+            Cons(info, extract_value_infos(rest))
+    }
+}
+
+/// Extract ConstructorInfo list from constructor exports.
+fn extract_ctor_infos(exports: List<ConstructorExport>) -> List<ConstructorInfo> {
+    match exports {
+        Nil() => Nil,
+        Cons(export, rest) => Cons(export.info, extract_ctor_infos(rest))
+    }
+}
+
+/// Seed type exports into an env's root scope (batch, ADR 7.5.26c).
+pub fn seed_types_into_env(env: Env, types: List<TypeDefExport>) -> Env {
+    env_register_types_batch(env, extract_type_infos(types))
+}
+
+/// Seed constructor exports into an env's root scope (batch, ADR 7.5.26c).
+pub fn seed_ctors_into_env(env: Env, ctors: List<ConstructorExport>) -> Env {
+    env_register_constructors_batch(env, extract_ctor_infos(ctors))
+}

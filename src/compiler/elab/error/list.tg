@@ -16,8 +16,10 @@ use parser::ast::common::{MaybeString, NoString, SomeString};
 pub fn string_list_join(list: List<String>, sep: String) -> String {
     match list {
         Nil() => "",
-        Cons(s, Nil()) => s,
-        Cons(s, rest) => s ++ sep ++ string_list_join(rest, sep)
+        Cons(s, rest) => match rest {
+            Nil() => s,
+            Cons(_, _) => s ++ sep ++ string_list_join(rest, sep)
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 //! Control flow compilation - if/then/else and natrec.
 
-use crate::codegen::error::CodeGenError;
+use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
 use inkwell::types::BasicType;
 use inkwell::values::{BasicValue, BasicValueEnum};
@@ -16,7 +16,9 @@ impl<'ctx> CodeGen<'ctx> {
         cond: &Term,
         then_: &Term,
         else_: &Term,
+        is_tail: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
+        // cond is NOT in tail position (in_tail_position already false)
         let cond_val = self.compile_term(cond)?.into_int_value();
 
         // Infer result type BEFORE compiling branches to ensure consistent lowering
@@ -28,6 +30,7 @@ impl<'ctx> CodeGen<'ctx> {
         let result_llvm_ty = self.types.lower_type(&result_ty);
 
         let function = self
+            .compilation
             .current_fn
             .ok_or_else(|| CodeGenError::LlvmError("no current function".to_string()))?;
 
@@ -41,6 +44,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Then branch
         self.builder.position_at_end(then_bb);
+        self.compilation.in_tail_position = is_tail;
         let then_val = self.compile_term(then_)?;
         // Cast to consistent type if needed
         let then_val = self.cast_to_type(then_val, result_llvm_ty)?;
@@ -51,6 +55,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Else branch
         self.builder.position_at_end(else_bb);
+        self.compilation.in_tail_position = is_tail;
         let else_val = self.compile_term(else_)?;
         // Cast to consistent type if needed
         let else_val = self.cast_to_type(else_val, result_llvm_ty)?;
@@ -161,6 +166,7 @@ impl<'ctx> CodeGen<'ctx> {
         let succ_fn = self.compile_term(succ_case)?;
 
         let function = self
+            .compilation
             .current_fn
             .ok_or_else(|| CodeGenError::LlvmError("no current function".to_string()))?;
 
@@ -206,11 +212,43 @@ impl<'ctx> CodeGen<'ctx> {
             .build_conditional_branch(cmp, loop_body, loop_end)
             .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
 
-        // Loop body: apply succ_case
+        // Loop body: apply succ_case(counter)(accum)
         self.builder.position_at_end(loop_body);
+        let new_accum = self.apply_natrec_succ(result_ty, &succ_fn, &counter, &accum)?;
 
-        // succ_case : Nat -> T -> T
-        // Call: succ_case counter accum
+        let new_counter = self
+            .builder
+            .build_int_add(counter.as_basic_value().into_int_value(), one, "inc")
+            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
+
+        let body_bb = self.builder.get_insert_block().unwrap();
+        counter.add_incoming(&[(&new_counter, body_bb)]);
+        accum.add_incoming(&[(&new_accum, body_bb)]);
+
+        self.builder
+            .build_unconditional_branch(loop_header)
+            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
+
+        // Loop end
+        self.builder.position_at_end(loop_end);
+        Ok(accum.as_basic_value())
+    }
+
+    /// Apply `succ_case(counter)(accum)`: two curried closure calls.
+    fn apply_natrec_succ(
+        &mut self,
+        result_ty: &Type,
+        succ_fn: &BasicValueEnum<'ctx>,
+        counter: &inkwell::values::PhiValue<'ctx>,
+        accum: &inkwell::values::PhiValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
+        let i64_type = self.context.i64_type();
+        let env_ptr_type = self.context.ptr_type(AddressSpace::default());
+        let partial_ty = self.types.lower_type(result_ty);
+        let closure_ty = self
+            .context
+            .struct_type(&[env_ptr_type.into(), env_ptr_type.into()], false);
+
         let succ_closure = succ_fn.into_struct_value();
         let fn_ptr1 = self
             .builder
@@ -223,13 +261,7 @@ impl<'ctx> CodeGen<'ctx> {
             .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
 
         // First apply to counter
-        let env_ptr_type = self.context.ptr_type(AddressSpace::default());
-        let partial_ty = self.types.lower_type(result_ty);
-        let closure_ty = self
-            .context
-            .struct_type(&[env_ptr_type.into(), env_ptr_type.into()], false);
         let fn_type1 = closure_ty.fn_type(&[env_ptr_type.into(), i64_type.into()], false);
-
         let partial = self
             .builder
             .build_indirect_call(
@@ -277,23 +309,6 @@ impl<'ctx> CodeGen<'ctx> {
             .ok_or_else(|| CodeGenError::TypeError("succ_case returned void".to_string()))?;
 
         // Materialize large struct results to fix ARM64 sret ABI issues
-        let new_accum = self.materialize_call_result(new_accum)?;
-
-        let new_counter = self
-            .builder
-            .build_int_add(counter.as_basic_value().into_int_value(), one, "inc")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-
-        let body_bb = self.builder.get_insert_block().unwrap();
-        counter.add_incoming(&[(&new_counter, body_bb)]);
-        accum.add_incoming(&[(&new_accum, body_bb)]);
-
-        self.builder
-            .build_unconditional_branch(loop_header)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-
-        // Loop end
-        self.builder.position_at_end(loop_end);
-        Ok(accum.as_basic_value())
+        self.materialize_call_result(new_accum)
     }
 }

@@ -39,9 +39,16 @@ run_test() {
     local file=$2     # .tg file
     local expected=$3 # .expected file
     
+    # Read per-test extra flags from .args file if it exists
+    local args_file="${file%.tg}.args"
+    local extra_args=""
+    if [ -f "$args_file" ]; then
+        extra_args=$(cat "$args_file")
+    fi
+
     # Run the command and capture output
     local actual
-    if actual=$("$TUNGSTEN" "$cmd" "$file" 2>&1); then
+    if actual=$("$TUNGSTEN" "$cmd" "$file" $extra_args 2>&1); then
         local exit_code=0
     else
         local exit_code=$?
@@ -158,8 +165,15 @@ update_expected() {
     local file=$2
     local expected=$3
     
+    # Read per-test extra flags from .args file if it exists
+    local args_file="${file%.tg}.args"
+    local extra_args=""
+    if [ -f "$args_file" ]; then
+        extra_args=$(cat "$args_file")
+    fi
+
     local actual
-    actual=$("$TUNGSTEN" "$cmd" "$file" 2>&1 || true)
+    actual=$("$TUNGSTEN" "$cmd" "$file" $extra_args 2>&1 || true)
     actual=$(echo "$actual" | strip_colors | normalize_paths)
     
     echo "$actual" > "$expected"
@@ -248,7 +262,7 @@ run_category() {
 
 # Main
 main() {
-    local categories=("check" "run" "error" "compile")
+    local categories=("check" "run" "error" "compile" "test")
     local specific_category=""
     UPDATE_MODE=0
     
@@ -259,12 +273,12 @@ main() {
                 UPDATE_MODE=1
                 shift
                 ;;
-            check|run|error|compile)
+            check|run|error|compile|test)
                 specific_category=$1
                 shift
                 ;;
             *)
-                echo "Usage: $0 [--update] [check|run|error|compile]"
+                echo "Usage: $0 [--update] [check|run|error|compile|test]"
                 exit 1
                 ;;
         esac
@@ -291,6 +305,7 @@ main() {
             run)     run_category "$category" "run" ;;
             error)   run_category "$category" "check" ;;  # error tests use check command
             compile) run_category "$category" "compile" ;;
+            test)    run_category "$category" "test" ;;
         esac
         echo ""
     done

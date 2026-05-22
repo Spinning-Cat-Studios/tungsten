@@ -1,0 +1,7 @@
+// Test: importing a non-existent item produces an error.
+
+pub mod mymod;
+
+use mymod::NonExistent;
+
+fn main() -> Nat { 0 }

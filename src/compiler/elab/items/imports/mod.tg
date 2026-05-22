@@ -1,0 +1,292 @@
+// src/compiler/elab/items/imports/mod.tg
+// Import processing for use declarations.
+
+pub mod paths;
+pub mod lookup;
+pub mod dedup;
+pub mod warn;
+
+use lexer::span::Span;
+use parser::ast::{
+    UseDecl, UseTree,
+    UseTreeSimple, UseTreeAlias, UseTreeNested, UseTreePath, UseTreeGroup, UseTreeGlob,
+    Path,
+    Ident, ident_name,
+    Visibility,
+    MaybeString, NoString
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_is_empty, list_init_string};
+use elab::env::{
+    Env, env_add_import, env_current_module_contents,
+    ElabModulePath, MkElabModulePath, elab_module_path_root,
+    Import, import_new, import_list_lookup, MaybeImport, NoImport, SomeImport,
+    module_map_lookup, MaybeModuleContents, SomeModuleContents, NoModuleContents
+};
+use elab::items::result::{
+    ElabContext, elab_context_with_env, elab_context_add_error
+};
+use elab::error::{
+    ElabError, ElabErrorKind, ErrImportNotFound, ErrGlobImportEmpty,
+    ErrDuplicateImport,
+    elab_error_duplicate_import,
+    MaybeExpectedBecause, NoExpectedBecause
+};
+use elab::items::imports::paths::{
+    path_to_module_and_name, extend_prefix_with_path,
+    combine_paths, path_to_string
+};
+use elab::items::imports::lookup::{lookup_in_module, get_module_public_items};
+use elab::items::imports::dedup::{check_duplicate_and_add, add_glob_imports};
+use elab::items::imports::warn::{warn_elab_relative_fallback, warn_elab_relative_failure};
+
+// ===========================================================================
+// SHARED IMPORT TYPES
+// ===========================================================================
+
+/// Use-declaration scope: visibility and span shared across all branches.
+pub type UseScope = { vis: Visibility, span: Span }
+
+/// Resolved import names: the source name in the module and the local alias.
+pub type ImportNames = { source: String, local: String }
+
+// ===========================================================================
+// IMPORT PROCESSING ENTRY POINT
+// ===========================================================================
+
+/// Process a use declaration.
+pub fn process_use_decl(ctx: ElabContext, decl: UseDecl) -> ElabContext {
+    let scope: UseScope = { vis: decl.vis, span: decl.span };
+    process_use_tree(ctx, decl.tree, elab_module_path_root(), scope)
+}
+
+/// Process a use tree at a given path prefix.
+fn process_use_tree(
+    ctx: ElabContext,
+    tree: UseTree,
+    prefix: ElabModulePath,
+    scope: UseScope
+) -> ElabContext {
+    match tree {
+        UseTreeSimple(path) =>
+            // use foo::bar;
+            process_simple_import(ctx, path, prefix, scope),
+        
+        UseTreeAlias(path, alias) =>
+            // use foo::bar as qux;
+            process_aliased_import(ctx, path, alias, prefix, scope),
+        
+        UseTreeRename(path, alias, rename_span) =>
+            // use foo::bar as qux; (with span)
+            let rename_scope: UseScope = { vis: scope.vis, span: rename_span };
+            process_aliased_import(ctx, path, alias, prefix, rename_scope),
+        
+        UseTreeNested(path, trees, nested_span) =>
+            // use foo::bar::{baz, qux};
+            let nested_scope: UseScope = { vis: scope.vis, span: nested_span };
+            process_nested_import(ctx, path, trees, prefix, nested_scope),
+        
+        UseTreePath(path) =>
+            // Just a path - treat as simple import
+            process_simple_import(ctx, path, prefix, scope),
+        
+        UseTreeGroup(path, trees, group_span) =>
+            // use foo::{bar, baz};
+            let group_scope: UseScope = { vis: scope.vis, span: group_span };
+            process_grouped_import(ctx, path, trees, prefix, group_scope),
+        
+        UseTreeGlob(path, glob_span) =>
+            // use foo::*;
+            let glob_scope: UseScope = { vis: scope.vis, span: glob_span };
+            process_glob_import(ctx, path, prefix, glob_scope)
+    }
+}
+
+// ===========================================================================
+// SIMPLE IMPORT
+// ===========================================================================
+
+/// Process a simple import: `use foo::bar;`
+fn process_simple_import(
+    ctx: ElabContext,
+    path: Path,
+    prefix: ElabModulePath,
+    scope: UseScope
+) -> ElabContext {
+    let (module_path, item_name) = path_to_module_and_name(path);
+    let full_path = combine_paths(prefix, module_path);
+    let names: ImportNames = { source: item_name, local: item_name };
+    resolve_and_register_import(ctx, path, full_path, names, scope)
+}
+
+// ===========================================================================
+// ALIASED IMPORT
+// ===========================================================================
+
+/// Process an aliased import: `use foo::bar as qux;`
+fn process_aliased_import(
+    ctx: ElabContext,
+    path: Path,
+    alias: Ident,
+    prefix: ElabModulePath,
+    scope: UseScope
+) -> ElabContext {
+    let (module_path, item_name) = path_to_module_and_name(path);
+    let full_path = combine_paths(prefix, module_path);
+    let names: ImportNames = { source: item_name, local: ident_name(alias) };
+    resolve_and_register_import(ctx, path, full_path, names, scope)
+}
+
+// ===========================================================================
+// SHARED IMPORT RESOLUTION
+// ===========================================================================
+
+/// Resolve an import and register it, checking for duplicates.
+fn resolve_and_register_import(
+    ctx: ElabContext,
+    path: Path,
+    full_path: ElabModulePath,
+    names: ImportNames,
+    scope: UseScope
+) -> ElabContext {
+    // Resolve module path: child > sibling > absolute (matches bootstrap)
+    let resolved_path = resolve_use_module_path(ctx.env, full_path);
+    let found = lookup_in_module(ctx.env, resolved_path, names.source);
+    if found {
+        check_duplicate_and_add(ctx, resolved_path, names, scope)
+    } else {
+        let full_name = path_to_string(path);
+        let err = make_not_found_error(full_name, scope.span);
+        elab_context_add_error(ctx, err)
+    }
+}
+
+/// Create an "import not found" error.
+fn make_not_found_error(full_name: String, span: Span) -> ElabError {
+    {
+        kind: ErrImportNotFound(full_name),
+        span: span,
+        notes: Nil,
+        suggestions: Nil,
+        help: NoString,
+        expected_because: NoExpectedBecause
+    }
+}
+
+// ===========================================================================
+// NESTED IMPORT
+// ===========================================================================
+
+/// Process nested imports: `use foo::bar::{baz, qux};`
+fn process_nested_import(
+    ctx: ElabContext,
+    path: Path,
+    trees: List<UseTree>,
+    prefix: ElabModulePath,
+    scope: UseScope
+) -> ElabContext {
+    let nested_prefix = extend_prefix_with_path(prefix, path);
+    process_use_tree_list(ctx, trees, nested_prefix, scope)
+}
+
+/// Process grouped imports: `use foo::{bar, baz};`
+fn process_grouped_import(
+    ctx: ElabContext,
+    path: Path,
+    trees: List<UseTree>,
+    prefix: ElabModulePath,
+    scope: UseScope
+) -> ElabContext {
+    let group_prefix = extend_prefix_with_path(prefix, path);
+    process_use_tree_list(ctx, trees, group_prefix, scope)
+}
+
+/// Process a list of use trees.
+fn process_use_tree_list(
+    ctx: ElabContext,
+    trees: List<UseTree>,
+    prefix: ElabModulePath,
+    scope: UseScope
+) -> ElabContext {
+    match trees {
+        Nil() => ctx,
+        Cons(tree, rest) =>
+            let ctx2 = process_use_tree(ctx, tree, prefix, scope);
+            process_use_tree_list(ctx2, rest, prefix, scope)
+    }
+}
+
+// ===========================================================================
+// GLOB IMPORT
+// ===========================================================================
+
+/// Process a glob import: `use foo::*;`
+fn process_glob_import(
+    ctx: ElabContext,
+    path: Path,
+    prefix: ElabModulePath,
+    scope: UseScope
+) -> ElabContext {
+    let target_path = extend_prefix_with_path(prefix, path);
+    // Resolve module path: child > sibling > absolute
+    let resolved_path = resolve_use_module_path(ctx.env, target_path);
+    
+    // Get all public items from the target module
+    let items = get_module_public_items(ctx.env, resolved_path);
+    
+    if list_is_empty(items) {
+        // Glob import found nothing
+        let path_str = path_to_string(path);
+        let err: ElabError = {
+            kind: ErrGlobImportEmpty(path_str),
+            span: scope.span,
+            notes: Cons("module is empty or has no public items", Nil),
+            suggestions: Nil,
+            help: NoString,
+            expected_because: NoExpectedBecause
+        };
+        elab_context_add_error(ctx, err)
+    } else {
+        // Add imports for all public items
+        add_glob_imports(ctx, resolved_path, items, scope.vis, scope.span)
+    }
+}
+
+// ===========================================================================
+// MODULE PATH RESOLUTION
+// ===========================================================================
+
+// NOTE: child > sibling > absolute resolution is also implemented in:
+//   - driver/modules/build/resolve.tg           (resolve_flatten_module_path)
+//   - driver/modules/build/reexport_resolve.tg  (resolve_reexport_source_path)
+// The elab implementation uses different types (ElabModulePath / ModuleMap).
+// The driver implementations live in separate import contexts.
+// Keep behaviour in sync manually.
+
+/// Resolve a module path using child > sibling > absolute priority.
+/// Mirrors the bootstrap's resolve_use_module_path strategy.
+/// Emits warnings via shared helpers when fallback is used (ADR 10.5.26m §2.2).
+fn resolve_use_module_path(env: Env, raw_path: ElabModulePath) -> ElabModulePath {
+    let current = env.current_module;
+    let child = combine_paths(current, raw_path);
+    match module_map_lookup(env.modules, child) {
+        SomeModuleContents(_) =>
+            warn_elab_relative_fallback("child", raw_path, child, current),
+        NoModuleContents() =>
+            match current {
+                MkElabModulePath(segs) =>
+                    let parent = MkElabModulePath(list_init_string(segs));
+                    let sibling = combine_paths(parent, raw_path);
+                    match module_map_lookup(env.modules, sibling) {
+                        SomeModuleContents(_) =>
+                            warn_elab_relative_fallback("sibling", raw_path, sibling, current),
+                        NoModuleContents() =>
+                            match module_map_lookup(env.modules, raw_path) {
+                                SomeModuleContents(_) => raw_path,
+                                NoModuleContents() =>
+                                    warn_elab_relative_failure(raw_path, current)
+                            }
+                    }
+            }
+    }
+}

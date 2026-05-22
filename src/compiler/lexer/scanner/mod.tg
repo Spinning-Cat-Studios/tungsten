@@ -1,0 +1,255 @@
+// src/compiler/lexer/scanner/mod.tg
+// Core lexer implementation - main dispatch and public API.
+
+use lexer::span::{Span, span_new};
+use lexer::token::*;
+use lexer::error::*;
+use driver::ffi::{List, Nil, Cons, eprintln, string_char_at_internal, string_len};
+use driver::util::{list_reverse, nat_to_string};
+
+// Declare submodules
+pub mod state;
+pub mod chars;
+pub mod numbers;
+pub mod literals;
+
+// Re-export error types for convenience
+pub use lexer::error::{LexErrors, NoLexErrors, ConsLexError, NoErrors};
+
+// Re-export submodule items needed externally
+pub use lexer::scanner::state::*;
+pub use lexer::scanner::chars::*;
+pub use lexer::scanner::numbers::*;
+pub use lexer::scanner::literals::*;
+
+// Import submodule items used in this file
+use lexer::scanner::state::{
+    LexerState, ScanResult,
+    lexer_new, lex_source, lex_pos, lex_file, lex_errors,
+    lex_at_end, lex_peek, lex_peek_next,
+    lex_advance, lex_advance_n, lex_add_error, lex_slice, lex_span,
+    scan_result_token, scan_result_state
+};
+use lexer::scanner::chars::{
+    is_whitespace, is_ident_start, is_ident_continue, scanner_is_digit,
+    char_slash, char_star, char_double_quote, char_single_quote,
+    char_eq, char_bang, char_langle, char_rangle, char_plus, char_minus,
+    char_amp, char_pipe, char_colon, char_dot, char_lparen, char_rparen,
+    char_lbrace, char_rbrace, char_lbracket, char_rbracket,
+    char_comma, char_semicolon, char_at_sign, char_hash, char_question,
+    char_percent, char_caret, char_tilde
+};
+use lexer::scanner::numbers::scan_number;
+use lexer::scanner::literals::{scan_string, scan_char, scan_line_comment, scan_block_comment};
+
+// ---------------------------------------------------------------------------
+// TOKEN LIST
+// ---------------------------------------------------------------------------
+
+fn tokens_empty() -> List<Token> { Nil }
+
+fn tokens_push(tok: Token, toks: List<Token>) -> List<Token> {
+    Cons(tok, toks)
+}
+
+fn tokens_reverse(toks: List<Token>) -> List<Token> {
+    tokens_reverse_acc(toks, Nil)
+}
+
+fn tokens_reverse_acc(toks: List<Token>, acc: List<Token>) -> List<Token> {
+    match toks {
+        Nil() => acc,
+        Cons(t, rest) => tokens_reverse_acc(rest, Cons(t, acc))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCANNING FUNCTIONS
+// ---------------------------------------------------------------------------
+fn skip_whitespace(lex: LexerState) -> LexerState {
+    if lex_at_end(lex) { lex }
+    else if is_whitespace(lex_peek(lex)) { skip_whitespace(lex_advance(lex)) }
+    else { lex }
+}
+
+fn scan_identifier(lex: LexerState) -> ScanResult {
+    let start = lex_pos(lex);
+    let lex2 = scan_ident_chars(lex);
+    let text = lex_slice(lex2, start, lex_pos(lex2) - start);
+    let kind = classify_keyword(text);
+    let lex3 = match kind {
+        TokReserved(_) => lex_add_error(lex2, err_reserved_keyword(text, start, lex_pos(lex2) - start, lex_file(lex))),
+        _ => lex2
+    };
+    let span = lex_span(lex3, start);
+    { token: token_new(kind, span), state: lex3 }
+}
+
+fn scan_ident_chars(lex: LexerState) -> LexerState {
+    if lex_at_end(lex) { lex }
+    else if is_ident_continue(lex_peek(lex)) { scan_ident_chars(lex_advance(lex)) }
+    else { lex }
+}
+
+fn scan_punctuation(lex: LexerState) -> ScanResult {
+    let start = lex_pos(lex);
+    let ch = lex_peek(lex);
+    let ch2 = lex_peek_next(lex);
+    
+    if ch == char_eq() && ch2 == char_eq() { scan_simple(lex, 2, TokEqEq, start) }
+    else if ch == char_bang() && ch2 == char_eq() { scan_simple(lex, 2, TokBangEq, start) }
+    else if ch == char_langle() && ch2 == char_eq() { scan_simple(lex, 2, TokLe, start) }
+    else if ch == char_rangle() && ch2 == char_eq() { scan_simple(lex, 2, TokGe, start) }
+    else if ch == char_plus() && ch2 == char_plus() { scan_simple(lex, 2, TokPlusPlus, start) }
+    else if ch == char_amp() && ch2 == char_amp() { scan_simple(lex, 2, TokAmpAmp, start) }
+    else if ch == char_pipe() && ch2 == char_pipe() { scan_simple(lex, 2, TokPipePipe, start) }
+    else if ch == char_pipe() && ch2 == char_rangle() { scan_simple(lex, 2, TokPipeRight, start) }
+    else if ch == char_minus() && ch2 == char_rangle() { scan_simple(lex, 2, TokArrow, start) }
+    else if ch == char_eq() && ch2 == char_rangle() { scan_simple(lex, 2, TokFatArrow, start) }
+    else if ch == char_colon() && ch2 == char_colon() { scan_simple(lex, 2, TokColonColon, start) }
+    else if ch == char_dot() && ch2 == char_dot() {
+        let ch3 = if lex_pos(lex) + 2 < string_len(lex_source(lex)) { string_char_at_internal(lex_source(lex), lex_pos(lex) + 2) } else { 0 };
+        if ch3 == char_dot() { scan_simple(lex, 3, TokDotDotDot, start) }
+        else { scan_simple(lex, 2, TokDotDot, start) }
+    }
+    else if ch == char_lparen() { scan_simple(lex, 1, TokLParen, start) }
+    else if ch == char_rparen() { scan_simple(lex, 1, TokRParen, start) }
+    else if ch == char_lbrace() { scan_simple(lex, 1, TokLBrace, start) }
+    else if ch == char_rbrace() { scan_simple(lex, 1, TokRBrace, start) }
+    else if ch == char_lbracket() { scan_simple(lex, 1, TokLBracket, start) }
+    else if ch == char_rbracket() { scan_simple(lex, 1, TokRBracket, start) }
+    else if ch == char_langle() { scan_simple(lex, 1, TokLAngle, start) }
+    else if ch == char_rangle() { scan_simple(lex, 1, TokRAngle, start) }
+    else if ch == char_comma() { scan_simple(lex, 1, TokComma, start) }
+    else if ch == char_semicolon() { scan_simple(lex, 1, TokSemi, start) }
+    else if ch == char_colon() { scan_simple(lex, 1, TokColon, start) }
+    else if ch == char_dot() { scan_simple(lex, 1, TokDot, start) }
+    else if ch == char_at_sign() { scan_simple(lex, 1, TokAt, start) }
+    else if ch == char_hash() { scan_simple(lex, 1, TokHash, start) }
+    else if ch == char_question() { scan_simple(lex, 1, TokQuestion, start) }
+    else if ch == char_eq() { scan_simple(lex, 1, TokEq, start) }
+    else if ch == char_bang() { scan_simple(lex, 1, TokBang, start) }
+    else if ch == char_plus() { scan_simple(lex, 1, TokPlus, start) }
+    else if ch == char_minus() { scan_simple(lex, 1, TokMinus, start) }
+    else if ch == char_star() { scan_simple(lex, 1, TokStar, start) }
+    else if ch == char_slash() { scan_simple(lex, 1, TokSlash, start) }
+    else if ch == char_percent() { scan_simple(lex, 1, TokPercent, start) }
+    else if ch == char_amp() { scan_simple(lex, 1, TokAmp, start) }
+    else if ch == char_pipe() { scan_simple(lex, 1, TokPipe, start) }
+    else if ch == char_caret() { scan_simple(lex, 1, TokCaret, start) }
+    else if ch == char_tilde() { scan_simple(lex, 1, TokTilde, start) }
+    else {
+        let lex2 = lex_add_error(lex, err_unexpected_char(ch, start, lex_file(lex)));
+        let lex3 = lex_advance(lex2);
+        let span = lex_span(lex3, start);
+        { token: token_new(TokError("unexpected character"), span), state: lex3 }
+    }
+}
+
+fn scan_simple(lex: LexerState, len: Nat, kind: TokenKind, start: Nat) -> ScanResult {
+    let lex2 = lex_advance_n(lex, len);
+    let span = lex_span(lex2, start);
+    { token: token_new(kind, span), state: lex2 }
+}
+
+fn scan_token(lex: LexerState) -> ScanResult {
+    if lex_at_end(lex) {
+        let span = span_new(lex_pos(lex), lex_pos(lex), lex_file(lex));
+        { token: token_new(TokEof, span), state: lex }
+    } else {
+        let ch = lex_peek(lex);
+        let ch2 = lex_peek_next(lex);
+        
+        if is_whitespace(ch) { scan_token(skip_whitespace(lex)) }
+        else if ch == char_slash() && ch2 == char_slash() { scan_line_comment(lex) }
+        else if ch == char_slash() && ch2 == char_star() { scan_block_comment(lex) }
+        else if ch == char_double_quote() { scan_string(lex) }
+        else if ch == char_single_quote() { scan_char(lex) }
+        else if is_ident_start(ch) { scan_identifier(lex) }
+        else if scanner_is_digit(ch) { scan_number(lex) }
+        else { scan_punctuation(lex) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PUBLIC API
+// ---------------------------------------------------------------------------
+pub type LexResult = { tokens: List<Token>, errors: LexErrors }
+
+pub fn lex_result_tokens(r: LexResult) -> List<Token> {
+    r.tokens
+}
+
+pub fn lex_result_errors(r: LexResult) -> LexErrors {
+    r.errors
+}
+
+pub fn tokenize(source: String, file: String) -> LexResult {
+    let lex = lexer_new(source, file);
+    let result = tokenize_loop(lex, tokens_empty(), 0);
+    let raw_toks = loop_result_tokens(result);
+    let toks = tokens_reverse(raw_toks);
+    let raw_errs = loop_result_errors(result);
+    let errs = errors_reverse(raw_errs);
+    { tokens: toks, errors: errs }
+}
+
+pub type LoopResult = { tokens: List<Token>, errors: LexErrors }
+
+pub fn loop_result_tokens(r: LoopResult) -> List<Token> {
+    r.tokens
+}
+
+pub fn loop_result_errors(r: LoopResult) -> LexErrors {
+    r.errors
+}
+
+fn tokenize_loop(lex: LexerState, toks: List<Token>, iteration: Nat) -> LoopResult {
+    if iteration > 100000 {
+        let r: LoopResult = { tokens: toks, errors: lex_errors(lex) };
+        r
+    } else {
+        let result = scan_token(lex);
+        let tok = scan_result_token(result);
+        let new_state = scan_result_state(result);
+        let new_toks = tokens_push(tok, toks);
+        match tok.kind {
+            TokEof() => {
+                let r: LoopResult = { tokens: new_toks, errors: lex_errors(new_state) };
+                r
+            },
+            _ => tokenize_loop(new_state, new_toks, iteration + 1)
+        }
+    }
+}
+
+pub fn tokenize_no_trivia(source: String, file: String) -> LexResult {
+    let result = tokenize(source, file);
+    let filtered = filter_trivia(lex_result_tokens(result));
+    { tokens: filtered, errors: lex_result_errors(result) }
+}
+
+fn filter_trivia(toks: List<Token>) -> List<Token> {
+    filter_trivia_acc(toks, tokens_empty())
+}
+
+fn filter_trivia_acc(toks: List<Token>, acc: List<Token>) -> List<Token> {
+    match toks {
+        Nil() => list_reverse(acc),
+        Cons(t, rest) =>
+            if is_trivia_kind(t.kind) {
+                filter_trivia_acc(rest, acc)
+            } else {
+                filter_trivia_acc(rest, Cons(t, acc))
+            }
+    }
+}
+
+fn is_trivia_kind(kind: TokenKind) -> Bool {
+    match kind {
+        TokLineComment(_) => true,
+        TokDocComment(_) => true,
+        TokBlockComment(_) => true,
+        _ => false
+    }
+}

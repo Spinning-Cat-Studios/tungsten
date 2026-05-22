@@ -24,8 +24,8 @@ use std::ptr;
 
 use crate::eval::{eval_with_env, eval_with_env_and_limit, EvalEnv};
 
-use super::super::{with_arena_ref, TermHandle, INVALID_HANDLE};
 use super::set_driver_error;
+use crate::ffi::{with_arena_ref, TermHandle, INVALID_HANDLE};
 
 // ============================================================================
 // EvalEnv Handle
@@ -184,13 +184,11 @@ pub extern "C" fn tg_eval_run_with_limit(
 
     let result = if limit == 0 {
         eval_with_env(&term, &env)
+    } else if let Some(t) = eval_with_env_and_limit(&term, &env, limit as usize) {
+        t
     } else {
-        if let Some(t) = eval_with_env_and_limit(&term, &env, limit as usize) {
-            t
-        } else {
-            set_driver_error(format!("tg_eval_run: evaluation exceeded {limit} steps"));
-            return INVALID_HANDLE;
-        }
+        set_driver_error(format!("tg_eval_run: evaluation exceeded {limit} steps"));
+        return INVALID_HANDLE;
     };
 
     // Store result in arena and return handle
@@ -238,12 +236,14 @@ pub extern "C" fn tg_eval_display(term_handle: TermHandle) -> *mut c_char {
 ///
 /// # Returns
 /// * For Nat values: the numeric value as a string
+/// * For Bool: "true" or "false"
 /// * For Unit: "()"
+/// * For String: the quoted string
+/// * For Pairs: "(a, b)"
+/// * For ADT constructors: "Name" or "Name(payload)"
 /// * For other values: the debug representation
 #[no_mangle]
 pub extern "C" fn tg_eval_display_value(term_handle: TermHandle) -> *mut c_char {
-    use crate::Term;
-
     let term = with_arena_ref!(|arena| arena.get_term(term_handle).cloned());
 
     let term = if let Some(t) = term {
@@ -255,28 +255,7 @@ pub extern "C" fn tg_eval_display_value(term_handle: TermHandle) -> *mut c_char 
         return ptr::null_mut();
     };
 
-    // Format based on term type
-    let display = match &term {
-        Term::Unit => "()".to_string(),
-        Term::Zero => "0".to_string(),
-        Term::Succ(_) => {
-            // Count successors to get natural number value
-            let mut n = 0usize;
-            let mut current = &term;
-            while let Term::Succ(inner) = current {
-                n += 1;
-                current = inner.as_ref();
-            }
-            if matches!(current, Term::Zero) {
-                n.to_string()
-            } else {
-                format!("{term:?}")
-            }
-        }
-        Term::StringLit(s) => format!("\"{s}\""),
-        // For complex values, use debug format
-        _ => format!("{term:?}"),
-    };
+    let display = display_value(&term);
 
     if let Ok(s) = CString::new(display) {
         s.into_raw()
@@ -284,4 +263,65 @@ pub extern "C" fn tg_eval_display_value(term_handle: TermHandle) -> *mut c_char 
         set_driver_error("tg_eval_display_value: result contains null byte");
         ptr::null_mut()
     }
+}
+
+/// Recursively format an evaluated term as a user-friendly string.
+fn display_value(term: &crate::Term) -> String {
+    use crate::Term;
+
+    match term {
+        Term::Unit => "()".to_string(),
+        Term::True => "true".to_string(),
+        Term::False => "false".to_string(),
+        Term::Zero => "0".to_string(),
+        Term::NatLit(n) => n.to_string(),
+        Term::Succ(_) => display_succ_chain(term),
+        Term::StringLit(s) => format!("\"{s}\""),
+        Term::Pair(a, b) => format!("({}, {})", display_value(a), display_value(b)),
+        Term::Inl(_, v) => format!("inl({})", display_value(v)),
+        Term::Inr(_, v) => format!("inr({})", display_value(v)),
+        Term::Fold(_, v) => display_value(v),
+        Term::AdtConstruct(ty, idx, payload) => display_adt_construct(term, ty, *idx, payload),
+        Term::Refl(_, _) => "refl".to_string(),
+        Term::Lambda(_, _, _) => "<function>".to_string(),
+        Term::Spanned(inner, _) => display_value(inner),
+        _ => format!("{term:?}"),
+    }
+}
+
+/// Display a chain of Succ constructors as a natural number.
+fn display_succ_chain(term: &crate::Term) -> String {
+    use crate::Term;
+
+    let mut n = 0usize;
+    let mut current = term;
+    while let Term::Succ(inner) = current {
+        n += 1;
+        current = inner.as_ref();
+    }
+    if matches!(current, Term::Zero) {
+        n.to_string()
+    } else {
+        format!("{term:?}")
+    }
+}
+
+/// Display an ADT constructor value.
+fn display_adt_construct(
+    term: &crate::Term,
+    ty: &crate::types::Type,
+    idx: usize,
+    payload: &crate::Term,
+) -> String {
+    use crate::types::Type;
+
+    if let Type::Adt(_, _, variants) = ty {
+        if let Some((name, _)) = variants.get(idx) {
+            if matches!(payload, crate::Term::Unit) {
+                return name.clone();
+            }
+            return format!("{}({})", name, display_value(payload));
+        }
+    }
+    format!("{term:?}")
 }

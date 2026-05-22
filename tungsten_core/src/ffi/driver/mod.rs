@@ -1,4 +1,4 @@
-//! Driver FFI - File I/O, CLI arguments, console output, and process control
+//! Driver FFI - File I/O, CLI arguments, console output, process control, and diagnostics
 //!
 //! This module provides FFI functions for the self-hosted driver (Phase 3D).
 //! These functions enable the Tungsten compiler to:
@@ -28,12 +28,11 @@
 // Allow unsafe code in this FFI module
 #![allow(unsafe_code)]
 
-mod cli;
 mod console;
+mod diagnostics;
 mod eval;
-mod files;
-mod process;
-mod strings;
+mod io;
+mod test;
 
 #[cfg(test)]
 mod tests;
@@ -42,12 +41,11 @@ use std::ffi::{c_char, CString};
 use std::ptr;
 
 // Re-export all public FFI functions
-pub use cli::*;
 pub use console::*;
+pub use diagnostics::*;
 pub use eval::*;
-pub use files::*;
-pub use process::*;
-pub use strings::*;
+pub use io::*;
+pub use test::*;
 
 // ============================================================================
 // Thread-local error storage for driver operations

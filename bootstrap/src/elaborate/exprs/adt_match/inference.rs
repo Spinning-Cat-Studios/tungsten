@@ -28,16 +28,22 @@ use crate::elaborate::env::{self as elab_env, ModulePath, PathResolutionError};
 use crate::elaborate::error::{ElabError, ElabErrorKind};
 use crate::elaborate::{ElabResult, Elaborator};
 
+/// Context for match type inference: the unfolded sum type,
+/// constructors, and ADT identity needed to infer arm types.
+pub(super) struct MatchTypeCtx<'a> {
+    pub sum_type: &'a Type,
+    pub constructors: &'a [elab_env::Constructor],
+    pub scrutinee_ty: &'a Type,
+    pub type_params: &'a [String],
+}
+
 impl<'a> Elaborator<'a> {
     /// Infer the result type of a match expression.
     pub(super) fn infer_match_result_type(
         &mut self,
         expected: Option<&Type>,
         classified: &ClassifiedArms,
-        sum_type: &Type,
-        constructors: &[elab_env::Constructor],
-        scrutinee_ty: &Type,
-        type_params: &[String],
+        ctx: &MatchTypeCtx<'_>,
     ) -> ElabResult<Type> {
         if let Some(expected) = expected {
             return Ok(expected.clone());
@@ -48,10 +54,10 @@ impl<'a> Elaborator<'a> {
             if let Some(arm) = arms_vec.first() {
                 return self.infer_ctor_arm_type(
                     arm,
-                    sum_type,
-                    constructors,
-                    scrutinee_ty,
-                    type_params,
+                    ctx.sum_type,
+                    ctx.constructors,
+                    ctx.scrutinee_ty,
+                    ctx.type_params,
                 );
             }
         }
@@ -60,10 +66,10 @@ impl<'a> Elaborator<'a> {
             if let Some(first_arm) = first_arms_vec.first() {
                 return self.infer_ctor_arm_type(
                     first_arm,
-                    sum_type,
-                    constructors,
-                    scrutinee_ty,
-                    type_params,
+                    ctx.sum_type,
+                    ctx.constructors,
+                    ctx.scrutinee_ty,
+                    ctx.type_params,
                 );
             }
         }
@@ -261,16 +267,15 @@ impl<'a> Elaborator<'a> {
 
     /// Take one step right in a sum type (unwrapping Mu if needed).
     fn step_right_in_sum<'t>(&self, ty: &'t Type) -> ElabResult<&'t Type> {
-        match ty {
-            Type::Sum(_, right) => Ok(right.as_ref()),
-            Type::Mu(_, body) => {
-                // Unwrap Mu and check for Sum inside
-                match body.as_ref() {
-                    Type::Sum(_, right) => Ok(right.as_ref()),
-                    _ => Err(Self::expected_sum_error()),
-                }
-            }
-            _ => Err(Self::expected_sum_error()),
+        let unwrapped = if let Type::Mu(_, body) = ty {
+            body.as_ref()
+        } else {
+            ty
+        };
+        if let Type::Sum(_, right) = unwrapped {
+            Ok(right.as_ref())
+        } else {
+            Err(Self::expected_sum_error())
         }
     }
 

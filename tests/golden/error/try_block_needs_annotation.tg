@@ -1,0 +1,9 @@
+// Golden test: try block in infer mode needs type annotation (ADR 15.5.26d)
+type Result<T, E> =
+    | Err(E)
+    | Ok(T)
+
+fn main() -> Nat {
+    let x = try { 42 };
+    0
+}

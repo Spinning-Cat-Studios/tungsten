@@ -1,0 +1,102 @@
+// src/compiler/elab/error/render/helpers/multiline.tg
+// Multi-line span rendering.
+
+use lexer::span::Span;
+use elab::error::source::{SourceInfo, LineCol, offset_to_line_col, get_line_content};
+use elab::error::render::helpers::{
+    RenderCtx, MultilineLoopCtx,
+    render_source_with_message
+};
+use elab::error::render::helpers::formatting::{make_gutter, make_spaces, pad_left, repeat_string};
+use driver::util::nat_to_string;
+use driver::ffi::string_len;
+
+// ===========================================================================
+// MULTI-LINE SPAN RENDERING
+// ===========================================================================
+
+pub fn render_multiline_span(
+    src: SourceInfo, 
+    span: Span, 
+    message: String,
+    gutter_width: Nat,
+    is_primary: Bool
+) -> String {
+    let lc_start = offset_to_line_col(src, span.start);
+    let lc_end = offset_to_line_col(src, span.end);
+    
+    if lc_start.line == lc_end.line {
+        render_source_with_message(src, span, message, gutter_width, is_primary)
+    } else {
+        let marker = if is_primary { "^" } else { "-" };
+        render_multiline_start(src, lc_start, gutter_width, marker) ++
+        render_multiline_middle(src, lc_start.line + 1, lc_end.line - 1, gutter_width, marker) ++
+        render_multiline_end(src, lc_end, message, gutter_width, marker)
+    }
+}
+
+fn render_multiline_start(src: SourceInfo, lc: LineCol, gutter_width: Nat, marker: String) -> String {
+    let line_content = get_line_content(src, lc.line);
+    let line_str = nat_to_string(lc.line);
+    let padded_num = pad_left(line_str, gutter_width, " ");
+    
+    let source = padded_num ++ " | " ++ line_content;
+    let underline_len = string_len(line_content) - lc.col + 2;
+    let underline = make_gutter(gutter_width) ++ " | " ++ 
+                    make_spaces(lc.col - 1) ++ 
+                    repeat_string(marker, underline_len);
+    
+    source ++ "\n" ++ underline ++ "\n"
+}
+
+fn render_multiline_middle(
+    src: SourceInfo, 
+    start_line: Nat, 
+    end_line: Nat, 
+    gutter_width: Nat,
+    marker: String
+) -> String {
+    if start_line > end_line {
+        ""
+    } else if end_line - start_line > 2 {
+        make_gutter(gutter_width) ++ " | ...\n"
+    } else {
+        let ctx: MultilineLoopCtx = { src: src, end_line: end_line, gutter_width: gutter_width, marker: marker };
+        render_multiline_middle_acc(ctx, start_line, "")
+    }
+}
+
+fn render_multiline_middle_acc(
+    ctx: MultilineLoopCtx,
+    current: Nat,
+    acc: String
+) -> String {
+    if current > ctx.end_line {
+        acc
+    } else {
+        let line_content = get_line_content(ctx.src, current);
+        let line_str = nat_to_string(current);
+        let padded_num = pad_left(line_str, ctx.gutter_width, " ");
+        let source = padded_num ++ " | " ++ ctx.marker ++ " " ++ line_content;
+        render_multiline_middle_acc(ctx, current + 1, acc ++ source ++ "\n")
+    }
+}
+
+fn render_multiline_end(
+    src: SourceInfo, 
+    lc: LineCol, 
+    message: String, 
+    gutter_width: Nat,
+    marker: String
+) -> String {
+    let line_content = get_line_content(src, lc.line);
+    let line_str = nat_to_string(lc.line);
+    let padded_num = pad_left(line_str, gutter_width, " ");
+    
+    let source = padded_num ++ " | " ++ line_content;
+    let underline = make_gutter(gutter_width) ++ " | " ++ 
+                    repeat_string(marker, lc.col) ++
+                    " " ++ message;
+    
+    source ++ "\n" ++ underline
+}

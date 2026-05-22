@@ -1,0 +1,6 @@
+// W1 regression test: String return value
+// Verifies that string values display correctly
+
+pub fn main() -> String {
+    "hello world"
+}

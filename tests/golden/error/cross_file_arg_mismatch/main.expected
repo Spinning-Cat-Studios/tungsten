@@ -1,0 +1,20 @@
+[E0010] Error: expected `Nat`, found `Bool`
+   ╭─[tests/golden/error/cross_file_arg_mismatch/main.tg:9:13]
+   │
+ 9 │     add_one(true)
+   │             ──┬─  
+   │               ╰─── expected `Nat`, found `Bool`
+   │               │   
+   │               ╰─── expected due to argument 1
+───╯
+note: parameter type declared in `add_one`
+   ╭─[tests/golden/error/cross_file_arg_mismatch/math.tg:3:1]
+   │
+ 3 │ ╭─▶ pub fn add_one(x: Nat) -> Nat {
+   ┆ ┆   
+ 5 │ ├─▶ }
+   │ │       
+   │ ╰─────── parameter type declared in `add_one`
+───╯
+
+error: aborting due to 1 error

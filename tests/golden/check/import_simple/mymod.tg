@@ -1,0 +1,5 @@
+// Submodule providing a type and a function.
+
+pub type MyType = Nat
+
+pub fn my_fn(x: MyType) -> Nat { x + 1 }

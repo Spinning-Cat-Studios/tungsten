@@ -1,0 +1,9 @@
+[E0044] Error: `return` inside `try` block is not allowed; use `?` to propagate errors
+   ╭─[tests/golden/error/try_block_return_rejected.tg:7:11]
+   │
+ 7 │     try { return Ok(42) }
+   │           ──────┬──────  
+   │                 ╰──────── 
+───╯
+
+error: aborting due to 1 error

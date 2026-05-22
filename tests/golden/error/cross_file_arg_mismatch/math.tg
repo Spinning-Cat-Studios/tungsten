@@ -1,0 +1,5 @@
+// Helper module: defines a function that expects a Nat argument
+
+pub fn add_one(x: Nat) -> Nat {
+    x + 1
+}

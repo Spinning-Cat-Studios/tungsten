@@ -1,0 +1,186 @@
+// src/compiler/parser/items/use_decl/use_trees.tg
+// Use tree and use tree list parsing.
+
+use lexer::token::{TokenKind, TokLBrace, TokRBrace, TokComma,
+    TokStar, TokAs, TokColonColon};
+use lexer::span::{Span, span_merge};
+use parser::error::{parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, ident_span};
+use parser::ast::nodes::{UseTree,
+    UseTreeSimple, UseTreeRename, UseTreeGlob, UseTreeNested,
+    Path, path_span, path_append};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use driver::util::{Result, Ok, Err};
+use parser::items::use_decl::use_paths::{parse_use_path};
+
+// ===========================================================================
+// USE TREE PARSING
+// ===========================================================================
+
+/// Parse a use tree.
+///
+/// Grammar:
+///   UseTree = UsePath
+///           | UsePath "::" "*"
+///           | UsePath "::" "{" UseTreeList "}"
+///           | UsePath "as" IDENT
+///
+///   UsePath = IDENT ("::" IDENT)*
+pub fn parse_use_tree(cur: Cursor) -> Result<(UseTree, Cursor), ParseError> {
+    let (path, cur2) = parse_use_path(cur)?;
+    parse_use_tree_dispatch(path, cur2)
+}
+
+fn parse_use_tree_dispatch(path: Path, cur: Cursor) -> Result<(UseTree, Cursor), ParseError> {
+    match cursor_peek_kind(cur) {
+        None() => Ok((UseTreeSimple(path), cur)),
+        Some(kind) => parse_use_tree_by_kind(path, cur, kind)
+    }
+}
+
+fn parse_use_tree_by_kind(path: Path, cur: Cursor, kind: TokenKind) -> Result<(UseTree, Cursor), ParseError> {
+    match kind {
+        TokColonColon() => {
+            let cur2 = cursor_advance(cur);
+            parse_use_tree_after_path(cur2, path)
+        },
+        TokAs() => {
+            let cur2 = cursor_advance(cur);
+            parse_use_rename(path, cur2)
+        },
+        _ => Ok((UseTreeSimple(path), cur))
+    }
+}
+
+fn parse_use_rename(path: Path, cur: Cursor) -> Result<(UseTree, Cursor), ParseError> {
+    match cursor_eat_ident(cur) {
+        NoIdentResult() => parse_use_rename_no_ident(cur),
+        SomeIdentResult(alias, cur2) => {
+            let alias_ident = ident_new(alias, cursor_peek_span(cur));
+            let full_span = span_merge(path_span(path), ident_span(alias_ident));
+            Ok((UseTreeRename(path, alias_ident, full_span), cur2))
+        }
+    }
+}
+
+fn parse_use_rename_no_ident(cur: Cursor) -> Result<(UseTree, Cursor), ParseError> {
+    let found = match cursor_peek_kind(cur) {
+        None() => "end of file",
+        Some(k) => token_kind_name(k)
+    };
+    Err(parse_error_expected("identifier", found, cursor_peek_span(cur)))
+}
+
+/// Parse what comes after a path and ::.
+fn parse_use_tree_after_path(cur: Cursor, path: Path) -> Result<(UseTree, Cursor), ParseError> {
+    match cursor_peek_kind(cur) {
+        None() =>
+            Err(parse_error_expected("'*' or '{'", "end of file", cursor_peek_span(cur))),
+        Some(kind) =>
+            parse_use_tree_after_path_kind(cur, path, kind)
+    }
+}
+
+fn parse_use_tree_after_path_kind(cur: Cursor, path: Path, kind: TokenKind) -> Result<(UseTree, Cursor), ParseError> {
+    match kind {
+        TokStar() => {
+            let cur2 = cursor_advance(cur);
+            let glob_span = span_merge(path_span(path), cursor_peek_span(cur));
+            Ok((UseTreeGlob(path, glob_span), cur2))
+        },
+        TokLBrace() => parse_use_tree_nested_braces(cur, path),
+        _ => parse_use_tree_extend_path(cur, path, kind)
+    }
+}
+
+/// Parse nested use tree: path::{...}
+fn parse_use_tree_nested_braces(cur: Cursor, path: Path) -> Result<(UseTree, Cursor), ParseError> {
+    let cur2 = cursor_advance(cur);
+    let (list, cur3) = parse_use_tree_list(cur2)?;
+    parse_use_tree_nested_close(path, list, cur3)
+}
+
+fn parse_use_tree_nested_close(path: Path, list: List<UseTree>, cur: Cursor) -> Result<(UseTree, Cursor), ParseError> {
+    let (rbrace_tok, cur2) = cursor_expect(cur, TokRBrace())?;
+    let nested_span = span_merge(path_span(path), rbrace_tok.span);
+    Ok((UseTreeNested(path, list, nested_span), cur2))
+}
+
+/// Extend path with an identifier and continue parsing use tree.
+fn parse_use_tree_extend_path(cur: Cursor, path: Path, kind: TokenKind) -> Result<(UseTree, Cursor), ParseError> {
+    // Could be continuing path - try to parse more
+    // NOTE: This case handles unusual syntax. Uses O(n) path_append but
+    // is not in the main parsing hot path for normal use declarations.
+    match cursor_eat_ident(cur) {
+        SomeIdentResult(name, cur2) => {
+            // Extend the path with the new identifier
+            let ident = ident_new(name, cursor_peek_span(cur));
+            let extended_path = path_append(path, ident);
+            // Continue parsing
+            parse_use_tree_continue(cur2, extended_path)
+        },
+        NoIdentResult() => {
+            let found = token_kind_name(kind);
+            Err(parse_error_expected("'*', '{', or identifier", found, cursor_peek_span(cur)))
+        }
+    }
+}
+
+/// Continue parsing a use tree after extending the path.
+fn parse_use_tree_continue(cur: Cursor, path: Path) -> Result<(UseTree, Cursor), ParseError> {
+    match cursor_peek_kind(cur) {
+        None() => Ok((UseTreeSimple(path), cur)),
+        Some(kind) => parse_use_tree_continue_kind(path, cur, kind)
+    }
+}
+
+fn parse_use_tree_continue_kind(path: Path, cur: Cursor, kind: TokenKind) -> Result<(UseTree, Cursor), ParseError> {
+    match kind {
+        TokColonColon() => {
+            let cur2 = cursor_advance(cur);
+            parse_use_tree_after_path(cur2, path)
+        },
+        TokAs() => {
+            let cur2 = cursor_advance(cur);
+            parse_use_rename(path, cur2)
+        },
+        _ => Ok((UseTreeSimple(path), cur))
+    }
+}
+
+// ===========================================================================
+// USE TREE LIST PARSING
+// ===========================================================================
+
+/// Parse a list of use trees inside {}.
+fn parse_use_tree_list(cur: Cursor) -> Result<(List<UseTree>, Cursor), ParseError> {
+    // Check for empty list
+    if cursor_check(cur, TokRBrace()) {
+        Ok((Nil(), cur))
+    } else {
+        // Parse first tree
+        let (tree, cur2) = parse_use_tree(cur)?;
+        parse_use_tree_list_rest(cur2, Cons(tree, Nil()))
+    }
+}
+
+/// Parse remaining use trees.
+fn parse_use_tree_list_rest(cur: Cursor, acc: List<UseTree>) -> Result<(List<UseTree>, Cursor), ParseError> {
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma
+        if cursor_check(cur2, TokRBrace()) {
+            Ok((list_reverse(acc), cur2))
+        } else {
+            let (tree, cur3) = parse_use_tree(cur2)?;
+            parse_use_tree_list_rest(cur3, Cons(tree, acc))
+        }
+    } else {
+        Ok((list_reverse(acc), cur))
+    }
+}

@@ -1,0 +1,3 @@
+// Middle module: re-exports Option from core (like driver::util re-exporting parser::option)
+
+pub use core::{Option, Some, None};

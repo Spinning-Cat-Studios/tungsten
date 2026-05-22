@@ -1,0 +1,173 @@
+// src/compiler/codegen/ir_builder.tg
+// SSA name generation and IR state threading.
+//
+// Since Tungsten doesn't have mutation, the emitter threads IRState through
+// every function. Each fresh_name / fresh_label call returns an updated state.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::nat_to_string;
+
+// ===========================================================================
+// IR STATE
+// ===========================================================================
+
+/// The mutable state threaded through IR emission.
+pub type IRState = {
+    next_id: Nat,         // SSA value counter: %0, %1, %2, ...
+    next_label: Nat,      // Basic block label counter: label0, label1, ...
+    next_lambda: Nat,     // Lambda counter for generated function names
+    output: List<String>, // Accumulated IR lines (in reverse order)
+    deferred: List<String>,  // Accumulated module-level inner function defs
+    env_types: List<String>  // Accumulated env struct type declarations
+}
+
+/// Create a fresh IRState.
+pub fn ir_state_new() -> IRState {
+    { next_id: 0, next_label: 0, next_lambda: 0,
+      output: Nil, deferred: Nil, env_types: Nil } : IRState
+}
+
+// ===========================================================================
+// NAME GENERATION
+// ===========================================================================
+
+/// Allocate a fresh SSA name (%0, %1, ...) and return (name, updated_state).
+pub fn fresh_name(st: IRState) -> (String, IRState) {
+    let name = "%" ++ nat_to_string(st.next_id);
+    let st2 = { next_id: st.next_id + 1,
+                next_label: st.next_label,
+                next_lambda: st.next_lambda,
+                output: st.output,
+                deferred: st.deferred,
+                env_types: st.env_types } : IRState;
+    (name, st2)
+}
+
+/// Allocate a fresh basic block label and return (label, updated_state).
+pub fn fresh_label(st: IRState) -> (String, IRState) {
+    let label = "label" ++ nat_to_string(st.next_label);
+    let st2 = { next_id: st.next_id,
+                next_label: st.next_label + 1,
+                next_lambda: st.next_lambda,
+                output: st.output,
+                deferred: st.deferred,
+                env_types: st.env_types } : IRState;
+    (label, st2)
+}
+
+/// Allocate a fresh lambda function name and return (name, updated_state).
+pub fn fresh_lambda_name(st: IRState) -> (String, IRState) {
+    let name = "@lambda." ++ nat_to_string(st.next_lambda);
+    let st2 = { next_id: st.next_id,
+                next_label: st.next_label,
+                next_lambda: st.next_lambda + 1,
+                output: st.output,
+                deferred: st.deferred,
+                env_types: st.env_types } : IRState;
+    (name, st2)
+}
+
+// ===========================================================================
+// OUTPUT ACCUMULATION
+// ===========================================================================
+
+/// Append a line of IR to the output buffer.
+pub fn emit_line(st: IRState, line: String) -> IRState {
+    { next_id: st.next_id,
+      next_label: st.next_label,
+      next_lambda: st.next_lambda,
+      output: Cons(line, st.output),
+      deferred: st.deferred,
+      env_types: st.env_types } : IRState
+}
+
+/// Append a blank line to the output buffer.
+pub fn emit_blank(st: IRState) -> IRState {
+    emit_line(st, "")
+}
+
+/// Join all accumulated lines into a single string (in correct order).
+pub fn ir_state_to_string(st: IRState) -> String {
+    join_reversed(st.output, "")
+}
+
+/// Join a reversed list of strings with newlines.
+fn join_reversed(lines: List<String>, acc: String) -> String {
+    match lines {
+        Nil() => acc,
+        Cons(line, rest) =>
+            let suffix = if acc == "" { line } else { line ++ "\n" ++ acc };
+            join_reversed(rest, suffix)
+    }
+}
+
+// ===========================================================================
+// DEFERRED EMISSION (for inner functions)
+// ===========================================================================
+
+/// Append a line to the deferred inner-function buffer.
+pub fn emit_deferred(st: IRState, line: String) -> IRState {
+    { next_id: st.next_id,
+      next_label: st.next_label,
+      next_lambda: st.next_lambda,
+      output: st.output,
+      deferred: Cons(line, st.deferred),
+      env_types: st.env_types } : IRState
+}
+
+/// Append a line to the env struct type buffer.
+pub fn emit_env_type(st: IRState, line: String) -> IRState {
+    { next_id: st.next_id,
+      next_label: st.next_label,
+      next_lambda: st.next_lambda,
+      output: st.output,
+      deferred: st.deferred,
+      env_types: Cons(line, st.env_types) } : IRState
+}
+
+/// Get all deferred function definitions as a single string.
+pub fn ir_state_deferred_string(st: IRState) -> String {
+    join_reversed(st.deferred, "")
+}
+
+/// Get all env type declarations as a single string.
+pub fn ir_state_env_types_string(st: IRState) -> String {
+    join_reversed(st.env_types, "")
+}
+
+// ===========================================================================
+// BODY EMISSION (fork/merge for inner functions)
+// ===========================================================================
+
+/// Fork a state for emitting an inner function body.
+/// Preserves counters, deferred, and env_types but starts with empty output.
+pub fn ir_state_fork_body(st: IRState) -> IRState {
+    { next_id: st.next_id, next_label: st.next_label,
+      next_lambda: st.next_lambda, output: Nil,
+      deferred: st.deferred, env_types: st.env_types } : IRState
+}
+
+/// Merge a body state back into the caller state.
+/// Takes counters, deferred, env_types from body_st; output from caller.
+pub fn ir_state_merge_body(caller: IRState, body_st: IRState) -> IRState {
+    { next_id: body_st.next_id, next_label: body_st.next_label,
+      next_lambda: body_st.next_lambda, output: caller.output,
+      deferred: body_st.deferred, env_types: body_st.env_types } : IRState
+}
+
+/// Assemble the full module IR in deterministic order:
+///   1. Environment struct type declarations
+///   2. Deferred inner function definitions
+///   3. Main output (header, externs, top-level functions)
+pub fn ir_state_full_output(st: IRState) -> String {
+    let env = ir_state_env_types_string(st);
+    let def = ir_state_deferred_string(st);
+    let main = ir_state_to_string(st);
+    if env == "" {
+        if def == "" { main }
+        else { def ++ "\n" ++ main }
+    } else {
+        if def == "" { env ++ "\n\n" ++ main }
+        else { env ++ "\n\n" ++ def ++ "\n" ++ main }
+    }
+}

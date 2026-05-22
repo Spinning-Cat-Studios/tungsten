@@ -1,0 +1,159 @@
+// src/compiler/elab/items/collect/types/helpers.tg
+// Shared helpers for type body elaboration.
+
+use lexer::span::Span;
+use parser::ast::{
+    TypeParam, TypeExpr, TyPath, TyApp,
+    Ident, ident_name,
+    Path, MkPath, path_item_name, ident_list_len,
+    Visibility
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
+use elab::ffi::{
+    TypeHandle, INVALID_HANDLE,
+    tg_type_unit, tg_type_product,
+    tg_type_var, tg_string_to_cstr
+};
+use elab::env::{
+    Env, env_push_type_var, env_pop_type_var,
+    env_register_type, env_lookup_type_def,
+    TypeDefInfo, type_def_info_new, type_def_info_with_fields, TypeDefCore, TypeDefMeta,
+    MaybeTypeDef, NoTypeDef, SomeTypeDef,
+    RecordFieldInfo
+};
+use elab::items::result::{
+    ElabContext, elab_context_with_env
+};
+
+// ===========================================================================
+// TYPE PARAMETER SCOPE MANAGEMENT
+// ===========================================================================
+
+/// Push type parameters into scope.
+pub fn push_type_params(ctx: ElabContext, params: List<TypeParam>) -> ElabContext {
+    match params {
+        Nil() => ctx,
+        Cons(param, rest) =>
+            let env2 = env_push_type_var(ctx.env, ident_name(param.name));
+            let ctx2 = elab_context_with_env(ctx, env2);
+            push_type_params(ctx2, rest)
+    }
+}
+
+/// Pop type parameters from scope.
+pub fn pop_type_params(ctx: ElabContext, params: List<TypeParam>) -> ElabContext {
+    match params {
+        Nil() => ctx,
+        Cons(_, rest) =>
+            let env2 = env_pop_type_var(ctx.env);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            pop_type_params(ctx2, rest)
+    }
+}
+
+// ===========================================================================
+// TYPE ENCODING UPDATES
+// ===========================================================================
+
+/// Metadata for type definition registration and constructor binding.
+pub type TypeRegInfo = {
+    name: String,
+    type_handle: TypeHandle,
+    vis: Visibility,
+    span: Span
+}
+
+/// Update the type definition with its encoded type.
+pub fn update_type_encoding(
+    ctx: ElabContext,
+    reg: TypeRegInfo
+) -> ElabContext {
+    match env_lookup_type_def(ctx.env, reg.name) {
+        NoTypeDef() => ctx,
+        SomeTypeDef(info) =>
+            let core: TypeDefCore = { name: reg.name, arity: info.arity, params: info.params };
+            let meta: TypeDefMeta = { kind: reg.type_handle, vis: reg.vis, span: reg.span, encoded_type: reg.type_handle };
+            let updated = type_def_info_new(
+                core,
+                meta
+            );
+            let env2 = env_register_type(ctx.env, updated);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+/// Update the type definition with its encoded type AND record field info.
+pub fn update_type_encoding_with_record_fields(
+    ctx: ElabContext,
+    reg: TypeRegInfo,
+    fields: List<RecordFieldInfo>
+) -> ElabContext {
+    match env_lookup_type_def(ctx.env, reg.name) {
+        NoTypeDef() => ctx,
+        SomeTypeDef(info) =>
+            let core: TypeDefCore = { name: reg.name, arity: info.arity, params: info.params };
+            let meta: TypeDefMeta = { kind: info.kind, vis: reg.vis, span: reg.span, encoded_type: reg.type_handle };
+            let updated = type_def_info_with_fields(
+                core,
+                meta,
+                fields
+            );
+            let env2 = env_register_type(ctx.env, updated);
+            elab_context_with_env(ctx, env2)
+    }
+}
+
+// ===========================================================================
+// SELF-REFERENCE DETECTION
+// ===========================================================================
+
+/// Check if a type expression is a direct self-reference (references type_name).
+pub fn type_is_self_ref(ty: TypeExpr, type_name: String) -> Bool {
+    match ty {
+        TyPath(path) =>
+            type_path_is_self_ref(path, type_name),
+        TyApp(base, _, _) =>
+            type_is_self_ref(base, type_name),
+        _ => false
+    }
+}
+
+fn type_path_is_self_ref(path: Path, type_name: String) -> Bool {
+    match path {
+        MkPath(segments, _) =>
+            let len = ident_list_len(segments);
+            let name = ident_name(path_item_name(path));
+            if len == 1 {
+                name == type_name
+            } else {
+                false
+            }
+    }
+}
+
+/// Check if a type expression references the given type name anywhere.
+pub fn type_references_self(ty: TypeExpr, type_name: String) -> Bool {
+    type_is_self_ref(ty, type_name)
+}
+
+// ===========================================================================
+// FIELD ENCODING
+// ===========================================================================
+
+/// Encode a list of field types into a product type.
+/// - Empty list -> Unit
+/// - Single type -> that type
+/// - Multiple types -> nested products
+pub fn encode_fields_to_product(fields: List<TypeHandle>) -> TypeHandle {
+    match fields {
+        Nil() => tg_type_unit(),
+        Cons(h, rest) =>
+            if list_is_empty(rest) {
+                h
+            } else {
+                let rest_product = encode_fields_to_product(rest);
+                tg_type_product(h, rest_product)
+            }
+    }
+}

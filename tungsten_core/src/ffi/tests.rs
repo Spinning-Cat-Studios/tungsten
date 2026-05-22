@@ -2,6 +2,12 @@
 
 use std::os::raw::c_char;
 
+use super::terms::core::*;
+use super::terms::core_data::*;
+use super::terms::ext::*;
+use super::types::accessors::*;
+use super::types::constructors::*;
+use super::types::predicates::*;
 use super::*;
 
 #[test]
@@ -138,4 +144,77 @@ fn test_typecheck_failure() {
         let err_len = tg_get_last_error_len();
         assert!(err_len > 0, "Error message should be set");
     }
+}
+
+#[test]
+fn test_type_format_display() {
+    use super::check::tg_type_format_display;
+    use std::ffi::CStr;
+
+    tg_init();
+
+    // Test primitive types
+    let nat = tg_type_nat();
+    let ptr = tg_type_format_display(nat);
+    assert!(!ptr.is_null());
+    let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+    assert_eq!(s, "Nat");
+    unsafe { drop(std::ffi::CString::from_raw(ptr as *mut c_char)) };
+
+    let bool_ty = tg_type_bool();
+    let ptr = tg_type_format_display(bool_ty);
+    assert!(!ptr.is_null());
+    let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+    assert_eq!(s, "Bool");
+    unsafe { drop(std::ffi::CString::from_raw(ptr as *mut c_char)) };
+
+    let string_ty = tg_type_string();
+    let ptr = tg_type_format_display(string_ty);
+    assert!(!ptr.is_null());
+    let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+    assert_eq!(s, "String");
+    unsafe { drop(std::ffi::CString::from_raw(ptr as *mut c_char)) };
+
+    // Test arrow type
+    let arrow = tg_type_arrow(nat, nat);
+    let ptr = tg_type_format_display(arrow);
+    assert!(!ptr.is_null());
+    let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+    assert_eq!(s, "(Nat → Nat)");
+    unsafe { drop(std::ffi::CString::from_raw(ptr as *mut c_char)) };
+
+    // Test invalid handle
+    let ptr = tg_type_format_display(INVALID_HANDLE);
+    assert!(ptr.is_null());
+}
+
+#[test]
+fn test_type_tag() {
+    tg_init();
+    assert_eq!(tg_type_tag(tg_type_nat()), 0);
+    assert_eq!(tg_type_tag(tg_type_bool()), 1);
+    assert_eq!(tg_type_tag(tg_type_string()), 2);
+    assert_eq!(tg_type_tag(tg_type_unit()), 3);
+    assert_eq!(tg_type_tag(tg_type_void()), 4);
+    assert_eq!(tg_type_tag(tg_type_prop()), 5);
+
+    let nat = tg_type_nat();
+    assert_eq!(tg_type_tag(tg_type_arrow(nat, nat)), 6);
+    assert_eq!(tg_type_tag(tg_type_product(nat, nat)), 7);
+    assert_eq!(tg_type_tag(tg_type_sum(nat, nat)), 8);
+
+    let name = std::ffi::CString::new("X").unwrap();
+    assert_eq!(tg_type_tag(unsafe { tg_type_var(name.as_ptr()) }), 9);
+    assert_eq!(
+        tg_type_tag(unsafe { tg_type_forall(name.as_ptr(), nat) }),
+        10
+    );
+    assert_eq!(tg_type_tag(unsafe { tg_type_mu(name.as_ptr(), nat) }), 11);
+    let zero = tg_term_zero();
+    assert_eq!(tg_type_tag(tg_type_eq(nat, zero, zero)), 12);
+    assert_eq!(tg_type_tag(tg_type_ref(nat)), 13);
+    assert_eq!(tg_type_tag(tg_type_ptr(nat)), 14);
+
+    // Invalid handle
+    assert_eq!(tg_type_tag(INVALID_HANDLE), 99);
 }

@@ -1,0 +1,124 @@
+// src/compiler/driver/pipeline/info.tg
+// Info subcommand implementations for the self-hosted compiler.
+//
+// Provides `info pipeline` and `info version` — capability discovery
+// and build metadata. Tool listings are dynamic, driven by
+// diagnostic_capabilities() (ADR 18.4.26f §5.3).
+
+use driver::ffi::{
+    println, List, Nil, Cons,
+    diagnostic_capabilities
+};
+use driver::cli::{InfoOpts};
+
+// ===========================================================================
+// INFO PIPELINE
+// ===========================================================================
+
+/// Run `info pipeline` — show available commands and diagnostic flags.
+pub fn run_info(opts: InfoOpts) -> Unit {
+    match opts {
+        InfoPipeline() => info_pipeline(),
+        InfoVersion() => info_version()
+    }
+}
+
+/// Show pipeline overview and compiled-in diagnostic tools.
+fn info_pipeline() -> Unit {
+    println("Pipeline: lex -> parse -> elaborate -> codegen (via bootstrap)");
+    println("");
+    println("Core commands:");
+    println("  check <file>     Type-check a file");
+    println("  run <file>       Type-check and evaluate");
+    println("  compile <file>   Compile to native (delegates to bootstrap)");
+    println("");
+    show_diagnostic_flags()
+}
+
+/// Show diagnostic flags based on compiled-in capabilities.
+fn show_diagnostic_flags() -> Unit {
+    match diagnostic_capabilities() {
+        Nil() => {
+            println("Diagnostic flags: (none compiled)");
+            println("To enable diagnostic tools, rebuild with:");
+            println("  make self-compile-dev")
+        },
+        Cons(cap, rest) => {
+            println("Diagnostic flags:");
+            print_capabilities(Cons(cap, rest));
+            println("");
+            println("Usage:");
+            println("  tungsten1 check file.tg --dump-core main");
+            println("  tungsten1 check file.tg --check-tyvar-escape")
+        }
+    }
+}
+
+/// Print each capability as a flag line.
+fn print_capabilities(caps: List<DiagnosticCapability>) -> Unit {
+    match caps {
+        Nil() => {},
+        Cons(cap, rest) => {
+            println(capability_to_flag(cap));
+            print_capabilities(rest)
+        }
+    }
+}
+
+/// Map a capability variant to its flag description string.
+fn capability_to_flag(cap: DiagnosticCapability) -> String {
+    match cap {
+        DumpCore() => "  --dump-core PATTERN      Dump Core IR for matching defs",
+        CheckTyvarEscape() => "  --check-tyvar-escape     Report free TyVar escapes"
+    }
+}
+
+// ===========================================================================
+// INFO VERSION
+// ===========================================================================
+
+/// Show build version info including mode and capabilities.
+fn info_version() -> Unit {
+    println("tungsten 1.5.0 (self-hosted)");
+    println("");
+    show_build_mode()
+}
+
+/// Show build mode based on whether diagnostic tools are compiled in.
+fn show_build_mode() -> Unit {
+    match diagnostic_capabilities() {
+        Nil() => {
+            println("Build mode: production");
+            println("Capabilities: (none)")
+        },
+        Cons(cap, rest) => {
+            println("Build mode: developer");
+            print_capability_list(Cons(cap, rest))
+        }
+    }
+}
+
+/// Print capability names as a list.
+fn print_capability_list(caps: List<DiagnosticCapability>) -> Unit {
+    println("Capabilities:");
+    print_capability_names(caps)
+}
+
+/// Print each capability name.
+fn print_capability_names(caps: List<DiagnosticCapability>) -> Unit {
+    match caps {
+        Nil() => {},
+        Cons(cap, rest) => {
+            println(capability_name(cap));
+            print_capability_names(rest)
+        }
+    }
+}
+
+/// Map a capability to its display name.
+fn capability_name(cap: DiagnosticCapability) -> String {
+    match cap {
+        DumpCore() => "  - dump-core",
+        CheckTyvarEscape() => "  - check-tyvar-escape"
+    }
+}

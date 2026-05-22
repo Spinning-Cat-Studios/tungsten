@@ -46,6 +46,8 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Wrap a term in a fold if the ADT is recursive.
+    /// Normalizes the adt_type to its Mu encoding so codegen receives
+    /// a proper recursive type instead of an App reference.
     pub(crate) fn wrap_in_fold_if_recursive(
         &self,
         term: Term,
@@ -53,7 +55,21 @@ impl<'a> Elaborator<'a> {
         is_recursive: bool,
     ) -> Term {
         if is_recursive {
-            Term::fold(adt_type, term)
+            let normalized = self.normalize_for_comparison(&adt_type);
+
+            // --trace-types instrumentation point 4: wrap_in_fold (ADR 13.4.26c §5)
+            if self.should_trace() {
+                self.trace(
+                    "wrap_in_fold",
+                    &format!(
+                        "adt_type: {}\nnormalized: {}\nis_recursive: true",
+                        self.format_type_with_provenance(&adt_type),
+                        self.format_type_with_provenance(&normalized)
+                    ),
+                );
+            }
+
+            Term::fold(normalized, term)
         } else {
             term
         }
@@ -81,7 +97,8 @@ impl<'a> Elaborator<'a> {
             // Note: For flat ADT, recursive wrapping is handled differently
             // The Type::Adt already captures the structure
             return Ok(if is_recursive {
-                Term::fold(adt_type.clone(), result)
+                let normalized = self.normalize_for_comparison(adt_type);
+                Term::fold(normalized, result)
             } else {
                 result
             });

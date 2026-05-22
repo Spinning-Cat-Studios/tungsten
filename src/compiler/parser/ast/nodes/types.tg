@@ -1,0 +1,96 @@
+// src/compiler/parser/ast/nodes/types.tg
+// Type expression AST node types.
+// Note: TypeExpr has mutual recursion with Expr (via TyEq). The three-phase
+// elaboration pipeline (Phase A stubs + Phase A.5 combined SCC) handles this
+// across file boundaries.
+
+use lexer::span::Span;
+use parser::ast::common::{Path, path_span};
+use parser::ast::nodes::exprs::{Expr};
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// TYPE EXPRESSION
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Maybe Type Expression
+// ---------------------------------------------------------------------------
+
+/// Optional type expression.
+pub type MaybeTypeExpr =
+    | NoTypeExpr
+    | SomeTypeExpr(TypeExpr)
+
+// ---------------------------------------------------------------------------
+// Type Expression
+// ---------------------------------------------------------------------------
+
+/// A type expression in surface syntax.
+pub type TypeExpr =
+    | TyPath(Path)                                // Nat, Bool, foo::Config
+    | TyArrow(TypeExpr, TypeExpr, Span)           // A -> B
+    | TyProduct(TypeExpr, TypeExpr, Span)         // A * B
+    | TySum(TypeExpr, TypeExpr, Span)             // A + B
+    | TyApp(TypeExpr, List<TypeExpr>, Span)       // List<T>, Either<A, B>
+    | TyForall(Ident, TypeExpr, Span)             // forall T. A
+    | TyProp(Span)                                // Prop
+    | TyUnit(Span)                                // Unit or ()
+    | TyVoid(Span)                                // Void or !
+    | TyPtr(TypeExpr, Span)                       // *T (for FFI)
+    | TyRef(TypeExpr, Span)                       // Ref<T>
+    | TyEq(Expr, Expr, Span)                      // a = b (equality type)
+    | TyEqExplicit(TypeExpr, Expr, Expr, Span)    // Eq<T, a, b> (explicit type arg)
+    | TyParen(TypeExpr, Span)                     // (T)
+    | TyError(Span)                               // Error recovery placeholder
+
+/// Get the span of a type expression.
+pub fn type_expr_span(t: TypeExpr) -> Span {
+    match t {
+        TyPath(p) => {
+            path_span(p)
+        },
+        TyArrow(_, _, s) => {
+            s
+        },
+        TyProduct(_, _, s) => {
+            s
+        },
+        TySum(_, _, s) => {
+            s
+        },
+        TyApp(_, _, s) => {
+            s
+        },
+        TyForall(_, _, s) => {
+            s
+        },
+        TyProp(s) => {
+            s
+        },
+        TyUnit(s) => {
+            s
+        },
+        TyVoid(s) => {
+            s
+        },
+        TyPtr(_, s) => {
+            s
+        },
+        TyRef(_, s) => {
+            s
+        },
+        TyEq(_, _, s) => {
+            s
+        },
+        TyEqExplicit(_, _, _, s) => {
+            s
+        },
+        TyParen(_, s) => {
+            s
+        },
+        TyError(s) => {
+            s
+        }
+    }
+}

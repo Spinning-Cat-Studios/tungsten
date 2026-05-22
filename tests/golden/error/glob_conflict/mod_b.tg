@@ -1,0 +1,5 @@
+// Module B defines a different function also named `collide`.
+
+pub fn collide(x: Nat) -> Nat {
+    x
+}

@@ -1,0 +1,5 @@
+// Submodule providing public types and functions for glob import test.
+
+pub type GlobType = Nat
+
+pub fn glob_fn(x: GlobType) -> Nat { x + 1 }

@@ -39,15 +39,13 @@ jobs:
         run: ./target/release/tungsten compile src/compiler/main.tg -o tungsten1 -v
       
       - name: Verify — tungsten1 typechecks itself (L3)
-        env:
-          DYLD_LIBRARY_PATH: target/release
         run: ./tungsten1 check src/compiler/main.tg --max-errors=0
       
       - name: Package release archive
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           ARCHIVE="tungsten-${TAG}-macos-arm64"
-          ./scripts/package-macos.sh tungsten1 target/release/tungsten target/release/libtungsten_core.dylib "$ARCHIVE"
+          ./scripts/package-macos.sh tungsten1 target/release/tungsten "$ARCHIVE"
           cp -R examples README.md LICENSE "$ARCHIVE/"
           tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
           echo "ARCHIVE=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
@@ -76,7 +74,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
           echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev clang-18 lld-18 zlib1g-dev libzstd-dev patchelf
+          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev clang-18 lld-18 zlib1g-dev libzstd-dev
       
       - name: Build bootstrap compiler
         env:
@@ -87,7 +85,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           ARCHIVE="tungsten-${TAG}-linux-x86_64"
-          ./scripts/package-linux.sh target/release/tungsten target/release/libtungsten_core.so "$ARCHIVE"
+          ./scripts/package-linux.sh target/release/tungsten "$ARCHIVE"
           cp -R examples README.md LICENSE "$ARCHIVE/"
           tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
           echo "ARCHIVE=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
@@ -116,11 +114,22 @@ jobs:
           find . -name '*.tar.gz' -exec cp {} . \;
           shasum -a 256 *.tar.gz > checksums.txt
           cat checksums.txt
-      
+
+      - name: Extract release notes
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          NOTES="changelog/v${VERSION}.md"
+          if [ ! -f "$NOTES" ]; then
+            echo "::error::No changelog found at $NOTES"
+            exit 1
+          fi
+          cp "$NOTES" release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-notes.md
           files: |
             artifacts/*.tar.gz
             artifacts/checksums.txt

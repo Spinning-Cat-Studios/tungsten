@@ -1,0 +1,6 @@
+// Sibling B tries to access sibling A's private type — should fail.
+
+fn use_sibling_private() -> Nat {
+    let x: sibling_a::SecretType = 42;
+    x
+}

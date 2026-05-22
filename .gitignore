@@ -38,6 +38,13 @@ libtungsten_core.dylib
 # Logs
 *.log
 
+# DevContainer captured logs (bind-mounted to /var/log/tungsten in container)
+.devcontainer/logs/*
+!.devcontainer/logs/.gitkeep
+
+# Diagnostic swap backup (ADR 18.4.26f — self-compile-dev)
+*.tg.prod
+
 # Scripts
 scripts/*.py
 
@@ -46,3 +53,6 @@ examples/**/*
 !examples/README.md
 !examples/**/*.tg
 !examples/**/
+
+# Static linking
+*.a

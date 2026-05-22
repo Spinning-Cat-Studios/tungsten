@@ -22,61 +22,101 @@ impl<'a> Elaborator<'a> {
         args: &[Expr],
         span: Span,
     ) -> ElabResult<(Term, Type)> {
-        // Check if this is a built-in function (Phase 3-Prep)
+        // Check if this is a built-in function or constructor (handled specially)
         if let Expr::Path(path) = func {
-            if path.is_simple() {
-                match path.item_name().name.as_str() {
-                    "ref" => return self.elab_ref_new(args, span),
-                    "get" => return self.elab_ref_get(args, span),
-                    "set" => return self.elab_ref_set(args, span),
-                    "char_at" => return self.elab_char_at(args, span),
-                    "string_len" => return self.elab_string_len(args, span),
-                    "substring" => return self.elab_substring(args, span),
-                    _ => {}
-                }
-            }
-        }
-
-        // Check if this is a constructor application (both simple and qualified paths)
-        if let Expr::Path(path) = func {
-            let ident = path.item_name();
-            // Use resolve_constructor_path for both simple and qualified paths
-            if let Ok(Some(info)) = self
-                .env
-                .resolve_constructor_path(path, &self.current_module)
-            {
-                let info = info.clone();
-                // Check constructor visibility
-                if !self
-                    .env
-                    .is_constructor_accessible(&info, &self.current_module, true)
-                {
-                    if let Some(item_module) = self.env.get_item_module(&info.type_name) {
-                        return Err(ElabError::private_item(
-                            path.span,
-                            &ident.name,
-                            "constructor",
-                            item_module.to_string(),
-                            self.current_module.to_string(),
-                        ));
-                    }
-                }
-                // This is a constructor being applied to arguments
-                return self.elab_constructor_application(&ident.name, &info, args, span);
+            if let Some(result) = self.try_elab_special_application(path, args, span)? {
+                return Ok(result);
             }
         }
 
         // Regular function application
         let (func_term, func_ty) = self.infer(func)?;
 
+        // Extract callee name for cross-file diagnostics (ADR 15.5.26a)
+        let callee_name = match &func_term {
+            Term::Global(name) => Some(name.clone()),
+            _ => None,
+        };
+
         // If the function is polymorphic, try to instantiate it based on argument types
         let (instantiated_term, instantiated_ty) =
             self.instantiate_polymorphic_function(func_term, func_ty, args, span)?;
 
         // Apply arguments one at a time
-        let mut current_term = instantiated_term;
-        let mut current_ty = instantiated_ty;
+        self.apply_args_sequentially(
+            instantiated_term,
+            instantiated_ty,
+            args,
+            callee_name.as_deref(),
+        )
+    }
 
+    /// Try to elaborate a path-based call as a built-in or constructor application.
+    ///
+    /// Returns `Ok(Some(...))` if handled, `Ok(None)` to fall through to regular application.
+    fn try_elab_special_application(
+        &mut self,
+        path: &crate::ast::Path,
+        args: &[Expr],
+        span: Span,
+    ) -> ElabResult<Option<(Term, Type)>> {
+        // Check built-in functions (Phase 3-Prep)
+        if path.is_simple() {
+            match path.item_name().name.as_str() {
+                "ref" => return self.elab_ref_new(args, span).map(Some),
+                "get" => return self.elab_ref_get(args, span).map(Some),
+                "set" => return self.elab_ref_set(args, span).map(Some),
+                "char_at" => return self.elab_char_at(args, span).map(Some),
+                "string_len" => return self.elab_string_len(args, span).map(Some),
+                "substring" => return self.elab_substring(args, span).map(Some),
+                "expect_type" => return self.elab_expect_type(args, span).map(Some),
+                "expect_error" => return self.elab_expect_error(args, span).map(Some),
+                _ => {}
+            }
+        }
+
+        // Check constructor application (both simple and qualified paths)
+        let ident = path.item_name();
+        if let Ok(Some(info)) = self
+            .env
+            .resolve_constructor_path(path, &self.current_module)
+        {
+            let info = info.clone();
+            // Check constructor visibility
+            if !self
+                .env
+                .is_constructor_accessible(&info, &self.current_module, true)
+            {
+                if let Some(item_module) = self.env.get_item_module(&info.type_name) {
+                    return Err(ElabError::private_item(
+                        path.span,
+                        &ident.name,
+                        "constructor",
+                        item_module.to_string(),
+                        self.current_module.to_string(),
+                    ));
+                }
+            }
+            return self
+                .elab_constructor_application(&ident.name, &info, args, span)
+                .map(Some);
+        }
+
+        Ok(None)
+    }
+
+    /// Apply arguments one at a time to a (possibly instantiated) function term.
+    ///
+    /// `callee_name` is used for cross-file diagnostics (ADR 15.5.26a): when a
+    /// type mismatch occurs on an argument and the callee is from another module,
+    /// the error gets a cross-file note pointing to the callee's definition.
+    fn apply_args_sequentially(
+        &mut self,
+        mut current_term: Term,
+        mut current_ty: Type,
+        args: &[Expr],
+        callee_name: Option<&str>,
+    ) -> ElabResult<(Term, Type)> {
         for (position, arg) in args.iter().enumerate() {
             let Type::Arrow(param_ty, result_ty) = current_ty else {
                 return Err(ElabError::expected_function(arg.span(), current_ty));
@@ -84,8 +124,28 @@ impl<'a> Elaborator<'a> {
 
             // Push context for better error messages on argument type mismatches
             self.push_context(ExpectedContext::function_arg(position, arg.span()));
-            let arg_term = self.check(arg, &param_ty)?;
+            let check_result = self.check(arg, &param_ty);
             self.pop_context();
+
+            let arg_term = match check_result {
+                Ok(term) => term,
+                Err(mut err) => {
+                    // Enrich with cross-file note if callee is from another module
+                    // (ADR 15.5.26a). Only applies to direct calls where callee_name
+                    // was extracted from Expr::Path; higher-order calls won't have it.
+                    if let Some(name) = callee_name {
+                        if let Some((file_path, def_span)) = self.cross_file_info_for_function(name)
+                        {
+                            err = err.with_cross_file_note(
+                                def_span,
+                                file_path,
+                                format!("parameter type declared in `{}`", name),
+                            );
+                        }
+                    }
+                    return Err(err);
+                }
+            };
 
             current_term = Term::app(current_term, arg_term);
             current_ty = *result_ty;
@@ -123,10 +183,16 @@ impl<'a> Elaborator<'a> {
         }
 
         // We have type variables to instantiate. Infer argument types to guide instantiation.
+        // Resolve type references (App → μ-encoding for ADTs) so that argument types
+        // are in the same representation as parameter types, enabling structural matching
+        // in extract_type_var_bindings. Without this, record field types (stored as
+        // App("List", [T])) would fail to unify with μ-encoded parameter types.
+        let mut alias_expansion_stack = std::collections::HashSet::new();
         let mut arg_types: Vec<Type> = Vec::new();
         for arg in args {
             let (_, arg_ty) = self.infer(arg)?;
-            arg_types.push(arg_ty);
+            let resolved = self.resolve_type_references_impl(&arg_ty, &mut alias_expansion_stack);
+            arg_types.push(resolved);
         }
 
         // Build a substitution by matching parameter types against argument types
@@ -214,6 +280,27 @@ impl<'a> Elaborator<'a> {
             // For forall types (nested), try to extract from body
             (Type::Forall(v1, body1), Type::Forall(v2, body2)) if v1 == v2 => {
                 self.extract_type_var_bindings(body1, body2, type_vars, subst);
+            }
+
+            // For App types (parameterized types like List<T>), decompose if names match
+            (Type::App(n1, args1), Type::App(n2, args2))
+                if n1 == n2 && args1.len() == args2.len() =>
+            {
+                for (e, a) in args1.iter().zip(args2.iter()) {
+                    self.extract_type_var_bindings(e, a, type_vars, subst);
+                }
+            }
+
+            // For Adt types, decompose type args and variant payloads
+            (Type::Adt(n1, ta1, vs1), Type::Adt(n2, ta2, vs2))
+                if n1 == n2 && ta1.len() == ta2.len() && vs1.len() == vs2.len() =>
+            {
+                for (e, a) in ta1.iter().zip(ta2.iter()) {
+                    self.extract_type_var_bindings(e, a, type_vars, subst);
+                }
+                for ((_, e), (_, a)) in vs1.iter().zip(vs2.iter()) {
+                    self.extract_type_var_bindings(e, a, type_vars, subst);
+                }
             }
 
             // Base types and non-matching structures: nothing to extract

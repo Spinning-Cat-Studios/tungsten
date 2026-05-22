@@ -1,0 +1,234 @@
+// src/compiler/driver/modules/build/resolve.tg
+// Flatten-time use/import path resolution helpers.
+//
+// During module flattening, relative use-declaration paths must be
+// rewritten to absolute paths. This module implements the child >
+// sibling > absolute resolution strategy (matching the bootstrap).
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option, Some, None};
+use parser::ast::common::{Ident, ident_name};
+use parser::ast::nodes::{
+    Item, ItemUse,
+    UseDecl, UseTree,
+    UseTreeSimple, UseTreeAlias, UseTreeRename,
+    UseTreeNested, UseTreePath, UseTreeGroup, UseTreeGlob,
+    Path, MkPath
+};
+use driver::modules::path::{
+    ModulePath, module_path_new, module_path_join, module_path_parent,
+    module_path_eq
+};
+use driver::modules::info::{ModuleInfo, module_info_get_module};
+use driver::modules::build::warn::{warn_relative_fallback, warn_relative_failure};
+use lexer::span::{Span, span_new};
+
+// ===========================================================================
+// RELATIVE USE-PATH RESOLUTION
+// ===========================================================================
+
+/// Walk items and resolve relative paths in use declarations.
+pub fn resolve_use_paths(
+    items: List<Item>,
+    current_path: ModulePath,
+    info: ModuleInfo
+) -> List<Item> {
+    match items {
+        Nil() => Nil,
+        Cons(item, rest) =>
+            let resolved = resolve_item_uses(item, current_path, info);
+            Cons(resolved, resolve_use_paths(rest, current_path, info))
+    }
+}
+
+/// If the item is a use declaration, resolve relative module paths.
+fn resolve_item_uses(item: Item, current_path: ModulePath, info: ModuleInfo) -> Item {
+    match item {
+        ItemUse(decl) =>
+            let new_tree = resolve_use_tree(decl.tree, current_path, info);
+            ItemUse({ vis: decl.vis, tree: new_tree, span: decl.span } : UseDecl),
+        _ => item
+    }
+}
+
+/// Resolve relative paths in a use tree.
+fn resolve_use_tree(
+    tree: UseTree,
+    current_path: ModulePath,
+    info: ModuleInfo
+) -> UseTree {
+    match tree {
+        UseTreeSimple(path) =>
+            UseTreeSimple(resolve_import_path(path, current_path, info)),
+        UseTreePath(path) =>
+            UseTreePath(resolve_import_path(path, current_path, info)),
+        UseTreeAlias(path, alias) =>
+            UseTreeAlias(resolve_import_path(path, current_path, info), alias),
+        UseTreeRename(path, alias, sp) =>
+            UseTreeRename(resolve_import_path(path, current_path, info), alias, sp),
+        UseTreeGroup(path, trees, sp) =>
+            UseTreeGroup(resolve_module_prefix(path, current_path, info), trees, sp),
+        UseTreeNested(path, trees, sp) =>
+            UseTreeNested(resolve_module_prefix(path, current_path, info), trees, sp),
+        UseTreeGlob(path, sp) =>
+            UseTreeGlob(resolve_module_prefix(path, current_path, info), sp)
+    }
+}
+
+/// Resolve a simple import path (module::item).
+/// The all-but-last segments form the module path; the last segment is the item name.
+fn resolve_import_path(
+    path: Path,
+    current_module: ModulePath,
+    info: ModuleInfo
+) -> Path {
+    match path {
+        MkPath(segments, sp) =>
+            let (mod_segs, item_seg) = split_last_ident(segments);
+            let resolved_segs = resolve_segments(mod_segs, current_module, info);
+            let new_segments = append_ident(resolved_segs, item_seg);
+            MkPath(new_segments, sp)
+    }
+}
+
+/// Resolve a module prefix path (used for group/nested/glob).
+/// The entire path is the module path.
+fn resolve_module_prefix(
+    path: Path,
+    current_module: ModulePath,
+    info: ModuleInfo
+) -> Path {
+    match path {
+        MkPath(segments, sp) =>
+            let resolved_segs = resolve_segments(segments, current_module, info);
+            MkPath(resolved_segs, sp)
+    }
+}
+
+/// Resolve a list of ident segments as a module path.
+/// Tries child > sibling > absolute (matching bootstrap resolution).
+/// Returns the original segments if no resolution changes anything.
+fn resolve_segments(
+    segments: List<Ident>,
+    current_module: ModulePath,
+    info: ModuleInfo
+) -> List<Ident> {
+    let names = ident_names(segments);
+    let raw = module_path_new(names);
+    let resolved = resolve_flatten_module_path(info, raw, current_module);
+    if module_path_eq(raw, resolved) {
+        segments  // no change, keep original idents with spans
+    } else {
+        // Build new ident list from resolved path, reusing span from first segment
+        let sp = first_ident_span(segments);
+        strings_to_idents(resolved.segments, sp)
+    }
+}
+
+// NOTE: child > sibling > absolute resolution is also implemented in:
+//   - driver/modules/build/reexport_resolve.tg  (resolve_reexport_source_path)
+//   - elab/items/imports/mod.tg                 (resolve_use_module_path)
+// The elab implementation uses different types (ElabModulePath / ModuleMap).
+// The driver implementations live in separate import contexts.
+// Keep behaviour in sync manually.
+
+/// Core module path resolution: child > sibling > absolute.
+/// Emits a warning via shared helpers when fallback is used (ADR 10.5.26m §2.2).
+fn resolve_flatten_module_path(
+    info: ModuleInfo,
+    raw: ModulePath,
+    current_module: ModulePath
+) -> ModulePath {
+    // Try child: current_module ++ raw
+    let child = module_path_join(current_module, raw);
+    match module_info_get_module(info, child) {
+        Some(_) => warn_relative_fallback("import", "child", raw, child, current_module),
+        None() => resolve_flatten_try_sibling(info, raw, current_module)
+    }
+}
+
+fn resolve_flatten_try_sibling(
+    info: ModuleInfo,
+    raw: ModulePath,
+    current_module: ModulePath
+) -> ModulePath {
+    match module_path_parent(current_module) {
+        None() => raw,
+        Some(parent) =>
+            let sibling = module_path_join(parent, raw);
+            match module_info_get_module(info, sibling) {
+                Some(_) => warn_relative_fallback("import", "sibling", raw, sibling, current_module),
+                None() => resolve_flatten_try_absolute(info, raw, current_module)
+            }
+    }
+}
+
+fn resolve_flatten_try_absolute(
+    info: ModuleInfo,
+    raw: ModulePath,
+    current_module: ModulePath
+) -> ModulePath {
+    match module_info_get_module(info, raw) {
+        Some(_) => raw,
+        None() => warn_relative_failure("import", raw, current_module)
+    }
+}
+
+// ===========================================================================
+// HELPERS
+// ===========================================================================
+
+/// Extract names from ident list.
+fn ident_names(idents: List<Ident>) -> List<String> {
+    match idents {
+        Nil() => Nil,
+        Cons(id, rest) => Cons(ident_name(id), ident_names(rest))
+    }
+}
+
+/// Split ident list into all-but-last and last.
+fn split_last_ident(list: List<Ident>) -> (List<Ident>, Ident) {
+    match list {
+        Nil() => (Nil, { name: "", span: span_new(0, 0, "") }),
+        Cons(id, rest) =>
+            if is_empty_ident_list(rest) {
+                let result: (List<Ident>, Ident) = (Nil, id);
+                result
+            } else {
+                let (prefix, last) = split_last_ident(rest);
+                (Cons(id, prefix), last)
+            }
+    }
+}
+
+fn is_empty_ident_list(list: List<Ident>) -> Bool {
+    match list {
+        Nil() => true,
+        Cons(_, _) => false
+    }
+}
+
+/// Append a single ident to a list.
+fn append_ident(list: List<Ident>, id: Ident) -> List<Ident> {
+    match list {
+        Nil() => Cons(id, Nil),
+        Cons(x, rest) => Cons(x, append_ident(rest, id))
+    }
+}
+
+/// Get span from first ident (for creating new idents with a reasonable span).
+fn first_ident_span(list: List<Ident>) -> Span {
+    match list {
+        Nil() => span_new(0, 0, ""),
+        Cons(id, _) => id.span
+    }
+}
+
+/// Create ident list from string list, all sharing the same span.
+fn strings_to_idents(names: List<String>, sp: Span) -> List<Ident> {
+    match names {
+        Nil() => Nil,
+        Cons(name, rest) =>
+            Cons({ name: name, span: sp } : Ident, strings_to_idents(rest, sp))
+    }
+}

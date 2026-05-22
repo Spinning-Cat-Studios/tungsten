@@ -1,0 +1,79 @@
+// Core FFI types, primitives, and memory management.
+
+// ===========================================================================
+// HANDLE TYPES
+// ===========================================================================
+
+pub fn invalid_handle() -> Nat { 18446744073709551615 }
+
+pub type Never = | Absurd
+
+// ===========================================================================
+// PRIMITIVE TYPES
+// ===========================================================================
+
+pub type CString = Nat
+pub type Ptr = Nat
+pub type Int = Nat
+
+pub type FfiResult<T> =
+    | FfiOk(T)
+    | FfiErr(String)
+
+// ===========================================================================
+// LIST TYPE
+// ===========================================================================
+
+pub type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+pub fn ffi_list_reverse<T>(list: List<T>) -> List<T> {
+    ffi_list_reverse_acc(list, Nil)
+}
+
+fn ffi_list_reverse_acc<T>(list: List<T>, acc: List<T>) -> List<T> {
+    match list {
+        Nil() => acc,
+        Cons(x, xs) => ffi_list_reverse_acc(xs, Cons(x, acc))
+    }
+}
+
+// ===========================================================================
+// RAW FFI - MEMORY MANAGEMENT
+// ===========================================================================
+
+pub extern "C" fn tg_free_string(s: CString) -> Unit
+
+// ===========================================================================
+// STRING PRIMITIVES
+// ===========================================================================
+
+extern "C" fn tg_string_to_cstring(s: String) -> CString
+pub fn string_to_cstring(s: String) -> CString {
+    tg_string_to_cstring(s)
+}
+
+extern "C" fn tg_cstring_to_string(s: CString) -> String
+pub fn cstring_to_string(s: CString) -> String {
+    tg_cstring_to_string(s)
+}
+
+extern "C" fn tg_string_len_internal(s: String) -> Nat
+pub fn string_len(s: String) -> Nat {
+    tg_string_len_internal(s)
+}
+
+extern "C" fn tg_string_char_at_internal(s: String, i: Nat) -> Nat
+pub fn string_char_at_internal(s: String, i: Nat) -> Nat {
+    tg_string_char_at_internal(s, i)
+}
+
+pub extern "C" fn tg_string_append_char(s: String, c: Nat) -> String
+pub fn string_append_char(s: String, c: Nat) -> String {
+    tg_string_append_char(s, c)
+}
+
+pub fn cstring_is_null(s: CString) -> Bool {
+    s == 0
+}

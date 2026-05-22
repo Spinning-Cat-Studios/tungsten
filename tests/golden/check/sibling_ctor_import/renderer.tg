@@ -1,0 +1,11 @@
+// Renderer module — uses constructors from sibling 'shapes'.
+// Tests that ADT constructors (Circle, Square) are visible cross-branch.
+use shapes::{Shape};
+
+pub fn render() -> Nat {
+    let s: Shape = Circle(10);
+    match s {
+        Circle(r) => r,
+        Square(side) => side
+    }
+}

@@ -1,5 +1,5 @@
 // Result type for error handling
-type Result<T, E> = Ok(T) | Err(E)
+pub type Result<T, E> = Ok(T) | Err(E)
 
 // Unwrap with a default value (monomorphic for now)
 fn unwrap_or_nat(r: Result<Nat, String>, default: Nat) -> Nat {
@@ -23,4 +23,12 @@ fn example() -> Result<Nat, String> {
     let good: Result<Nat, String> = Ok(42);
     let bad: Result<Nat, String> = Err("error message");
     good
+}
+
+fn main() -> Nat {
+    let good: Result<Nat, String> = Ok(42);
+    match good {
+        Ok(n) => n,
+        Err(_msg) => 0,
+    }
 }

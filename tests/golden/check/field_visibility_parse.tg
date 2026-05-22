@@ -1,0 +1,13 @@
+// AC4: pub/pub(crate) modifiers parse on individual record fields.
+// This test verifies the parser accepts visibility on record fields.
+
+pub type Config = {
+    pub name: Nat,
+    pub(crate) internal_id: Nat,
+    secret: Nat
+}
+
+fn main() -> Nat {
+    let c = Config { name: 1, internal_id: 42, secret: 0 };
+    c.name
+}

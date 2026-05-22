@@ -4,8 +4,13 @@
 //! - Pair construction
 //! - First projection (Fst)
 //! - Second projection (Snd)
+//!
+//! # Type Sourcing
+//!
+//! This module RECOMPUTES types via `infer_term_type()` rather than trusting annotations.
+//! `TyVar` corruption in annotations does not directly affect this module's layout decisions.
 
-use crate::codegen::error::CodeGenError;
+use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
 use inkwell::values::{BasicValue, BasicValueEnum};
 use tungsten_core::terms::Term;
@@ -69,8 +74,7 @@ impl<'ctx> CodeGen<'ctx> {
             BasicValueEnum::PointerValue(p) => p,
             other => {
                 return Err(CodeGenError::TypeError(format!(
-                    "fst: expected struct or pointer, got {:?}",
-                    other
+                    "fst: expected struct or pointer, got {other:?}"
                 )))
             }
         };
@@ -129,8 +133,7 @@ impl<'ctx> CodeGen<'ctx> {
             BasicValueEnum::PointerValue(p) => p,
             other => {
                 return Err(CodeGenError::TypeError(format!(
-                    "snd: expected struct or pointer, got {:?}",
-                    other
+                    "snd: expected struct or pointer, got {other:?}"
                 )))
             }
         };
@@ -174,7 +177,7 @@ mod tests {
         let function = codegen.module.add_function("test_fn", fn_type, None);
         let entry = context.append_basic_block(function, "entry");
         codegen.builder.position_at_end(entry);
-        codegen.current_fn = Some(function);
+        codegen.compilation.current_fn = Some(function);
 
         codegen
     }

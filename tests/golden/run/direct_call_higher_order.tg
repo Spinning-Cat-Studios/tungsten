@@ -1,0 +1,22 @@
+// Test: higher-order calls (function values passed dynamically) still use closure path.
+// When a function is passed as an argument, it must be called via the closure
+// calling convention, not the direct path.
+
+pub fn double(x: Nat) -> Nat {
+    x + x
+}
+
+pub fn triple(x: Nat) -> Nat {
+    x + x + x
+}
+
+pub fn apply_twice(f: Nat -> Nat, x: Nat) -> Nat {
+    f(f(x))
+}
+
+fn main() -> Nat {
+    // double and triple are passed as function values
+    let a = apply_twice(double, 3);   // double(double(3)) = double(6) = 12
+    let b = apply_twice(triple, 2);   // triple(triple(2)) = triple(6) = 18
+    a + b
+}

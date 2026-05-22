@@ -1,0 +1,9 @@
+// src/compiler/elab/exprs/apply/mod.tg
+// Application elaboration: function application and operators.
+
+pub mod app;
+pub mod forall_inference;
+pub mod operators;
+pub mod equality;
+pub mod expect_type;
+pub mod expect_error;

@@ -1,0 +1,11 @@
+// Parse result types for type expressions.
+// These types have been migrated to Result<(T, Cursor), ParseError>.
+// This file is kept as a placeholder during incremental migration.
+// It can be removed once all re-exports are updated.
+
+use parser::cursor::Cursor;
+use parser::error::ParseError;
+use parser::ast::common::{Ident, Path};
+use parser::ast::nodes::TypeExpr;
+use driver::ffi::List;
+use driver::util::{Result, Ok, Err};

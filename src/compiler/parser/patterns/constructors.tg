@@ -1,0 +1,96 @@
+// src/compiler/parser/patterns/constructors.tg
+// Constructor and identifier pattern parsing.
+
+use lexer::token::{Token, TokenKind, TokLParen, TokRParen, TokComma};
+use lexer::span::{Span, span_merge};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_check,
+    cursor_advance, cursor_expect, token_kind_name};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Path, path_span, path_is_simple, path_item_name};
+use parser::ast::pattern::{Pattern, PatVar, PatConstructor};
+use parser::patterns::{parse_pattern};
+use parser::patterns::atoms::{get_cursor_span};
+use parser::types::{parse_path};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use driver::util::{Result, Ok, Err};
+
+// ===========================================================================
+// PATTERN PARSING - IDENTIFIER / CONSTRUCTOR
+// ===========================================================================
+
+/// Parse identifier pattern: variable binding or constructor.
+/// 
+/// Decision logic (following Rust's heuristic):
+/// - Simple identifier (single segment, no parens): Variable binding
+/// - Qualified path (foo::bar) without parens: Unit constructor
+/// - Any path followed by (args): Constructor with arguments
+pub fn parse_pattern_ident_or_constructor(cur: Cursor) -> Result<(Pattern, Cursor), ParseError> {
+    let start_span = get_cursor_span(cur);
+    
+    // Parse path (handles both simple idents and qualified paths)
+    let (path, cur2) = parse_path(cur)?;
+    // Check for constructor arguments
+    if cursor_check(cur2, TokLParen()) {
+        // Constructor with arguments: Some(x), Foo::Bar(a, b)
+        parse_constructor_args(path, cur2)
+    } else {
+        // No arguments - distinguish variable from unit constructor
+        if path_is_simple(path) {
+            // Simple identifier: variable binding
+            let ident = path_item_name(path);
+            Ok((PatVar(ident), cur2))
+        } else {
+            // Qualified path without args: unit constructor (e.g., None, Foo::Bar)
+            let path_sp = path_span(path);
+            Ok((PatConstructor(path, Nil, path_sp), cur2))
+        }
+    }
+}
+
+/// Parse constructor arguments: (p1, p2, ...)
+fn parse_constructor_args(path: Path, cur: Cursor) -> Result<(Pattern, Cursor), ParseError> {
+    let start_span = path_span(path);
+    let cur2 = cursor_advance(cur);
+    let (args, cur3) = parse_pattern_list_until_rparen(cur2)?;
+    parse_constructor_close(path, start_span, args, cur3)
+}
+
+fn parse_constructor_close(path: Path, start_span: Span, args: List<Pattern>, cur: Cursor) -> Result<(Pattern, Cursor), ParseError> {
+    let (close_tok, cur2) = cursor_expect(cur, TokRParen())?;
+    let end_span = close_tok.span;
+    let full_span = span_merge(start_span, end_span);
+    Ok((PatConstructor(path, args, full_span), cur2))
+}
+
+/// Parse comma-separated pattern list until we see )
+fn parse_pattern_list_until_rparen(cur: Cursor) -> Result<(List<Pattern>, Cursor), ParseError> {
+    // Check for empty list
+    if cursor_check(cur, TokRParen()) {
+        Ok((Nil, cur))
+    } else {
+        // Parse first pattern
+        let (first, cur2) = parse_pattern(cur)?;
+        parse_pattern_list_rest(cur2, Cons(first, Nil))
+    }
+}
+
+/// Parse remaining patterns in a comma-separated list.
+fn parse_pattern_list_rest(cur: Cursor, acc: List<Pattern>) -> Result<(List<Pattern>, Cursor), ParseError> {
+    // Check for comma
+    if cursor_check(cur, TokComma()) {
+        let cur2 = cursor_advance(cur);
+        // Check for trailing comma
+        if cursor_check(cur2, TokRParen()) {
+            Ok((list_reverse(acc), cur2))
+        } else {
+            // Parse next pattern
+            let (p, cur3) = parse_pattern(cur2)?;
+            parse_pattern_list_rest(cur3, Cons(p, acc))
+        }
+    } else {
+        // No more items, reverse accumulator
+        Ok((list_reverse(acc), cur))
+    }
+}

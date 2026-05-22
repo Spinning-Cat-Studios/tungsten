@@ -11,11 +11,10 @@
 // Submodules
 pub mod path;
 pub mod source_map;
-pub mod parsed;
+pub mod tree;
 pub mod info;
 pub mod workspace;
 pub mod resolve;
-pub mod parse;
 pub mod build;
 
 // Re-export path types and functions
@@ -35,7 +34,7 @@ pub use driver::modules::source_map::{
 };
 
 // Re-export parsed module types and functions
-pub use driver::modules::parsed::{
+pub use driver::modules::tree::parsed::{
     ParsedModule,
     parsed_module_new,
     parsed_module_path, parsed_module_visibility,
@@ -64,11 +63,13 @@ pub use driver::modules::workspace::{
 pub use driver::modules::resolve::{resolve_module_path};
 
 // Re-export parse functions
-pub use driver::modules::parse::{parse_module_tree};
+pub use driver::modules::tree::parse::{parse_module_tree};
 
 // Re-export build functions
 pub use driver::modules::build::{
     build_source_map, build_module_info,
-    build_workspace_module_info, get_module_name,
+    build_workspace_module_info, get_module_name
+};
+pub use driver::modules::build::flatten::{
     flatten_module_items, build_combined_source_file
 };

@@ -1,0 +1,74 @@
+// src/compiler/driver/pipeline/errors.tg
+// Error rendering helpers for pipeline operations.
+
+use driver::ffi::{
+    eprintln, read_file,
+    FfiResult, FfiOk, FfiErr
+};
+use driver::util::nat_to_string;
+use driver::modules::{
+    ParsedModule,
+    parsed_module_path, parsed_module_lex_errors, parsed_module_parse_errors
+};
+use parser::error::{
+    ParseErrors, NoParseErrors, ConsParseError,
+    parse_error_count, format_parse_error
+};
+use lexer::error::{error_count, has_errors};
+use elab::error::{SourceInfo, source_info_new};
+use elab::error::render::colors::{colorize_bold, ColorRed};
+
+// ===========================================================================
+// ERROR RENDERING HELPERS
+// ===========================================================================
+
+/// Render lex and parse errors for a parsed module.
+pub fn render_lex_parse_errors(module: ParsedModule, max_errors: Nat, use_color: Bool) -> Unit {
+    let lex_errs = parsed_module_lex_errors(module);
+    let parse_errs = parsed_module_parse_errors(module);
+    let lex_count = error_count(lex_errs);
+    let parse_count = parse_error_count(parse_errs);
+    
+    // Get source for line/col computation
+    let path = parsed_module_path(module);
+    let source = get_module_source(module);
+    let src_info = source_info_new(path, source);
+    
+    if lex_count > 0 {
+        eprintln(colorize_bold("error", ColorRed, use_color) ++ 
+                ": " ++ nat_to_string(lex_count) ++ " lexer error(s)")
+    };
+    
+    // Print individual parse errors with details
+    if parse_count > 0 {
+        print_parse_errors_detail(parse_errs, src_info, use_color)
+    };
+    
+    // Summary
+    let total = lex_count + parse_count;
+    eprintln(colorize_bold("error", ColorRed, use_color) ++ 
+            ": aborting due to " ++ nat_to_string(total) ++ " previous error(s)")
+}
+
+/// Print individual parse errors with file/line/col details.
+fn print_parse_errors_detail(errs: ParseErrors, src: SourceInfo, use_color: Bool) -> Unit {
+    match errs {
+        NoParseErrors() => {},
+        ConsParseError(err, rest) => {
+            let formatted = format_parse_error(err, src);
+            eprintln(colorize_bold("error", ColorRed, use_color) ++ ": " ++ formatted);
+            print_parse_errors_detail(rest, src, use_color)
+        }
+    }
+}
+
+/// Get the source content from a parsed module.
+pub fn get_module_source(module: ParsedModule) -> String {
+    // TODO: Access the source from the parsed module
+    // For now, re-read the file (inefficient but works)
+    let path = parsed_module_path(module);
+    match read_file(path) {
+        FfiOk(s) => s,
+        FfiErr(_) => ""
+    }
+}

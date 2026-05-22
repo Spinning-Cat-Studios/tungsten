@@ -2,6 +2,8 @@
 //!
 //! Provides context-aware error construction with suggestions.
 
+use std::path::PathBuf;
+
 use crate::span::Span;
 use tungsten_core::Type;
 
@@ -19,6 +21,29 @@ impl<'a> Elaborator<'a> {
         } else {
             err
         }
+    }
+
+    /// Look up the defining file and span for a global function (for cross-file diagnostics).
+    ///
+    /// Performs a three-step lookup:
+    ///   1. `env.get_item_module(name)` → which module owns this name
+    ///   2. `env.get_module_file(&module_path)` → filesystem path for that module
+    ///   3. `env.lookup_value(name)` → `ValueDef` with the definition span
+    ///
+    /// Returns `Some((file_path, def_span))` when the function is defined in a
+    /// different module from `current_module` and the file path is known.
+    ///
+    /// Note: `ValueDef.span` covers the entire function definition, not just
+    /// the return type annotation. Narrowing to the return-type span would
+    /// require storing a separate `return_type_span` in `ValueDef`.
+    pub(super) fn cross_file_info_for_function(&self, name: &str) -> Option<(PathBuf, Span)> {
+        let item_module = self.env.get_item_module(name)?;
+        if item_module == &self.current_module {
+            return None; // Same module — not a cross-file reference
+        }
+        let file_path = self.env.get_module_file(item_module)?.clone();
+        let value_def = self.env.lookup_value(name)?;
+        Some((file_path, value_def.span))
     }
 
     /// Create an undefined variable error with "did you mean" suggestion.

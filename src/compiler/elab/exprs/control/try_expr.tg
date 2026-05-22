@@ -1,0 +1,288 @@
+// src/compiler/elab/exprs/control/try_expr.tg
+// Elaboration of the `?` (try) operator (ADR 13.5.26e).
+//
+// `expr?` desugars to a case + early return:
+//   - `Result<T, E>`: case(unfold(operand), err, return(inl(err)), ok, ok)
+//   - `Option<T>`:    case(unfold(operand), none, return(inl(unit)), some, some)
+//
+// Constructor index awareness (ADR 19.5.26d §P3):
+//   Sum encoding uses source-order constructor indices, NOT alphabetical order.
+//   Ok may be at index 0 (left/inl) or index 1 (right/inr) depending on how
+//   the Result type was declared. We must use the constructor's `index` field
+//   to determine which side of the Sum is the success type.
+
+use lexer::span::Span;
+use parser::ast::{Expr, expr_span};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_case, tg_term_inl, tg_term_inr, tg_term_return, tg_term_unfold, tg_term_unit,
+    tg_term_var_named, tg_term_fold,
+    tg_type_is_mu, tg_type_get_mu_var, tg_type_get_mu_body,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_substitute, tg_type_void,
+    tg_types_equal,
+    tg_string_to_cstr
+};
+use elab::env::{
+    Env, env_return_type,
+    MaybeTypeHandle, NoTypeHandle, SomeTypeHandle, TryBlockTypeHandle
+};
+use elab::env::resolve_path::{env_lookup_value};
+use elab::env::defs::{
+    MaybeResolvedValue, NoResolvedValue, SomeResolvedValue,
+    ResolvedValue, ResolvedConstructor, ResolvedLocal, ResolvedGlobal
+};
+use elab::env::defs::constructors::ConstructorInfo;
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error
+};
+use elab::exprs::{synth};
+use elab::cir::{CodegenIR, CIRUnit};
+
+/// What kind of try-able type we detected.
+type TryKind =
+    | TryResult
+    | TryOption
+
+/// Classification result for `?` operator.
+/// TryClassOk carries: kind, success type, success constructor index.
+type TryClassification =
+    | TryClassErr(String, Span)
+    | TryClassOk(TryKind, TypeHandle, Nat)
+
+// ===========================================================================
+// SUM SIDE EXTRACTION (index-aware)
+// ===========================================================================
+
+/// Unfold a Mu type if present, returning the inner body with self-reference substituted.
+fn unfold_if_mu(ty: TypeHandle) -> TypeHandle {
+    if tg_type_is_mu(ty) {
+        let mu_var = tg_type_get_mu_var(ty);
+        let body = tg_type_get_mu_body(ty);
+        tg_type_substitute(body, mu_var, ty)
+    } else { ty }
+}
+
+/// Extract the type at a given constructor index from a Sum type.
+/// Index 0 = left/inl, index 1 = right/inr.
+fn extract_sum_side(ty: TypeHandle, index: Nat) -> TypeHandle {
+    let inner = unfold_if_mu(ty);
+    if tg_type_is_sum(inner) {
+        if index == 0 {
+            tg_type_get_sum_left(inner)
+        } else {
+            tg_type_get_sum_right(inner)
+        }
+    } else { inner }
+}
+
+/// Extract the success type from an operand type using the success constructor index.
+fn extract_success_type(ty: TypeHandle, success_index: Nat) -> TypeHandle {
+    extract_sum_side(ty, success_index)
+}
+
+/// Extract the error type from an operand type.
+/// For a 2-constructor ADT, the error is on the opposite side from success.
+fn extract_error_type(ty: TypeHandle, success_index: Nat) -> TypeHandle {
+    let error_index = if success_index == 0 { 1 } else { 0 };
+    extract_sum_side(ty, error_index)
+}
+
+// ===========================================================================
+// CLASSIFICATION
+// ===========================================================================
+
+/// Result of looking up a constructor with a specific parent type.
+type MaybeCtorInfo =
+    | NoCtorInfo
+    | SomeCtorInfo(ConstructorInfo)
+
+/// Look up a constructor by name and check if its parent matches.
+/// Uses two-step matching to avoid nested constructor patterns
+/// (which are miscompiled in tungsten1 codegen — ADR 19.5.26d §P3).
+fn resolve_as_constructor(env: Env, name: String, parent: String) -> MaybeCtorInfo {
+    let lookup = env_lookup_value(env, name);
+    match lookup {
+        SomeResolvedValue(resolved) =>
+            match resolved {
+                ResolvedConstructor(info) =>
+                    if info.parent_type == parent {
+                        SomeCtorInfo(info)
+                    } else {
+                        NoCtorInfo()
+                    },
+                ResolvedLocal(_, _, _) => NoCtorInfo(),
+                ResolvedGlobal(_, _) => NoCtorInfo()
+            },
+        NoResolvedValue() => NoCtorInfo()
+    }
+}
+
+/// Classify the operand type as Result or Option.
+fn classify(env: Env, operand_ty: TypeHandle, span: Span) -> TryClassification {
+    match resolve_as_constructor(env, "Ok", "Result") {
+        SomeCtorInfo(info) =>
+            let success_ty = extract_success_type(operand_ty, info.index);
+            TryClassOk(TryResult, success_ty, info.index),
+        NoCtorInfo() =>
+            try_classify_option(env, operand_ty, span)
+    }
+}
+
+/// Try classifying as Option.
+fn try_classify_option(env: Env, operand_ty: TypeHandle, span: Span) -> TryClassification {
+    match resolve_as_constructor(env, "Some", "Option") {
+        SomeCtorInfo(info) =>
+            let success_ty = extract_success_type(operand_ty, info.index);
+            TryClassOk(TryOption, success_ty, info.index),
+        NoCtorInfo() =>
+            TryClassErr("? operator requires Result or Option type", span)
+    }
+}
+
+// ===========================================================================
+// RETURN TYPE CHECKING
+// ===========================================================================
+
+/// Check that the return type is compatible with `?`.
+fn check_try_return(
+    env: Env,
+    try_kind: TryKind,
+    operand_ty: TypeHandle,
+    ret_ty: TypeHandle,
+    success_index: Nat,
+    span: Span
+) -> ElabExprResult {
+    match try_kind {
+        TryResult =>
+            match resolve_as_constructor(env, "Ok", "Result") {
+                SomeCtorInfo(ret_info) =>
+                    let op_err = extract_error_type(operand_ty, success_index);
+                    let ret_err = extract_error_type(ret_ty, ret_info.index);
+                    if tg_types_equal(op_err, ret_err) {
+                        ElabExprOk(env, 0, 0, CIRUnit)
+                    } else {
+                        ElabExprErr(elab_expr_error(
+                            "? operator error type does not match function return type",
+                            span
+                        ))
+                    },
+                NoCtorInfo() =>
+                    ElabExprErr(elab_expr_error(
+                        "? on Result requires function to return Result",
+                        span
+                    ))
+            },
+        TryOption =>
+            match resolve_as_constructor(env, "Some", "Option") {
+                SomeCtorInfo(_) =>
+                    ElabExprOk(env, 0, 0, CIRUnit),
+                NoCtorInfo() =>
+                    ElabExprErr(elab_expr_error(
+                        "? on Option requires function to return Option",
+                        span
+                    ))
+            }
+    }
+}
+
+// ===========================================================================
+// SYNTHESIS
+// ===========================================================================
+
+/// Synthesize `expr?`.
+pub fn synth_try_full(env: Env, inner: Expr, span: Span) -> ElabExprResult {
+    match env_return_type(env) {
+        NoTypeHandle() =>
+            ElabExprErr(elab_expr_error(
+                "? operator used outside of function body",
+                span
+            )),
+        SomeTypeHandle(ret_ty) =>
+            synth_try_with_return_type(env, inner, ret_ty, span),
+        TryBlockTypeHandle(ret_ty) =>
+            synth_try_with_return_type(env, inner, ret_ty, span)
+    }
+}
+
+fn synth_try_with_return_type(env: Env, inner: Expr, ret_ty: TypeHandle, span: Span) -> ElabExprResult {
+    match synth(env, inner) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, operand_term, operand_ty, operand_cir) =>
+            match classify(env2, operand_ty, span) {
+                TryClassErr(msg, s) =>
+                    ElabExprErr(elab_expr_error(msg, s)),
+                TryClassOk(try_kind, success_ty, success_index) =>
+                    match check_try_return(env2, try_kind, operand_ty, ret_ty, success_index, span) {
+                        ElabExprErr(e) => ElabExprErr(e),
+                        ElabExprOk(_, _, _, _) =>
+                            let term = build_try_desugar(try_kind, operand_term, operand_ty, ret_ty, success_index);
+                            ElabExprOk(env2, term, success_ty, CIRUnit)
+                    }
+            }
+    }
+}
+
+// ===========================================================================
+// DESUGARING
+// ===========================================================================
+
+/// Build the desugared Core term for `?`.
+///
+/// The case expression branches are ordered by Sum layout (left=inl, right=inr).
+/// The success_index determines which side is the success value.
+fn build_try_desugar(
+    try_kind: TryKind,
+    operand: TermHandle,
+    operand_ty: TypeHandle,
+    ret_ty: TypeHandle,
+    success_index: Nat
+) -> TermHandle {
+    let scrutinee = if tg_type_is_mu(operand_ty) {
+        tg_term_unfold(operand_ty, operand)
+    } else { operand };
+
+    let ret_sum = unfold_if_mu(ret_ty);
+
+    let err_var_name = tg_string_to_cstr("__try_err");
+    let ok_var_name = tg_string_to_cstr("__try_ok");
+
+    let error_body = match try_kind {
+        TryResult =>
+            let err_ref = tg_term_var_named(err_var_name);
+            // Inject error into the error side of the return type's Sum.
+            // If success_index == 0, error is at index 1 (right/inr).
+            // If success_index == 1, error is at index 0 (left/inl).
+            let injected = if success_index == 0 {
+                tg_term_inr(ret_sum, err_ref)
+            } else {
+                tg_term_inl(ret_sum, err_ref)
+            };
+            let folded = if tg_type_is_mu(ret_ty) {
+                tg_term_fold(ret_ty, injected)
+            } else { injected };
+            tg_term_return(folded),
+        TryOption =>
+            let injected = if success_index == 0 {
+                tg_term_inr(ret_sum, tg_term_unit())
+            } else {
+                tg_term_inl(ret_sum, tg_term_unit())
+            };
+            let folded = if tg_type_is_mu(ret_ty) {
+                tg_term_fold(ret_ty, injected)
+            } else { injected };
+            tg_term_return(folded)
+    };
+
+    let success_body = tg_term_var_named(ok_var_name);
+
+    // success_index 0 means success (Ok/Some) is inl (left), error is inr (right).
+    // success_index 1 means error is inl (left), success (Ok/Some) is inr (right).
+    // tg_term_case(scrutinee, left_var, left_body, right_var, right_body)
+    if success_index == 0 {
+        tg_term_case(scrutinee, ok_var_name, success_body, err_var_name, error_body)
+    } else {
+        tg_term_case(scrutinee, err_var_name, error_body, ok_var_name, success_body)
+    }
+}

@@ -76,9 +76,11 @@ fn format_help(base: String, help: MaybeString) -> String {
 pub fn format_elab_errors(list: List<ElabError>) -> String {
     match list {
         Nil() => "",
-        Cons(err, Nil()) => format_elab_error(err),
-        Cons(err, rest) =>
-            format_elab_error(err) ++ "\n\n" ++ format_elab_errors(rest)
+        Cons(err, rest) => match rest {
+            Nil() => format_elab_error(err),
+            Cons(_, _) =>
+                format_elab_error(err) ++ "\n\n" ++ format_elab_errors(rest)
+        }
     }
 }
 

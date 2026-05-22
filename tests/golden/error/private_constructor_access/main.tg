@@ -1,0 +1,8 @@
+// Test: E0016 private constructor access from another module.
+
+mod helper;
+
+fn main() -> Nat {
+    let x = helper::Red;
+    0
+}

@@ -1,0 +1,20 @@
+// Regression test: sum type dispatched across modules.
+// Mirrors the info/explain pattern in the self-hosted compiler:
+// - cli.tg defines Command with CmdInfo(InfoOpts) and CmdExplain(ExplainOpts)
+// - pipeline/mod.tg dispatches CmdExplain(opts) to pipeline/explain.tg's run_explain(opts)
+//
+// Verifies that a sum type defined in one module can be pattern-matched
+// in a dispatcher module and its payload passed to a handler in a third module.
+// See ADR 18.4.26f.
+
+pub mod cli;
+pub mod handler;
+pub mod dispatcher;
+
+use dispatcher::dispatch;
+use cli::{Command};
+
+fn main() -> Nat {
+    let cmd: Command = DoAlpha("test");
+    dispatch(cmd)
+}

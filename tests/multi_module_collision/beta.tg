@@ -1,0 +1,5 @@
+/// Beta module — cross-module function call test.
+pub fn greet() -> Nat { 20 }
+
+/// A helper only used within beta.
+fn helper() -> Nat { 15 }

@@ -1,0 +1,11 @@
+// Handler module: processes BetaOpts.
+// Mirrors driver::pipeline::explain handling ExplainOpts.
+
+use cli::{BetaOpts};
+
+pub fn handle_beta(opts: BetaOpts) -> Nat {
+    match opts {
+        BetaFoo(_name) => 10,
+        BetaBar() => 20
+    }
+}

@@ -1,0 +1,91 @@
+// If-let and if-let chain desugaring (ADR 14.5.26e, ADR 15.5.26d).
+//
+// Builds the desugared match expression and emits W0004 for irrefutable patterns.
+
+use lexer::span::{Span, span_empty};
+use parser::ast::{
+    Expr, ExprMatch, ExprIf, ExprUnit,
+    Pattern, PatVar, PatWildcard,
+    MatchArm, MaybeExpr, NoExpr, SomeExpr,
+    IfLetCondition, IfLetBind, IfLetGuard,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::ffi::process::eprintln;
+use driver::util::string_concat;
+
+/// Build the desugared match expression for `if let P = e { body }` or `if let P = e { body } else { fallback }`:
+///   Without else: `match e { P => body, _ => () }`
+///   With else:    `match e { P => body, _ => fallback }`
+///
+/// Also emits W0004 if the pattern is irrefutable (variable or wildcard).
+pub fn build_if_let_match(
+    pat: Pattern,
+    init: Expr,
+    body: Expr,
+    maybe_else: MaybeExpr,
+    span: Span
+) -> Expr {
+    let _ = warn_if_let_irrefutable(pat, span);
+    let success_arm: MatchArm = { pattern: pat, guard: NoExpr(), body: body, span: span };
+    let fallback_body: Expr = match maybe_else {
+        SomeExpr(e) => e,
+        NoExpr() => ExprUnit(span_empty(span.end, span.file))
+    };
+    let fallback_arm: MatchArm = { pattern: PatWildcard(span), guard: NoExpr(), body: fallback_body, span: span };
+    ExprMatch(init, Cons(success_arm, Cons(fallback_arm, Nil())), span)
+}
+
+/// Build the desugared expression for an `if let` chain (ADR 15.5.26d).
+///
+/// Recursively nests conditions:
+/// - `IfLetBind(pat, init)` → `match init { pat => <rest>, _ => else_branch }`
+/// - `IfLetGuard(expr)` → `if expr { <rest> } else { else_branch }`
+pub fn build_if_let_chain_match(
+    conditions: List<IfLetCondition>,
+    body: Expr,
+    maybe_else: MaybeExpr,
+    span: Span
+) -> Expr {
+    let fallback: Expr = match maybe_else {
+        SomeExpr(e) => e,
+        NoExpr() => ExprUnit(span_empty(span.end, span.file))
+    };
+    build_chain_inner(conditions, body, fallback, span)
+}
+
+/// Recursive helper: nest conditions into match/if expressions.
+fn build_chain_inner(
+    conditions: List<IfLetCondition>,
+    body: Expr,
+    fallback: Expr,
+    span: Span
+) -> Expr {
+    match conditions {
+        Nil() => body,
+        Cons(cond, rest) =>
+            let inner = build_chain_inner(rest, body, fallback, span);
+            match cond {
+                IfLetBind(pat, init) =>
+                    let success_arm: MatchArm = { pattern: pat, guard: NoExpr(), body: inner, span: span };
+                    let fallback_arm: MatchArm = { pattern: PatWildcard(span), guard: NoExpr(), body: fallback, span: span };
+                    ExprMatch(init, Cons(success_arm, Cons(fallback_arm, Nil())), span),
+                IfLetGuard(guard) =>
+                    ExprIf(guard, inner, fallback, span)
+            }
+    }
+}
+
+/// Emit W0004 if the pattern is irrefutable (variable or wildcard).
+fn warn_if_let_irrefutable(pat: Pattern, span: Span) -> Nat {
+    match pat {
+        PatVar(id) =>
+            let name = ident_name(id);
+            let _ = eprintln(string_concat("[W0004] warning: irrefutable pattern `", string_concat(name, "` in `if let`; condition always matches")));
+            0,
+        PatWildcard(_) =>
+            let _ = eprintln("[W0004] warning: irrefutable pattern `_` in `if let`; condition always matches");
+            0,
+        _ => 0
+    }
+}

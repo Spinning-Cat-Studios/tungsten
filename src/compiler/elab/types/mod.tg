@@ -1,0 +1,227 @@
+// src/compiler/elab/types/mod.tg
+// Type elaboration for the self-hosted elaborator.
+//
+// Transforms surface syntax TypeExpr into Core types (TypeHandle)
+// and CodegenIR types (CodegenType) in lockstep.
+
+pub mod result_types;
+pub mod generics;
+
+pub use elab::types::result_types::*;
+pub use elab::types::generics::*;
+
+use lexer::span::Span;
+use parser::ast::{
+    TypeExpr, TyPath, TyArrow, TyProduct, TySum, TyApp, TyForall,
+    TyProp, TyUnit, TyVoid, TyPtr, TyRef, TyEq, TyEqExplicit, TyParen, TyError,
+    Expr,
+    Path, MkPath,
+    Ident, ident_name,
+    ident_list_len,
+    type_expr_span
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle, TermHandle, INVALID_HANDLE,
+    tg_type_nat, tg_type_bool, tg_type_string, tg_type_unit,
+    tg_type_void, tg_type_prop, tg_type_arrow, tg_type_product,
+    tg_type_sum, tg_type_forall, tg_type_var, tg_type_mu,
+    tg_type_ptr, tg_type_ref, tg_type_eq,
+    tg_string_to_cstr,
+    tg_types_equal,
+    tg_type_substitute,
+    tg_type_debug,
+    tg_type_is_tyvar, tg_type_get_tyvar_name,
+    tg_cstr_eq
+};
+use elab::env::{
+    Env, env_resolve_type_path, env_bind_type_var, env_unbind_type_var,
+    env_is_type_var,
+    TypePathResult, TypePathOk, TypePathErr,
+    ResolvedType, ResolvedTypeVar, ResolvedTypeDef,
+    TypeDefInfo,
+    EnvError, env_error_new,
+    MaybeTypeHandle, NoTypeHandle, SomeTypeHandle,
+    MaybeRecordFields, NoRecordFields, SomeRecordFields,
+    ident_list_head_name
+};
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CTNat, CTBool, CTString, CTUnit, CTVoid, CTProp,
+    CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq,
+    ct_nat, ct_bool, ct_string, ct_unit, ct_void, ct_prop,
+    ct_arrow, ct_pair, ct_sum, ct_ref, ct_ptr, ct_var, ct_forall, ct_mu, ct_eq
+};
+use elab::adt::string_to_ptr;
+use driver::util::{Char, list_reverse, list_len, list_get, nat_to_string, Option, Some, None, string_concat};
+use elab::types::generics::{elab_type_app, elab_type_ptr, elab_type_ref, elab_type_eq, elab_type_eq_explicit};
+use elab::types::result_types::{ElabTypeResult, ElabTypeOk, ElabTypeErr, ElabTypeError, elab_type_error, elab_type_error_coded};
+
+// ===========================================================================
+// MAIN ENTRY POINT
+// ===========================================================================
+
+pub fn elab_type(env: Env, ty: TypeExpr) -> ElabTypeResult {
+    elab_type_impl(env, ty)
+}
+
+fn elab_type_impl(env: Env, ty: TypeExpr) -> ElabTypeResult {
+    match ty {
+        TyPath(path) => elab_type_path(env, path),
+        TyArrow(left, right, span) => elab_type_arrow(env, left, right, span),
+        TyProduct(left, right, span) => elab_type_product(env, left, right, span),
+        TySum(left, right, span) => elab_type_sum(env, left, right, span),
+        TyApp(base, args, span) => elab_type_app(env, base, args, span),
+        TyForall(ident, body, span) => elab_type_forall(env, ident, body, span),
+        TyProp(span) => ElabTypeOk(tg_type_prop(), ct_prop()),
+        TyUnit(span) => ElabTypeOk(tg_type_unit(), ct_unit()),
+        TyVoid(span) => ElabTypeOk(tg_type_void(), ct_void()),
+        TyPtr(inner, span) => elab_type_ptr(env, inner, span),
+        TyRef(inner, span) => elab_type_ref(env, inner, span),
+        TyEq(left, right, span) => elab_type_eq(env, left, right, span),
+        TyEqExplicit(ty, left, right, span) => elab_type_eq_explicit(env, ty, left, right, span),
+        TyParen(inner, span) => elab_type(env, inner),
+        TyError(span) => ElabTypeErr(elab_type_error("type error in source", span))
+    }
+}
+
+// ===========================================================================
+// PATH ELABORATION
+// ===========================================================================
+
+fn elab_type_path(env: Env, path: Path) -> ElabTypeResult {
+    match path {
+        MkPath(segments, span) =>
+            if ident_list_len(segments) == 1 {
+                elab_type_single_segment(env, path, segments, span)
+            } else {
+                elab_resolved_type_path(env, path, span)
+            }
+    }
+}
+
+fn elab_type_single_segment(env: Env, path: Path, segments: List<Ident>, span: Span) -> ElabTypeResult {
+    let name = ident_list_head_name(segments);
+    match elab_builtin_type(name) {
+        SomeBuiltin(h, ct) => ElabTypeOk(h, ct),
+        NoBuiltin() =>
+            elab_resolved_type_path(env, path, span)
+    }
+}
+
+fn elab_builtin_type(name: String) -> MaybeBuiltinType {
+    if name == "Nat" {
+        SomeBuiltin(tg_type_nat(), ct_nat())
+    } else if name == "Bool" {
+        SomeBuiltin(tg_type_bool(), ct_bool())
+    } else if name == "String" {
+        SomeBuiltin(tg_type_string(), ct_string())
+    } else if name == "Unit" {
+        SomeBuiltin(tg_type_unit(), ct_unit())
+    } else if name == "Void" {
+        SomeBuiltin(tg_type_void(), ct_void())
+    } else if name == "Prop" {
+        SomeBuiltin(tg_type_prop(), ct_prop())
+    } else {
+        NoBuiltin
+    }
+}
+
+type MaybeBuiltinType =
+    | NoBuiltin
+    | SomeBuiltin(TypeHandle, CodegenType)
+
+fn elab_resolved_type_path(env: Env, path: Path, span: Span) -> ElabTypeResult {
+    match env_resolve_type_path(env, path) {
+        TypePathOk(resolved) =>
+            elab_resolved_type(env, resolved),
+        TypePathErr(err) =>
+            ElabTypeErr(elab_type_error_coded(err.message, err.span, err.code))
+    }
+}
+
+fn elab_resolved_type(env: Env, resolved: ResolvedType) -> ElabTypeResult {
+    match resolved {
+        ResolvedTypeVar(name) =>
+            ElabTypeOk(tg_type_var(string_to_ptr(name)), ct_var(name)),
+        ResolvedTypeDef(def) =>
+            if has_record_fields(def) {
+                ElabTypeOk(tg_type_var(string_to_ptr(def.name)), ct_var(def.name))
+            } else {
+                ElabTypeOk(def.encoded_type, ct_var(def.name))
+            }
+    }
+}
+
+fn has_record_fields(def: TypeDefInfo) -> Bool {
+    match def.record_fields {
+        SomeRecordFields(_) => true,
+        NoRecordFields() => false
+    }
+}
+
+// ===========================================================================
+// BINARY TYPE CONSTRUCTORS
+// ===========================================================================
+
+fn elab_type_arrow(env: Env, left: TypeExpr, right: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, left) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(left_h, left_ct) =>
+            elab_type_arrow_right(env, left_h, left_ct, right)
+    }
+}
+
+fn elab_type_arrow_right(env: Env, left_h: TypeHandle, left_ct: CodegenType, right: TypeExpr) -> ElabTypeResult {
+    match elab_type(env, right) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(right_h, right_ct) =>
+            ElabTypeOk(tg_type_arrow(left_h, right_h), ct_arrow(left_ct, right_ct))
+    }
+}
+
+fn elab_type_product(env: Env, left: TypeExpr, right: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, left) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(left_h, left_ct) =>
+            elab_type_product_right(env, left_h, left_ct, right)
+    }
+}
+
+fn elab_type_product_right(env: Env, left_h: TypeHandle, left_ct: CodegenType, right: TypeExpr) -> ElabTypeResult {
+    match elab_type(env, right) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(right_h, right_ct) =>
+            ElabTypeOk(tg_type_product(left_h, right_h), ct_pair(left_ct, right_ct))
+    }
+}
+
+fn elab_type_sum(env: Env, left: TypeExpr, right: TypeExpr, span: Span) -> ElabTypeResult {
+    match elab_type(env, left) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(left_h, left_ct) =>
+            elab_type_sum_right(env, left_h, left_ct, right)
+    }
+}
+
+fn elab_type_sum_right(env: Env, left_h: TypeHandle, left_ct: CodegenType, right: TypeExpr) -> ElabTypeResult {
+    match elab_type(env, right) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(right_h, right_ct) =>
+            ElabTypeOk(tg_type_sum(left_h, right_h), ct_sum(left_ct, right_ct))
+    }
+}
+
+// ===========================================================================
+// FORALL TYPES
+// ===========================================================================
+
+fn elab_type_forall(env: Env, ident: Ident, body: TypeExpr, span: Span) -> ElabTypeResult {
+    let name = ident_name(ident);
+    let env2 = env_bind_type_var(env, name);
+    match elab_type(env2, body) {
+        ElabTypeErr(e) => ElabTypeErr(e),
+        ElabTypeOk(body_h, body_ct) =>
+            ElabTypeOk(tg_type_forall(string_to_ptr(name), body_h), ct_forall(name, body_ct))
+    }
+}

@@ -1,0 +1,23 @@
+// consumer module — imports types from sibling and uses them.
+// If stub overwrite fails, this module would see stubs instead of
+// real type definitions and elaboration would fail.
+
+use types::{Color, Red, Green, Blue, Pair, make_pair, default_color};
+
+pub fn color_to_nat(c: Color) -> Nat {
+    match c {
+        Red() => 1,
+        Green() => 2,
+        Blue() => 3
+    }
+}
+
+pub fn pair_sum(p: Pair) -> Nat {
+    p.first + p.second
+}
+
+pub fn run() -> Nat {
+    let c = default_color();
+    let p = make_pair(10, 20);
+    color_to_nat(c) + pair_sum(p)
+}

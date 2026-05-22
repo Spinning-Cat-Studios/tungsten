@@ -1,0 +1,69 @@
+// src/compiler/driver/cli/test.tg
+// CLI parsing for the `test` command.
+
+use driver::ffi::{List, Nil, Cons};
+use parser::option::{Option, Some, None};
+use driver::util::{string_eq, starts_with, string_is_empty, parse_nat, option_unwrap_or};
+use driver::cli::{Command, CmdTest, CmdError, TestOpts, CliError};
+
+// ===========================================================================
+// TEST COMMAND PARSING
+// ===========================================================================
+
+/// Parse `test` command arguments.
+pub fn parse_test_command(args: List<String>) -> Command {
+    let state = parse_test_options(args, "", "");
+    let file_str: String = state.file;
+    if string_is_empty(file_str) {
+        let err: CliError = {
+            message: "missing required argument: <FILE>",
+            usage: "tungsten test [OPTIONS] <FILE>"
+        };
+        CmdError(err)
+    } else {
+        let opts: TestOpts = {
+            file: file_str,
+            verbose: state.verbose,
+            filter: state.filter,
+            max_errors: state.max_errors
+        };
+        CmdTest(opts)
+    }
+}
+
+/// Intermediate state for test option parsing.
+type TestParseState = {
+    file: String,
+    verbose: Bool,
+    filter: String,
+    max_errors: Nat
+}
+
+/// Parse test command options recursively.
+fn parse_test_options(args: List<String>, file: String, filter: String) -> TestParseState {
+    match args {
+        Nil() => { file: file, verbose: false, filter: filter, max_errors: 20 } : TestParseState,
+        Cons(arg, rest) =>
+            if string_eq(arg, "-v") || string_eq(arg, "--verbose") {
+                let s = parse_test_options(rest, file, filter);
+                { file: s.file, verbose: true, filter: s.filter, max_errors: s.max_errors } : TestParseState
+            } else if string_eq(arg, "--filter") {
+                match rest {
+                    Nil() => { file: file, verbose: false, filter: filter, max_errors: 20 } : TestParseState,
+                    Cons(f, rest2) => parse_test_options(rest2, file, f)
+                }
+            } else if string_eq(arg, "--max-errors") {
+                match rest {
+                    Nil() => { file: file, verbose: false, filter: filter, max_errors: 20 } : TestParseState,
+                    Cons(val, rest2) =>
+                        let n = option_unwrap_or(parse_nat(val), 20);
+                        let s = parse_test_options(rest2, file, filter);
+                        { file: s.file, verbose: s.verbose, filter: s.filter, max_errors: n } : TestParseState
+                }
+            } else if starts_with(arg, "-") {
+                parse_test_options(rest, file, filter)
+            } else {
+                parse_test_options(rest, arg, filter)
+            }
+    }
+}

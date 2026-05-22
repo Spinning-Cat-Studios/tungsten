@@ -1,4 +1,7 @@
-[E0016] Error: type `PrivateType` is private (defined in `helper`) and cannot be accessed from `main`
+warning: Phase A.5 global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0016]: type `PrivateType` is private (defined in `helper`) and cannot be accessed from `<root>` (at 256..267)
+  hint: run `tungsten doctor check phase-a5 <file>` for details
+[E0016] Error: type `PrivateType` is private (defined in `helper`) and cannot be accessed from `<root>`
    ╭─[tests/golden/error/private_item_access/main.tg:9:14]
    │
  9 │ fn main() -> PrivateType { 0 }  // Should error: PrivateType is private

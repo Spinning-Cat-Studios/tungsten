@@ -1,0 +1,222 @@
+// src/compiler/elab/exprs/records/spread.tg
+// Named record spread elaboration (ADR 13.5.26i).
+//
+// Handles `TypeName { ...spread, field: value }` syntax.
+// Projects missing fields from the spread base at their canonical index.
+
+use lexer::span::Span;
+use parser::ast::{Ident, ident_name, FieldInit};
+use parser::ast::nodes::Expr;
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_pair, tg_term_fst, tg_term_snd,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right
+};
+use elab::env::{Env, RecordFieldInfo};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error, TermInfo};
+use elab::exprs::records::deep_eq::get_structural_type;
+use elab::exprs::records::named::{DupFieldResult, NoDupField, SomeDupField, find_duplicate_field,
+    UserFieldResult, SomeUserField, NoUserField, find_user_field};
+use elab::exprs::check;
+use elab::cir::{CodegenIR, CIRPair, CIRFst, CIRSnd};
+
+// ===========================================================================
+// NAMED RECORD SPREAD
+// ===========================================================================
+
+/// Input arguments for named spread elaboration.
+pub type SpreadArgs = { spread_expr: Expr, fields: List<FieldInit>, def_fields: List<RecordFieldInfo>, expected: TypeHandle }
+
+/// Elaborate a named record with spread: `TypeName { ...spread, field: value }`.
+///
+/// 1. Check for duplicate explicit fields
+/// 2. Check spread expression against expected record type
+/// 3. Walk def fields in canonical order: use explicit value or project from spread
+///
+/// TODO(AC6): Wrap spread term in a `tg_term_let` binding to guarantee single
+/// evaluation at runtime. Currently the spread TermInfo handle is projected
+/// directly, which is correct in a pure language but would duplicate evaluation
+/// if side effects are ever added. The L1 elaborator already wraps in
+/// `Term::let_in`. Deferring because L2 doesn't yet produce running binaries
+/// and threading CodegenType through the spread pipeline is non-trivial.
+pub fn synth_named_spread(env: Env, args: SpreadArgs, span: Span) -> ElabExprResult {
+    match find_duplicate_field(args.fields) {
+        SomeDupField(dup_name) =>
+            ElabExprErr(elab_expr_error("duplicate field in named record constructor", span)),
+        NoDupField() =>
+            match check(env, args.spread_expr, args.expected) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, spread_term, _, spread_cir) =>
+                    let structural = get_structural_type(env2, args.expected);
+                    let base: TermInfo = { term: spread_term, ty: structural, cir: spread_cir };
+                    let ctx: SpreadCtx = { base: base, user_fields: args.fields, span: span };
+                    synth_spread_finalize(env2, ctx, args.def_fields, structural, args.expected)
+            }
+    }
+}
+
+fn synth_spread_finalize(
+    env: Env, ctx: SpreadCtx,
+    def_fields: List<RecordFieldInfo>,
+    structural: TypeHandle, expected: TypeHandle
+) -> ElabExprResult {
+    match build_spread_record(env, ctx, def_fields, structural, 0) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, _, cir) =>
+            ElabExprOk(env2, term, expected, cir)
+    }
+}
+
+/// Loop-invariant context for spread record building.
+type SpreadCtx = { base: TermInfo, user_fields: List<FieldInit>, span: Span }
+
+/// Product decomposition for a mid-field in spread record building.
+type SpreadFieldState = {
+    rest_defs: List<RecordFieldInfo>,
+    left_ty: TypeHandle,
+    right_ty: TypeHandle,
+    structural_ty: TypeHandle,
+    index: Nat
+}
+
+/// Build a record by walking definition fields in order.
+/// For each field: if user provides it, check the explicit value;
+/// otherwise project from the spread base at the appropriate index.
+fn build_spread_record(
+    env: Env,
+    ctx: SpreadCtx,
+    def_fields: List<RecordFieldInfo>,
+    structural_ty: TypeHandle,
+    index: Nat
+) -> ElabExprResult {
+    match def_fields {
+        Nil() =>
+            ElabExprErr(elab_expr_error("internal: no fields to process", ctx.span)),
+        Cons(def, rest_defs) =>
+            if list_is_empty(rest_defs) {
+                build_spread_last_field(env, ctx, def, structural_ty, index)
+            } else if tg_type_is_product(structural_ty) {
+                let fs: SpreadFieldState = {
+                    rest_defs: rest_defs,
+                    left_ty: tg_type_get_product_left(structural_ty),
+                    right_ty: tg_type_get_product_right(structural_ty),
+                    structural_ty: structural_ty,
+                    index: index
+                };
+                build_spread_mid_resolve(env, ctx, def, fs)
+            } else {
+                ElabExprErr(elab_expr_error(
+                    "internal: expected product type for record field",
+                    ctx.span
+                ))
+            }
+    }
+}
+
+fn build_spread_last_field(
+    env: Env,
+    ctx: SpreadCtx,
+    def: RecordFieldInfo,
+    structural_ty: TypeHandle,
+    index: Nat
+) -> ElabExprResult {
+    match find_user_field(ctx.user_fields, def.name) {
+        SomeUserField(user_field) =>
+            check(env, user_field.value, structural_ty),
+        NoUserField() =>
+            spread_project(env, ctx.base, index, structural_ty, ctx.span)
+    }
+}
+
+fn build_spread_mid_resolve(
+    env: Env, ctx: SpreadCtx,
+    def: RecordFieldInfo, fs: SpreadFieldState
+) -> ElabExprResult {
+    match find_user_field(ctx.user_fields, def.name) {
+        SomeUserField(user_field) =>
+            build_spread_explicit(env, ctx, user_field, fs),
+        NoUserField() =>
+            build_spread_projected(env, ctx, fs)
+    }
+}
+
+fn build_spread_explicit(
+    env: Env, ctx: SpreadCtx,
+    user_field: FieldInit, fs: SpreadFieldState
+) -> ElabExprResult {
+    match check(env, user_field.value, fs.left_ty) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            build_spread_rest(env2, ctx, left_term, left_cir, fs)
+    }
+}
+
+fn build_spread_projected(
+    env: Env, ctx: SpreadCtx,
+    fs: SpreadFieldState
+) -> ElabExprResult {
+    match spread_project(env, ctx.base, fs.index, fs.left_ty, ctx.span) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            build_spread_rest(env2, ctx, left_term, left_cir, fs)
+    }
+}
+
+fn build_spread_rest(
+    env: Env, ctx: SpreadCtx,
+    left_term: TermHandle, left_cir: CodegenIR,
+    fs: SpreadFieldState
+) -> ElabExprResult {
+    match build_spread_record(env, ctx, fs.rest_defs, fs.right_ty, fs.index + 1) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, right_term, _, right_cir) =>
+            let pair = tg_term_pair(left_term, right_term);
+            let pair_cir = CIRPair(left_cir, right_cir);
+            ElabExprOk(env2, pair, fs.structural_ty, pair_cir)
+    }
+}
+
+// ===========================================================================
+// SPREAD PROJECTION
+// ===========================================================================
+
+/// Project the field at `index` from a spread base term.
+fn spread_project(
+    env: Env,
+    base: TermInfo,
+    index: Nat,
+    result_ty: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    spread_project_loop(env, base, index, result_ty)
+}
+
+fn spread_project_loop(
+    env: Env,
+    base: TermInfo,
+    index: Nat,
+    result_ty: TypeHandle
+) -> ElabExprResult {
+    if index == 0 {
+        if tg_type_is_product(base.ty) {
+            let proj_term = tg_term_fst(base.term);
+            let proj_cir = CIRFst(base.cir);
+            ElabExprOk(env, proj_term, result_ty, proj_cir)
+        } else {
+            ElabExprOk(env, base.term, result_ty, base.cir)
+        }
+    } else {
+        if tg_type_is_product(base.ty) {
+            let rest: TermInfo = {
+                term: tg_term_snd(base.term),
+                ty: tg_type_get_product_right(base.ty),
+                cir: CIRSnd(base.cir)
+            };
+            spread_project_loop(env, rest, index - 1, result_ty)
+        } else {
+            ElabExprOk(env, base.term, result_ty, base.cir)
+        }
+    }
+}

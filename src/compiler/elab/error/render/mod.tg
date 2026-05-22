@@ -1,0 +1,185 @@
+// src/compiler/elab/error/render/mod.tg
+// Rust-style diagnostic rendering with source context.
+//
+// Produces output like:
+// ```
+// error[E0001]: type mismatch
+//   --> src/foo.tg:10:5
+//    |
+// 10 |     x + "hello"
+//    |         ^^^^^^^ expected Nat, found String
+// ```
+
+pub mod colors;
+pub mod helpers;
+
+pub use elab::error::render::colors::*;
+pub use elab::error::render::helpers::*;
+
+use lexer::span::Span;
+use elab::error::kinds::{ElabErrorKind, ErrDuplicateImport, error_kind_code, error_kind_message};
+use elab::error::expected::{ExpectedBecause, MaybeExpectedBecause, NoExpectedBecause,
+                      SomeExpectedBecause, expected_because_message};
+use elab::error::list::{ElabError, Suggestion};
+use elab::error::source::{SourceInfo, LineCol, offset_to_line_col, 
+                    get_line_content};
+use parser::ast::common::{MaybeString, NoString, SomeString};
+use driver::util::{nat_to_string, list_len, list_take};
+use driver::ffi::{List, Nil, Cons, string_len};
+use elab::error::render::helpers::{
+    render_source_with_underline_colored, render_source_with_message_colored,
+    render_string_list_colored, render_suggestions_colored,
+    count_digits, make_gutter,
+    RenderCtx, ListRenderStyle
+};
+use elab::error::render::colors::{
+    Color, ColorRed, ColorBlue, ColorGreen, ColorCyan, ColorMagenta,
+    ColorBold, ColorReset, color_code, colorize, colorize_bold
+};
+
+// ===========================================================================
+// DIAGNOSTIC LABELS
+// ===========================================================================
+
+pub type DiagLabel = {
+    span: Span,
+    message: String,
+    is_primary: Bool
+}
+
+// ===========================================================================
+// MAIN RENDER FUNCTION
+// ===========================================================================
+
+pub fn render_diagnostic(err: ElabError, src: SourceInfo) -> String {
+    render_diagnostic_impl(err, src, false)
+}
+
+pub fn render_diagnostic_colored(err: ElabError, src: SourceInfo) -> String {
+    render_diagnostic_impl(err, src, true)
+}
+
+fn render_diagnostic_impl(err: ElabError, src: SourceInfo, use_color: Bool) -> String {
+    let code = error_kind_code(err.kind);
+    let msg = error_kind_message(err.kind);
+    let lc = offset_to_line_col(src, err.span.start);
+    
+    let header_prefix = colorize_bold("error", ColorRed, use_color);
+    let header_code = colorize_bold("[" ++ code ++ "]", ColorRed, use_color);
+    let header = header_prefix ++ header_code ++ ": " ++ colorize_bold(msg, ColorBold, use_color);
+    
+    let arrow = colorize("-->", ColorBlue, use_color);
+    let location = "  " ++ arrow ++ " " ++ err.span.file ++ ":" ++ 
+                   nat_to_string(lc.line) ++ ":" ++ 
+                   nat_to_string(lc.col);
+    
+    let gutter_width = count_digits(lc.line);
+    let pipe = colorize("|", ColorBlue, use_color);
+    let sep = make_gutter(gutter_width) ++ " " ++ pipe;
+    
+    let source_line = render_source_with_underline_colored(src, err.span, gutter_width, use_color);
+    
+    let base = header ++ "\n" ++ location ++ "\n" ++ sep ++ "\n" ++ source_line ++ "\n" ++ sep;
+    
+    // Add secondary span for ErrDuplicateImport
+    let with_secondary = match err.kind {
+        ErrDuplicateImport(name, first_span, _, first_module, _) =>
+            let first_lc = offset_to_line_col(src, first_span.start);
+            let secondary_arrow = colorize("::", ColorBlue, use_color);
+            let secondary_loc = "  " ++ secondary_arrow ++ " " ++ src.path ++ ":" ++
+                               nat_to_string(first_lc.line) ++ ":" ++
+                               nat_to_string(first_lc.col);
+            let secondary_gutter = count_digits(first_lc.line);
+            let secondary_pipe = colorize("|", ColorBlue, use_color);
+            let secondary_sep = make_gutter(secondary_gutter) ++ " " ++ secondary_pipe;
+            let secondary_source = render_source_with_message_colored(
+                src, first_span, "first imported here",
+                { gutter_width: secondary_gutter, use_color: use_color },
+                false
+            );
+            base ++ "\n" ++ secondary_loc ++ "\n" ++ secondary_sep ++ "\n" ++ secondary_source ++ "\n" ++ secondary_sep,
+        _ => base
+    };
+    
+    // Add expected-because as note
+    let with_eb = match err.expected_because {
+        NoExpectedBecause() => with_secondary,
+        SomeExpectedBecause(ctx) =>
+            let note_prefix = colorize("note", ColorCyan, use_color);
+            with_secondary ++ "\n" ++ make_gutter(gutter_width) ++ " = " ++ note_prefix ++ ": " ++ expected_because_message(ctx)
+    };
+    
+    let note_style: ListRenderStyle = { gutter_width: gutter_width, prefix: "note", color: ColorCyan, use_color: use_color };
+    let with_notes = render_string_list_colored(with_eb, err.notes, note_style);
+    let with_sugg = render_suggestions_colored(with_notes, err.suggestions, src, gutter_width, use_color);
+    
+    let with_help = match err.help {
+        NoString() => with_sugg,
+        SomeString(h) =>
+            let help_prefix = colorize("help", ColorGreen, use_color);
+            with_sugg ++ "\n" ++ make_gutter(gutter_width) ++ " = " ++ help_prefix ++ ": " ++ h
+    };
+    
+    with_help
+}
+
+// ===========================================================================
+// BATCH RENDERING
+// ===========================================================================
+
+pub fn render_diagnostics(errors: List<ElabError>, src: SourceInfo) -> String {
+    render_diagnostics_impl(errors, src, false)
+}
+
+pub fn render_diagnostics_colored(errors: List<ElabError>, src: SourceInfo) -> String {
+    render_diagnostics_impl(errors, src, true)
+}
+
+fn render_diagnostics_impl(errors: List<ElabError>, src: SourceInfo, use_color: Bool) -> String {
+    match errors {
+        Nil() => "",
+        Cons(err, rest) => match rest {
+            Nil() => render_diagnostic_impl(err, src, use_color),
+            Cons(_, _) =>
+                render_diagnostic_impl(err, src, use_color) ++ "\n\n" ++ render_diagnostics_impl(rest, src, use_color)
+        }
+    }
+}
+
+pub fn default_max_errors() -> Nat {
+    20
+}
+
+pub fn render_diagnostics_limited(
+    errors: List<ElabError>,
+    src: SourceInfo,
+    max_errors: Nat,
+    use_color: Bool
+) -> String {
+    let total = list_len(errors);
+    let limit = if max_errors == 0 { total } else { max_errors };
+    
+    let limited = list_take(errors, limit);
+    let omitted = if total > limit { total - limit } else { 0 };
+    
+    let body = render_diagnostics_impl(limited, src, use_color);
+    
+    if total > 0 {
+        let summary = render_summary(total, omitted, use_color);
+        body ++ "\n\n" ++ summary
+    } else {
+        body
+    }
+}
+
+fn render_summary(total: Nat, omitted: Nat, use_color: Bool) -> String {
+    let error_word = if total == 1 { "error" } else { "errors" };
+    let prefix = colorize_bold("error", ColorRed, use_color);
+    
+    if omitted > 0 {
+        prefix ++ ": aborting due to " ++ nat_to_string(total) ++ " " ++ error_word ++
+        " (" ++ nat_to_string(omitted) ++ " not shown; use --max-errors=0 to see all)"
+    } else {
+        prefix ++ ": aborting due to " ++ nat_to_string(total) ++ " " ++ error_word
+    }
+}

@@ -1,0 +1,113 @@
+// src/compiler/elab/error/render/helpers/formatting.tg
+// Notes/suggestions rendering and string formatting helpers.
+
+use lexer::span::Span;
+use elab::error::source::{SourceInfo, offset_to_line_col};
+use elab::error::list::Suggestion;
+use elab::error::render::colors::{Color, ColorCyan, ColorGreen, colorize};
+use elab::error::render::helpers::ListRenderStyle;
+use driver::ffi::{List, Nil, Cons, string_len};
+
+// ===========================================================================
+// NOTES AND SUGGESTIONS RENDERING
+// ===========================================================================
+
+pub fn render_string_list(base: String, list: List<String>, gutter_width: Nat, prefix: String) -> String {
+    let style: ListRenderStyle = { gutter_width: gutter_width, prefix: prefix, color: ColorCyan, use_color: false };
+    render_string_list_colored(base, list, style)
+}
+
+pub fn render_string_list_colored(
+    base: String, 
+    list: List<String>, 
+    style: ListRenderStyle
+) -> String {
+    match list {
+        Nil() => base,
+        Cons(s, rest) =>
+            let prefix_colored = colorize(style.prefix, style.color, style.use_color);
+            let line = "\n" ++ make_gutter(style.gutter_width) ++ " = " ++ prefix_colored ++ ": " ++ s;
+            render_string_list_colored(base ++ line, rest, style)
+    }
+}
+
+pub fn render_suggestions(base: String, list: List<Suggestion>, src: SourceInfo, gutter_width: Nat) -> String {
+    render_suggestions_colored(base, list, src, gutter_width, false)
+}
+
+pub fn render_suggestions_colored(
+    base: String, 
+    list: List<Suggestion>, 
+    src: SourceInfo, 
+    gutter_width: Nat,
+    use_color: Bool
+) -> String {
+    match list {
+        Nil() => base,
+        Cons(sugg, rest) =>
+            let lc = offset_to_line_col(src, sugg.span.start);
+            let sugg_prefix = colorize("suggestion", ColorGreen, use_color);
+            let try_prefix = colorize("try", ColorGreen, use_color);
+            let replacement = colorize(sugg.replacement, ColorGreen, use_color);
+            let sugg_line = "\n" ++ make_gutter(gutter_width) ++ " = " ++ sugg_prefix ++ ": " ++ sugg.message ++
+                           "\n" ++ make_gutter(gutter_width) ++ " | " ++ try_prefix ++ ": " ++ replacement;
+            render_suggestions_colored(base ++ sugg_line, rest, src, gutter_width, use_color)
+    }
+}
+
+// ===========================================================================
+// STRING FORMATTING HELPERS
+// ===========================================================================
+
+pub fn make_gutter(width: Nat) -> String {
+    make_spaces(width)
+}
+
+pub fn make_spaces(n: Nat) -> String {
+    repeat_string(" ", n)
+}
+
+pub fn make_carets(n: Nat) -> String {
+    repeat_string("^", n)
+}
+
+pub fn repeat_string(s: String, n: Nat) -> String {
+    if n == 0 {
+        ""
+    } else {
+        s ++ repeat_string(s, n - 1)
+    }
+}
+
+pub fn count_digits(n: Nat) -> Nat {
+    if n < 10 { 1 }
+    else if n < 100 { 2 }
+    else if n < 1000 { 3 }
+    else if n < 10000 { 4 }
+    else { 5 }
+}
+
+pub fn pad_left(s: String, width: Nat, padding: String) -> String {
+    let len = string_len(s);
+    if len >= width {
+        s
+    } else {
+        pad_left(padding ++ s, width, padding)
+    }
+}
+
+// ===========================================================================
+// COMMON MISTAKE DETECTION
+// ===========================================================================
+
+pub fn detect_common_mistake(text: String) -> List<Suggestion> {
+    Nil
+}
+
+pub fn suggest_brace_syntax(span: Span) -> Suggestion {
+    { span: span, replacement: "{ ... }", message: "Tungsten uses braces for if-then-else: if cond { then } else { else }" }
+}
+
+pub fn suggest_line_comment(span: Span) -> Suggestion {
+    { span: span, replacement: "//", message: "Tungsten uses // for line comments" }
+}

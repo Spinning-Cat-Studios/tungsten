@@ -1,0 +1,15 @@
+// AC10: Unannotated constructors inherit parent type visibility.
+// When the parent type is pub, unannotated constructors are also pub.
+
+mod helper;
+use helper::Token;
+use helper::Ident;
+use helper::Number;
+use helper::InternalMarker;
+
+fn main() -> Nat {
+    let a = Ident;
+    let b = Number;
+    let c = InternalMarker;
+    0
+}

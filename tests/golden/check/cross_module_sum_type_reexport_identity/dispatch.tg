@@ -1,0 +1,9 @@
+// Dispatch module: imports Opts from types and calls consumer::handle_opts.
+// This mirrors pipeline/mod.tg dispatching CmdExplain(opts) to run_explain(opts).
+
+use types::{Opts};
+use consumer::handle_opts;
+
+pub fn dispatch(opts: Opts) -> Nat {
+    handle_opts(opts)
+}

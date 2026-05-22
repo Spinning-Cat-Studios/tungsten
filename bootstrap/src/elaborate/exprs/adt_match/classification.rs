@@ -27,12 +27,42 @@ impl<'a> Elaborator<'a> {
         let mut catch_all_arm: Option<&ast::MatchArm> = None;
         let mut catch_all_span: Option<Span> = None;
 
-        for arm in arms.iter() {
+        for arm in arms {
             match &arm.pattern {
                 Pattern::Constructor(ref path, _, _) => {
                     self.classify_constructor_arm(arm, path, &mut ctor_arms, catch_all_span)?;
                 }
-                Pattern::Wildcard(s) | Pattern::Var(ast::Ident { span: s, .. }) => {
+                Pattern::Var(ref ident) => {
+                    // Check if this variable name is actually a nullary constructor
+                    // (the parser can't distinguish `Zero` as constructor vs variable)
+                    if let Some(idx) = constructors
+                        .iter()
+                        .position(|c| c.name == ident.name && c.fields.is_empty())
+                    {
+                        if let Some(catch_span) = catch_all_span {
+                            self.warn(
+                                ElabError::new(arm.pattern.span(), ElabErrorKind::UnreachableArm)
+                                    .with_span_note(
+                                        catch_span,
+                                        "this catch-all pattern matches all values",
+                                    )
+                                    .with_help(
+                                        "remove this arm or move the catch-all pattern to the end",
+                                    ),
+                            );
+                        } else {
+                            ctor_arms.entry(idx).or_default().push(arm);
+                        }
+                    } else {
+                        self.classify_catch_all_arm(
+                            arm,
+                            ident.span,
+                            &mut catch_all_arm,
+                            &mut catch_all_span,
+                        );
+                    }
+                }
+                Pattern::Wildcard(s) => {
                     self.classify_catch_all_arm(arm, *s, &mut catch_all_arm, &mut catch_all_span);
                 }
                 _ => {
@@ -43,9 +73,6 @@ impl<'a> Elaborator<'a> {
                 }
             }
         }
-
-        // Suppress unused warning - constructors is used for context
-        let _ = constructors;
 
         Ok(ClassifiedArms {
             ctor_arms,

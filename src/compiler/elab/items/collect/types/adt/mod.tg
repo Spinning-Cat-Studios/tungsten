@@ -1,0 +1,136 @@
+// src/compiler/elab/items/collect/types/adt/mod.tg
+// ADT body elaboration: sum types, records, type aliases, and constructors.
+
+pub mod sum;
+pub mod record;
+
+use lexer::span::Span;
+use parser::ast::{
+    TypeDef, TypeAliasDef,
+    TypeDefBody, TypeDefAlias, TypeDefAdt, TypeDefRecord,
+    TypeParam, TypeExpr,
+    Visibility,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_len;
+use elab::ffi::{TypeHandle, INVALID_HANDLE};
+use elab::env::{
+    Env,
+    env_register_constructor,
+    ConstructorInfo, constructor_info_new, CtorIdentity
+};
+use elab::adt::{AdtEncoding, AdtVariant, encode_adt};
+use elab::types::{ElabTypeResult, ElabTypeOk, ElabTypeErr, elab_type};
+use elab::items::result::{
+    ElabContext, elab_context_with_env, elab_context_add_error
+};
+use elab::error::elab_error_simple;
+use elab::items::collect::types::helpers::{
+    push_type_params, pop_type_params,
+    TypeRegInfo,
+    update_type_encoding, update_type_encoding_with_record_fields,
+    encode_fields_to_product
+};
+use elab::items::collect::types::adt::sum::elaborate_sum_body;
+use elab::items::collect::types::adt::record::elaborate_record_body;
+
+// ===========================================================================
+// ADT BODY ELABORATION
+// ===========================================================================
+
+/// Elaborate an ADT body (sum type or record).
+pub fn elaborate_adt_body(ctx: ElabContext, def: TypeDef) -> ElabContext {
+    let type_name = ident_name(def.name);
+    
+    // Push type parameters into scope
+    let ctx2 = push_type_params(ctx, def.type_params);
+    
+    // Elaborate variants/fields into List<AdtVariant>
+    match def.body {
+        TypeDefAdt(variant_list) => {
+            let (ctx3, variants, is_recursive) = elaborate_sum_body(ctx2, variant_list, type_name);
+            let encoding = encode_adt(type_name, variants, is_recursive);
+            let reg: TypeRegInfo = { name: type_name, type_handle: encoding.type_handle, vis: def.vis, span: def.span };
+            let ctx4 = update_type_encoding(ctx3, reg);
+            let ctx5 = register_adt_constructors(ctx4, variants, reg);
+            pop_type_params(ctx5, def.type_params)
+        },
+        TypeDefRecord(field_list) => {
+            let (ctx3, body) = elaborate_record_body(ctx2, field_list, type_name);
+            let encoding = encode_adt(type_name, body.variants, body.is_recursive);
+            let reg: TypeRegInfo = { name: type_name, type_handle: encoding.type_handle, vis: def.vis, span: def.span };
+            let ctx4 = update_type_encoding_with_record_fields(ctx3, reg, body.field_info);
+            pop_type_params(ctx4, def.type_params)
+        },
+        TypeDefAlias(_) =>
+            // Type aliases are handled by elaborate_alias_body, not here
+            pop_type_params(ctx2, def.type_params)
+    }
+}
+
+// ===========================================================================
+// CONSTRUCTOR REGISTRATION
+// ===========================================================================
+
+/// Register constructors for an ADT's variants.
+fn register_adt_constructors(
+    ctx: ElabContext,
+    variants: List<AdtVariant>,
+    reg: TypeRegInfo
+) -> ElabContext {
+    register_constructors_rec(ctx, variants, reg, 0)
+}
+
+/// Register constructors recursively with index.
+fn register_constructors_rec(
+    ctx: ElabContext,
+    variants: List<AdtVariant>,
+    reg: TypeRegInfo,
+    index: Nat
+) -> ElabContext {
+    match variants {
+        Nil() => ctx,
+        Cons(variant, rest) => {
+            let field_types = encode_fields_to_product(variant.fields);
+            let arity = list_len(variant.fields);
+            let id: CtorIdentity = { name: variant.name, parent_type: reg.name, index: index, arity: arity };
+            let info = constructor_info_new(
+                id,
+                field_types,
+                reg.type_handle,
+                reg.vis,
+                reg.span
+            );
+            let env2 = env_register_constructor(ctx.env, info);
+            let ctx2 = elab_context_with_env(ctx, env2);
+            register_constructors_rec(ctx2, rest, reg, index + 1)
+        }
+    }
+}
+
+// ===========================================================================
+// TYPE ALIAS ELABORATION
+// ===========================================================================
+
+/// Elaborate a type alias.
+pub fn elaborate_alias_body(ctx: ElabContext, def: TypeAliasDef) -> ElabContext {
+    let type_name = ident_name(def.name);
+    
+    // Push type parameters
+    let ctx2 = push_type_params(ctx, def.type_params);
+    
+    // Elaborate the aliased type
+    match elab_type(ctx2.env, def.ty) {
+        ElabTypeErr(err) => {
+            let elab_err = elab_error_simple(err.message, err.span);
+            let ctx3 = elab_context_add_error(ctx2, elab_err);
+            pop_type_params(ctx3, def.type_params)
+        },
+        ElabTypeOk(ty_handle, _) => {
+            let reg: TypeRegInfo = { name: type_name, type_handle: ty_handle, vis: def.vis, span: def.span };
+            let ctx3 = update_type_encoding(ctx2, reg);
+            pop_type_params(ctx3, def.type_params)
+        }
+    }
+}

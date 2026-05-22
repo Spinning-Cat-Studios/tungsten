@@ -1,0 +1,123 @@
+name: Promote to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to promote (e.g. v1.5.0)'
+        required: true
+        type: string
+      mode:
+        description: 'Promotion mode: squash (rsync-based) or replay (per-commit)'
+        required: false
+        type: choice
+        options:
+          - replay
+          - squash
+        default: replay
+      dry-run:
+        description: 'Dry run only (validate without modifying production)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: CI Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy -p tungsten_core -p tungsten_bootstrap -p tungsten_snapshot --no-default-features -- -D warnings
+
+      - name: Unit tests
+        run: cargo test -p tungsten_core -p tungsten_bootstrap -p tungsten_snapshot --no-default-features
+
+  promote:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs: [checks]
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: staging
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: staging
+
+      - name: Clone production repo
+        run: |
+          git clone "https://x-access-token:${{ secrets.PRODUCTION_REPO_PAT }}@github.com/Spinning-Cat-Studios/tungsten.git" production
+
+      - name: Build promote tool
+        working-directory: staging
+        run: cargo build --release -p tungsten_snapshot
+
+      - name: Validate and preview (dry-run)
+        run: |
+          staging/target/release/tungsten-snapshot promote \
+            "${{ inputs.version }}" \
+            --staging-dir staging \
+            --production-dir production \
+            --mode "${{ inputs.mode }}" \
+            --staging-repo "Spinning-Cat-Studios/tungsten-staging" \
+            --dry-run --json
+
+      - name: Apply promotion
+        if: inputs.dry-run == false
+        run: |
+          staging/target/release/tungsten-snapshot promote \
+            "${{ inputs.version }}" \
+            --staging-dir staging \
+            --production-dir production \
+            --mode "${{ inputs.mode }}" \
+            --staging-repo "Spinning-Cat-Studios/tungsten-staging"
+
+      - name: Commit, tag, and push
+        if: inputs.dry-run == false
+        run: |
+          cd production
+          VERSION="${{ inputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git add .
+          git diff --cached --stat
+
+          # Build commit message: version as subject, changelog as body
+          CHANGELOG="changelog/v${VERSION_NUM}.md"
+          if [ -f "$CHANGELOG" ]; then
+            # Use blank line separator between subject and body
+            printf '%s\n\n' "$VERSION" > /tmp/commit-msg
+            cat "$CHANGELOG" >> /tmp/commit-msg
+            git commit -F /tmp/commit-msg || echo "No changes to commit"
+          else
+            git commit -m "$VERSION" || echo "No changes to commit"
+          fi
+
+          git tag "$VERSION"
+          git push origin main --tags

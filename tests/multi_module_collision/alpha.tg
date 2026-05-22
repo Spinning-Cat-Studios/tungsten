@@ -1,0 +1,5 @@
+/// Alpha module — has a function named `compute`.
+pub fn compute() -> Nat { 10 }
+
+/// A helper only used within alpha.
+fn helper() -> Nat { 5 }

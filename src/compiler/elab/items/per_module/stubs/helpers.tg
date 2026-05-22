@@ -1,0 +1,73 @@
+// Phase A stub helpers: parameter extraction and export list merging.
+//
+// See ADR 6.5.26e §2.1, ADR 20.5.26e §2.3.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_reverse};
+use parser::ast::nodes::{TypeParam};
+use parser::ast::common::{ident_name};
+use elab::items::per_module::types::{
+    TypeDefExport, ConstructorExport
+};
+use elab::items::per_module::stubs::{StubExports};
+
+// ===========================================================================
+// PARAMETER EXTRACTION
+// ===========================================================================
+
+/// Extract type parameter names from AST nodes.
+pub fn extract_param_names(params: List<TypeParam>) -> List<String> {
+    list_reverse(extract_param_names_acc(params, Nil))
+}
+
+fn extract_param_names_acc(params: List<TypeParam>, acc: List<String>) -> List<String> {
+    match params {
+        Nil() => acc,
+        Cons(param, rest) =>
+            extract_param_names_acc(rest, Cons(ident_name(param.name), acc))
+    }
+}
+
+// ===========================================================================
+// STUB EXPORTS MERGING
+// ===========================================================================
+
+/// Merge two StubExports.
+pub fn merge_stub_exports(a: StubExports, b: StubExports) -> StubExports {
+    {
+        types: append_type_exports(a.types, b.types),
+        constructors: append_ctor_exports(a.constructors, b.constructors)
+    }
+}
+
+/// Append two lists of TypeDefExport.
+fn append_type_exports(
+    a: List<TypeDefExport>, b: List<TypeDefExport>
+) -> List<TypeDefExport> {
+    append_type_exports_acc(list_reverse(a), b)
+}
+
+fn append_type_exports_acc(
+    reversed_a: List<TypeDefExport>, b: List<TypeDefExport>
+) -> List<TypeDefExport> {
+    match reversed_a {
+        Nil() => b,
+        Cons(x, rest) => append_type_exports_acc(rest, Cons(x, b))
+    }
+}
+
+/// Append two lists of ConstructorExport.
+fn append_ctor_exports(
+    a: List<ConstructorExport>, b: List<ConstructorExport>
+) -> List<ConstructorExport> {
+    append_ctor_exports_acc(list_reverse(a), b)
+}
+
+fn append_ctor_exports_acc(
+    reversed_a: List<ConstructorExport>, b: List<ConstructorExport>
+) -> List<ConstructorExport> {
+    match reversed_a {
+        Nil() => b,
+        Cons(x, rest) => append_ctor_exports_acc(rest, Cons(x, b))
+    }
+}

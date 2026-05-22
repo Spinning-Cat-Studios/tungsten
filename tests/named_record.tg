@@ -1,0 +1,51 @@
+// Test: Named record constructors (ADR 13.5.26h)
+// Verifies synth-mode `TypeName { field: value }` syntax.
+
+pub type Point = { x: Nat, y: Nat }
+
+// AC2: infer type Point from named constructor
+pub fn test_named_record_basic() -> Nat {
+    let p = Point { x: 7, y: 3 };
+    expect_type(p, "Point");
+    p.x
+}
+
+// AC7: field order is independent
+pub fn test_named_record_reversed() -> Nat {
+    let p = Point { y: 3, x: 7 };
+    expect_type(p, "Point");
+    p.x
+}
+
+// AC8: works as function argument in synth mode
+pub fn take_point(p: Point) -> Nat {
+    p.x
+}
+
+pub fn test_named_record_as_argument() -> Nat {
+    take_point(Point { x: 42, y: 0 })
+}
+
+// AC3: field type mismatch produces E0010
+pub fn test_named_record_type_mismatch() -> Nat {
+    expect_error(Point { x: true, y: 3 }, "E0010");
+    0
+}
+
+// AC4: non-record type name produces clear error
+pub type Color =
+    | Red
+    | Green
+    | Blue
+
+pub fn test_named_record_on_adt() -> Nat {
+    expect_error(Color { x: 1 }, "E0050");
+    0
+}
+
+// Check-mode fallthrough: explicit annotation + named constructor
+pub fn test_named_record_check_mode() -> Nat {
+    let p: Point = Point { x: 10, y: 20 };
+    expect_type(p, "Point");
+    p.y
+}

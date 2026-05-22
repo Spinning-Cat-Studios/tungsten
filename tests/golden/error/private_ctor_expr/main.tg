@@ -1,0 +1,9 @@
+// AC2: Private constructor usage from another module produces E0016.
+// PrivToken is private, so its constructors are private too.
+
+mod helper;
+
+fn main() -> Nat {
+    let x = helper::Secret;
+    0
+}

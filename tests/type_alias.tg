@@ -1,0 +1,82 @@
+// tests/type_alias.tg
+// Tests for generic type alias support — ADR 15.5.26g
+
+type Result<T, E> =
+    | Err(E)
+    | Ok(T)
+
+type Option<T> =
+    | None
+    | Some(T)
+
+type Pair<A, B> = | MkPair(A, B)
+
+// ---- AC1: type Alias = Result<Nat, String> ----
+
+type NatResult = Result<Nat, String>
+
+fn test_ac1_transparent_alias() -> Unit {
+    let x: NatResult = Ok(42);
+    let _ = expect_type(x, "(String + Nat)");
+    ()
+}
+
+// ---- AC2: type Alias = ExistingType (bare identifier) ----
+
+type MyNat = Nat
+
+fn test_ac2_bare_ident_alias() -> Unit {
+    let x: MyNat = 42;
+    let _ = expect_type(x, "Nat");
+    ()
+}
+
+// ---- AC3: parameterised alias ----
+
+type Cursor = Nat
+
+type ParseError = String
+
+type ParseResult<T> = Result<(T, Cursor), ParseError>
+
+fn test_ac3_parameterised_alias() -> Unit {
+    let x: ParseResult<Nat> = Ok((42, 0));
+    let _ = expect_type(x, "(String + (Nat * Nat))");
+    ()
+}
+
+// ---- AC4: type Wrapper<T> = Option<T> ----
+
+type Wrapper<T> = Option<T>
+
+fn test_ac4_generic_wrapper() -> Unit {
+    let x: Wrapper<Nat> = Some(42);
+    let _ = expect_type(x, "(Unit + Nat)");
+    ()
+}
+
+// ---- AC5: ? works on parameterised alias over Result ----
+
+fn fallible_parse() -> ParseResult<Nat> {
+    Ok((42, 10))
+}
+
+fn test_ac5_try_on_alias() -> ParseResult<Nat> {
+    let val = fallible_parse()?;
+    let _ = expect_type(val, "(Nat * Nat)");
+    Ok(val)
+}
+
+// ---- AC9: ADT regression — constructor-style ADTs unchanged ----
+
+type Color = | Red | Green | Blue
+
+type Tree<T> = | Leaf(T) | Node(Tree<T>, Tree<T>)
+
+fn test_ac9_adt_still_works() -> Unit {
+    let c: Color = Red;
+    let _ = expect_type(c, "Color");
+    let t: Tree<Nat> = Leaf(42);
+    let _ = expect_type(t, "Tree<Nat>");
+    ()
+}

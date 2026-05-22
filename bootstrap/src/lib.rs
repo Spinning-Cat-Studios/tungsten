@@ -1,89 +1,63 @@
+// Clippy lint policy — see ADR 18.5.26h for triage decisions.
 #![allow(unknown_lints)]
-// Clippy lint policy: suppress pedantic/style lints at crate level.
-// These are all cosmetic — no correctness issues. Tighten incrementally in v1.5.
-#![allow(
-    // --- Clippy: style & formatting ---
-    clippy::uninlined_format_args,
-    clippy::unreadable_literal,
-    clippy::write_with_newline,
-    clippy::let_and_return,
-    clippy::bool_to_int_with_if,
-    clippy::range_plus_one,
-    // --- Clippy: documentation ---
-    clippy::doc_markdown,
-    clippy::doc_link_with_quotes,
-    clippy::doc_comment_double_space_linebreaks,
-    clippy::doc_lazy_continuation,
-    clippy::missing_errors_doc,
-    clippy::missing_panics_doc,
-    // --- Clippy: complexity & refactoring ---
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::type_complexity,
-    clippy::collapsible_if,
-    clippy::single_match_else,
-    clippy::redundant_else,
-    clippy::needless_continue,
-    clippy::if_not_else,
-    clippy::unnecessary_map_or,
-    clippy::manual_map,
-    clippy::manual_strip,
-    clippy::manual_let_else,
-    clippy::unnested_or_patterns,
-    // --- Clippy: must-use / API ---
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    // --- Clippy: match arms ---
-    clippy::match_same_arms,
-    // --- Clippy: closures & conversions ---
-    clippy::redundant_closure,
-    clippy::redundant_closure_for_method_calls,
-    clippy::useless_conversion,
-    clippy::explicit_iter_loop,
-    clippy::explicit_auto_deref,
-    clippy::cloned_instead_of_copied,
-    // --- Clippy: clone / copy ---
-    clippy::implicit_clone,
-    clippy::clone_on_copy,
-    clippy::assigning_clones,
-    // --- Clippy: error handling ---
-    clippy::result_large_err,
-    clippy::unnecessary_wraps,
-    clippy::io_other_error,
-    // --- Clippy: unused / dead ---
-    clippy::unused_self,
-    clippy::needless_pass_by_value,
-    clippy::only_used_in_recursion,
-    clippy::self_only_used_in_recursion, // Rust 1.93+ split from only_used_in_recursion
-    // --- Clippy: casting ---
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    // --- Clippy: imports ---
-    clippy::wildcard_imports,
-    // --- Clippy: borrows / references ---
-    clippy::needless_borrow,
-    clippy::needless_borrows_for_generic_args,
-    clippy::ptr_arg,
-    // --- Clippy: lifetimes ---
-    clippy::elidable_lifetime_names,
-    // --- Clippy: derivation ---
-    clippy::derivable_impls,
-    // --- Clippy: enum ---
-    clippy::large_enum_variant,
-    // --- Clippy: hasher ---
-    clippy::implicit_hasher,
-    // --- Clippy: option / map ---
-    clippy::map_unwrap_or,
-    clippy::option_map_unit_fn,
-    // --- Clippy: misc ---
-    clippy::missing_const_for_thread_local,
-    clippy::format_collect,
-    clippy::unnecessary_debug_formatting,
-    // --- Rustc warnings ---
-    unused_imports,
-    unused_variables,
-    dead_code,
-)]
+// Reason: devcontainer (1.95) and host (1.91) have different lint names
+// --- Keep: docs deferred to v2.0 ---
+#![allow(clippy::doc_markdown)] // Reason: docs deferred to v2.0 (369 instances)
+#![allow(clippy::doc_link_with_quotes)] // Reason: docs deferred to v2.0
+#![allow(clippy::doc_comment_double_space_linebreaks)] // Reason: docs deferred to v2.0
+#![allow(clippy::doc_lazy_continuation)] // Reason: docs deferred to v2.0
+#![allow(clippy::missing_errors_doc)] // Reason: docs deferred to v2.0 (53 instances)
+#![allow(clippy::missing_panics_doc)] // Reason: docs deferred to v2.0
+// --- Keep: permanent ---
+#![allow(clippy::result_large_err)] // Reason: TypeError is intentionally large (236 instances)
+#![allow(clippy::too_many_lines)] // Reason: governed by project check-complexity tooling
+#![allow(clippy::too_many_arguments)] // Reason: compiler pipeline functions take many context params; refactoring out of scope
+#![allow(clippy::type_complexity)] // Reason: elaboration types are inherently complex
+#![allow(clippy::large_enum_variant)]
+// Reason: AST/CIR enum variants vary widely; boxing smallest hurts ergonomics
+// --- Keep: style preference (widespread, fixing adds noise) ---
+#![allow(clippy::must_use_candidate)] // Reason: 134 instances; adding #[must_use] everywhere changes public API
+#![allow(clippy::return_self_not_must_use)] // Reason: builder-pattern methods; changes public API
+#![allow(clippy::match_same_arms)] // Reason: intentionally separate arms for clarity (42 instances)
+#![allow(clippy::manual_let_else)] // Reason: 59 instances; existing match-based let is idiomatic
+#![allow(clippy::needless_pass_by_value)] // Reason: 13 instances; changing to &T would ripple through call sites
+#![allow(clippy::unused_self)] // Reason: 35 instances; methods use &self for API consistency
+#![allow(clippy::only_used_in_recursion)]
+// Reason: recursive helper params are intentional
+// --- Keep: style preference (widespread, auto-fix incomplete) ---
+#![allow(clippy::uninlined_format_args)] // Reason: 159 instances; purely cosmetic, partial auto-fix
+#![allow(clippy::redundant_closure)] // Reason: auto-fix applied most; remainder are method calls
+#![allow(clippy::redundant_closure_for_method_calls)] // Reason: 38 instances; cosmetic
+#![allow(clippy::needless_lifetimes)] // Reason: auto-fix applied most
+#![allow(clippy::elidable_lifetime_names)] // Reason: 74 instances; cosmetic
+#![allow(clippy::ptr_arg)] // Reason: 15 instances; changing &PathBuf→&Path ripples through call sites
+#![allow(clippy::wildcard_imports)] // Reason: 13 instances; glob imports used for prelude-style modules
+#![allow(clippy::clone_on_copy)] // Reason: 12 instances; partial auto-fix applied
+#![allow(clippy::write_with_newline)] // Reason: explicit write! + \n preferred in codegen output
+#![allow(clippy::unnecessary_wraps)] // Reason: 10+6 instances; Result/Option wrappers for API consistency
+#![allow(clippy::similar_names)] // Reason: compiler variables naturally have similar names
+#![allow(clippy::stable_sort_primitive)] // Reason: 14 instances; sort() vs sort_unstable() perf is negligible here
+#![allow(clippy::format_push_string)] // Reason: 13 instances; format! + push_str used for readability
+#![allow(clippy::single_match_else)] // Reason: 12 instances; explicit match preferred for clarity
+#![allow(clippy::map_unwrap_or)] // Reason: 12 instances; map().unwrap_or() reads better than map_or()
+#![allow(clippy::if_not_else)] // Reason: 10 instances; negated conditions sometimes read better
+#![allow(clippy::unnecessary_map_or)] // Reason: 10 instances; map_or used for readability
+#![allow(clippy::implicit_clone)] // Reason: 8 instances; .to_string() on &String is idiomatic
+#![allow(clippy::format_collect)] // Reason: 7 instances; format!+collect pattern used in codegen
+#![allow(clippy::struct_excessive_bools)] // Reason: config/options structs naturally have many bool fields
+#![allow(clippy::option_map_unit_fn)] // Reason: map() for side effects is sometimes clearer
+#![allow(clippy::ref_option)] // Reason: &Option<T> used at API boundaries
+#![allow(clippy::collapsible_if)] // Reason: separate if blocks preferred for clarity
+#![allow(clippy::match_wildcard_for_single_variants)] // Reason: _ catch-all is intentional for future variants
+// --- Keep: FFI / casting ---
+#![allow(clippy::cast_possible_truncation)] // Reason: handle/index casts checked at call sites
+#![allow(clippy::cast_precision_loss)] // Reason: intentional f64 conversions for stats/profiling
+#![allow(clippy::borrow_as_ptr)]
+// Reason: FFI code using &x as *const _ is idiomatic
+// --- Keep: rustc warnings (in-progress code) ---
+#![allow(unused_imports)] // Reason: modules under active development
+#![allow(unused_variables)] // Reason: modules under active development
+#![allow(dead_code)] // Reason: modules under active development
 
 //! Bootstrap compiler for the Tungsten proof language.
 //!
@@ -149,15 +123,17 @@
 pub mod ast;
 pub mod cache;
 pub mod config;
+pub mod doctor;
 pub mod driver;
 pub mod elaborate;
 pub mod error;
+pub mod fold_analysis;
 pub mod lexer;
 pub mod parser;
+pub mod sidecar;
 pub mod span;
 pub mod token;
 pub mod utils;
-
 // Re-exports for convenience
 pub use ast::{
     AxiomDef, BinOp, Expr, Field, FunctionDef, Ident, Item, LambdaParam, LiteralPattern, MatchArm,
@@ -166,8 +142,8 @@ pub use ast::{
 };
 pub use cache::BuildCache;
 pub use elaborate::{
-    elaborate, elaborate_with_warnings, CoreDef, ElabError, ElabErrorKind, ElabOutput, Elaborator,
-    Env,
+    elaborate, elaborate_with_warnings, elaborate_with_warnings_full, AdtOrigin, CoreDef,
+    ElabError, ElabErrorKind, ElabOutput, Elaborator, Env, Note, TraceFrame, TypeProvenance,
 };
 pub use error::{
     Diagnostic, DiagnosticRenderer, Label, LexError, ParseError, Severity, Suggestion,

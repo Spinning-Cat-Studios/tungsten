@@ -1,0 +1,138 @@
+// src/compiler/elab/exprs/bind/lambda.tg
+// Lambda elaboration (synth and check modes).
+// Produces both Core terms (TermHandle) and CodegenIR in lockstep.
+//
+// Split from bindings.tg for code-health compliance (300-line limit).
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, ExprLambda,
+    Pattern,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr,
+    LambdaParam
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_lambda,
+    tg_type_arrow,
+    tg_string_to_cstr
+};
+use elab::env::{Env, env_bind_local};
+use elab::types::{elab_type, ElabTypeResult, ElabTypeOk, ElabTypeErr};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, type_error_to_expr_error,
+    pattern_to_name
+};
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CIRLambda,
+    ct_arrow, ct_unit,
+    type_handle_to_codegen_type
+};
+use elab::cir::free_vars::free_vars;
+use elab::exprs::{synth, synth_and_compare};
+
+/// Continuation context for lambda parameter elaboration.
+type LambdaCont = { rest: List<LambdaParam>, body: Expr, span: Span }
+
+// ===========================================================================
+// LAMBDA ELABORATION
+// ===========================================================================
+
+/// Synthesize a lambda (requires annotation on parameter).
+pub fn synth_lambda(
+    env: Env,
+    params: List<LambdaParam>,
+    body: Expr,
+    span: Span
+) -> ElabExprResult {
+    match params {
+        Nil() =>
+            synth(env, body),
+        Cons(param, rest) =>
+            synth_lambda_param(env, param, rest, body, span)
+    }
+}
+
+fn synth_lambda_param(
+    env: Env,
+    param: LambdaParam,
+    rest: List<LambdaParam>,
+    body: Expr,
+    span: Span
+) -> ElabExprResult {
+    let name = pattern_to_name(param.pattern);
+    match param.ty {
+        NoTypeExpr() =>
+            ElabExprErr(elab_expr_error(
+                "lambda parameter requires type annotation in synth mode",
+                span
+            )),
+        SomeTypeExpr(ty_expr) =>
+            let cont: LambdaCont = { rest: rest, body: body, span: span };
+            synth_lambda_typed(env, name, ty_expr, cont)
+    }
+}
+
+fn synth_lambda_typed(
+    env: Env,
+    name: String,
+    ty_expr: TypeExpr,
+    cont: LambdaCont
+) -> ElabExprResult {
+    match elab_type(env, ty_expr) {
+        ElabTypeErr(e) => ElabExprErr(type_error_to_expr_error(e)),
+        ElabTypeOk(param_ty, param_ct) =>
+            let env2 = env_bind_local(env, name, param_ty);
+            let remaining_body = wrap_remaining_params(cont.rest, cont.body, cont.span);
+            synth_lambda_body(env2, name, param_ty, param_ct, remaining_body)
+    }
+}
+
+fn synth_lambda_body(
+    env: Env,
+    name: String,
+    param_ty: TypeHandle,
+    param_ct: CodegenType,
+    remaining_body: Expr
+) -> ElabExprResult {
+    match synth(env, remaining_body) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body_term, body_ty, body_cir) =>
+            let name_ptr = tg_string_to_cstr(name);
+            let lam_term = tg_term_lambda(name_ptr, param_ty, body_term);
+            let lam_ty = tg_type_arrow(param_ty, body_ty);
+            let body_ct = type_handle_to_codegen_type(body_ty);
+            let captures = free_vars(body_cir, Cons(name, Nil()));
+            let lam_cir = CIRLambda(name, param_ct, body_cir, captures, body_ct);
+            let lam_ct = ct_arrow(param_ct, body_ct);
+            ElabExprOk(env2, lam_term, lam_ty, lam_cir)
+    }
+}
+
+/// Wrap remaining lambda parameters around a body.
+fn wrap_remaining_params(params: List<LambdaParam>, body: Expr, span: Span) -> Expr {
+    match params {
+        Nil() => body,
+        _ => ExprLambda(params, body, span)
+    }
+}
+
+/// Check a lambda against an expected function type.
+pub fn check_lambda(
+    env: Env,
+    params: List<LambdaParam>,
+    body: Expr,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    // Expected should be an Arrow type
+    // For now, we can't inspect TypeHandle structure, so fall back to synth
+    // In a full implementation, we'd decompose Arrow(param_ty, body_ty)
+    
+    // TODO: Need FFI to decompose Arrow types
+    // For now, require annotation
+    synth_and_compare(env, ExprLambda(params, body, span), expected)
+}

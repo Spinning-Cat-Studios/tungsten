@@ -1,0 +1,95 @@
+// src/compiler/elab/items/imports/lookup.tg
+// Module item lookup helpers for import resolution.
+
+use parser::ast::{Visibility, VisPublic};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_append;
+use elab::env::{
+    Env, ElabModulePath,
+    ModuleContents,
+    MaybeTypeDef, SomeTypeDef, NoTypeDef,
+    MaybeValueDef, SomeValueDef, NoValueDef,
+    MaybeConstructor, SomeConstructor, NoConstructor,
+    TypeDefInfo, ValueDefInfo, ConstructorInfo,
+    module_map_lookup, MaybeModuleContents, SomeModuleContents, NoModuleContents,
+    type_def_list_lookup, value_def_list_lookup, constructor_list_lookup,
+    import_list_lookup, MaybeImport, SomeImport, NoImport
+};
+
+/// Check if module contents contain a name in any namespace.
+/// Lookup order: types → values → constructors → imports.
+fn contents_has_name(contents: ModuleContents, name: String) -> Bool {
+    let NoTypeDef() = type_def_list_lookup(contents.types, name) else { return true };
+    let NoValueDef() = value_def_list_lookup(contents.values, name) else { return true };
+    let NoConstructor() = constructor_list_lookup(contents.constructors, name) else { return true };
+    let NoImport() = import_list_lookup(contents.imports, name) else { return true };
+    false
+}
+
+/// Look up an item in a module (type, value, constructor, or re-export).
+// All four namespaces must be checked. See 2.5.26g for the bug
+// where constructors were missing from this chain.
+pub fn lookup_in_module(env: Env, path: ElabModulePath, name: String) -> Bool {
+    match module_map_lookup(env.modules, path) {
+        NoModuleContents() => false,
+        SomeModuleContents(contents) => contents_has_name(contents, name)
+    }
+}
+
+/// Get all public items from a module.
+pub fn get_module_public_items(env: Env, path: ElabModulePath) -> List<String> {
+    match module_map_lookup(env.modules, path) {
+        NoModuleContents() => Nil,
+        SomeModuleContents(contents) =>
+            let type_names = get_public_type_names(contents.types);
+            let value_names = get_public_value_names(contents.values);
+            let ctor_names = get_public_constructor_names(contents.constructors);
+            list_append(type_names, list_append(value_names, ctor_names))
+    }
+}
+
+fn is_public(vis: Visibility) -> Bool {
+    match vis {
+        VisPublic() => true,
+        _ => false
+    }
+}
+
+/// Extract names of public types.
+fn get_public_type_names(types: List<TypeDefInfo>) -> List<String> {
+    match types {
+        Nil() => Nil,
+        Cons(def, rest) =>
+            if is_public(def.visibility) {
+                Cons(def.name, get_public_type_names(rest))
+            } else {
+                get_public_type_names(rest)
+            }
+    }
+}
+
+/// Extract names of public values.
+fn get_public_value_names(values: List<ValueDefInfo>) -> List<String> {
+    match values {
+        Nil() => Nil,
+        Cons(def, rest) =>
+            if is_public(def.visibility) {
+                Cons(def.name, get_public_value_names(rest))
+            } else {
+                get_public_value_names(rest)
+            }
+    }
+}
+
+/// Extract names of public constructors.
+fn get_public_constructor_names(ctors: List<ConstructorInfo>) -> List<String> {
+    match ctors {
+        Nil() => Nil,
+        Cons(info, rest) =>
+            if is_public(info.visibility) {
+                Cons(info.name, get_public_constructor_names(rest))
+            } else {
+                get_public_constructor_names(rest)
+            }
+    }
+}

@@ -1,0 +1,4 @@
+// Alpha module — defines its own local 'helper' returning 10.
+fn helper() -> Nat { 10 }
+
+pub fn run() -> Nat { helper() }

@@ -20,7 +20,7 @@ Pre-built binaries are available for macOS (ARM64) and Linux (x86_64) on the [Re
 **macOS note:** The binaries are not code-signed. macOS will show a "cannot be verified" dialog on first run. To fix this:
 
 ```bash
-xattr -d com.apple.quarantine tungsten libtungsten_core.dylib tungsten-bootstrap
+xattr -d com.apple.quarantine tungsten tungsten-bootstrap
 ```
 
 You can verify download integrity with the `checksums.txt` file included in each release:
@@ -176,29 +176,48 @@ Error: type mismatch
 
 - **Self-hosted compiler** — the compiler compiles itself, with verified triple-compile fixed point
 - **Type checking** — dependent types, generics, ADTs, records, pattern matching
-- **Native compilation** — LLVM 18 backend produces native binaries
+- **Native compilation** — LLVM 18 backend produces native binaries (macOS ARM64 + Linux x86_64)
 - **Proofs** — dependent types enable theorem proving (see `examples/proof.tg`)
 - **AI-friendly diagnostics** — rich errors with Levenshtein suggestions and contextual hints
-- **Rust-style modules** — `mod`, `use`, with incremental build cache
+- **Rust-style modules** — `mod`, `use`, with per-module compilation and elaboration caching
 - **FFI** — `extern "C" fn` for calling C/Rust functions
+- **Early return** — `return expr` and `?` operator for Result/Option
+- **Pattern matching** — nested destructuring, `if let`, `let`-`else`, `try` blocks
+- **Parallel codegen** — per-function LLVM IR emission with parallel compilation
+- **Static linking** — single binary output, no `LD_LIBRARY_PATH` required
 
-### ⚠️ Known Limitations
+### ❗ Known Limitations
 
-- **Module resolution uses flattening** — full hierarchical resolution planned for v1.5
-- **Self-hosted native compiler currently macOS (ARM64) only** — Linux/x86_64 ships the bootstrap (Rust-built) compiler, which is fully functional. Self-hosted native compilation on x86_64 is planned for v1.5 while target-aware alignment and ABI work is completed
-- **Interpreter supports a reduced subset** — `tungsten run` reliably evaluates `Nat` arithmetic, `String` results, and simple functions, but does not yet reduce eliminators (`if`/`else`, `match`, record field access). Native compilation (`tungsten compile`) handles all features correctly. Fix planned for v1.5
-- **`tungsten run` in macOS release binary** — the self-hosted binary shipped in the macOS archive always prints `()` due to a codegen bug with record field access. Use `tungsten compile` instead, which works correctly. Fix planned for v1.5
 - **No borrow checker** — memory safety relies on immutability; mutable references require manual care
-- **Proof tactics not yet exposed** — equality types exist in the core but surface syntax for tactics is planned for v1.5
 
-### ❌ Not Yet (v1.5 / v2.0)
+### ❌ Not Yet (v2.0 / v2.1 / v2.2)
 
-- LSP / IDE support
-- Formatter
+**v2.0** — production-readiness:
+- Termination checking (structural recursion verification)
+- Universe hierarchy (`Type 0 : Type 1 : ...`)
+- Tactic language (simp, induction, rewrite)
+- LSP (minimal: go-to-definition, hover)
 - `let mut` syntax
+- Package manifest (`tungsten.toml`)
+- DWARF source-level debugging
+
+**v2.1** — ecosystem & adoption:
+- Borrow checker
+- Type classes / traits
+- Inductive families (indexed types)
+- Proof irrelevance (Prop universe, compile-time proof erasure)
+- Crypto & networking primitives (type-safe sockets, TLS)
+- Provable network models (session types, failure reasoning)
+- Full LSP with completions
 - REPL
 - Lean4 transpiler
-- Tactic language
+- Community contributions (see [CONTRIBUTING.md](CONTRIBUTING.md))
+
+**v2.2** — proof language maturity:
+- Metaprogramming framework (custom tactics in Tungsten)
+- User-defined notation and syntax extensions
+- Quotient types
+- Automatic type coercions
 
 ## Project Structure
 
@@ -267,6 +286,36 @@ make test
 make check-golden
 ```
 
+### Profiling & Benchmarking
+
+Requires [mise](https://mise.jdx.dev/) for tool management. One-time setup:
+
+```bash
+mise install          # installs samply + hyperfine from .mise.toml
+# or explicitly:
+make setup-profiling
+```
+
+**Profile** — CPU sampling profiler, opens Firefox Profiler UI in your browser:
+
+```bash
+make profile                          # profile the self-hosted compiler check
+make profile FILE=examples/hello.tg   # profile a specific file
+```
+
+**Benchmark** — statistical timing (N runs, warmup, mean/stddev/min/max):
+
+```bash
+make bench                            # benchmark the self-hosted compiler check
+make bench FILE=examples/hello.tg     # benchmark a specific file
+```
+
+**Compare** — side-by-side benchmark of two binaries:
+
+```bash
+make bench-compare A=./tungsten1 B=./tungsten2
+```
+
 ### LLVM Setup (for native compilation)
 
 **macOS (Homebrew):**
@@ -290,7 +339,7 @@ If building without LLVM, use `--no-default-features` to disable the codegen fea
 
 ## Stability
 
-Tungsten 1.0 means the compiler pipeline is self-hosted and usable. The language is still evolving; breaking changes may occur until 2.0. Semver applies to tooling releases, not language surface stability.
+Tungsten 1.5 means the compiler pipeline is self-hosted, performant, and feature-complete for its core use cases. The language is still evolving; breaking changes may occur until 2.0. Semver applies to tooling releases, not language surface stability.
 
 ## Support
 
@@ -298,7 +347,7 @@ Tungsten is a personal research project; support is best-effort. Bug reports wit
 
 ## Contributing
 
-Bug reports, questions, and documentation fixes are welcome. Pull requests are not being accepted for v1.0 — see [CONTRIBUTING.md](CONTRIBUTING.md) for details and the plan for v1.5.
+Bug reports, questions, and documentation fixes are welcome. Pull requests are not being accepted at this time — see [CONTRIBUTING.md](CONTRIBUTING.md) for details and the plan for v2.0.
 
 ## License
 

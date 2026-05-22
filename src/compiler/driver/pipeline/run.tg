@@ -1,0 +1,167 @@
+// src/compiler/driver/pipeline/run.tg
+// Run pipeline: check + evaluate main.
+
+use driver::ffi::{
+    eprintln, println, stderr_is_tty,
+    List, Nil, Cons,
+    EvalEnvHandle, eval_env_new, eval_env_add, eval_env_free,
+    eval_run, eval_display_value
+};
+use driver::util::{
+    Result, Ok, Err, Option, Some, None,
+    string_eq, not, nat_to_string
+};
+use driver::cli::{RunOpts};
+use driver::modules::{
+    ParsedModule,
+    parse_module_tree, build_module_info,
+    parsed_module_parse_errors, parsed_module_lex_errors
+};
+use parser::error::{parse_has_errors, parse_error_count};
+use lexer::error::{has_errors, error_count};
+use elab::env::types::{ElabCompile};
+use elab::items::{ElabResult, elab_result_ok, elab_result_error_count};
+use elab::items::result::ElabDef;
+use elab::items::per_module::{elaborate_module_tree};
+use elab::error::{
+    errors_deduplicate,
+    SourceInfo, source_info_new,
+    render_diagnostics_limited
+};
+use elab::error::render::colors::{colorize_bold, ColorRed, ColorCyan};
+use elab::ffi::{TermHandle};
+use driver::pipeline::{PipelineResult, PipelineOk, PipelineErr};
+use driver::pipeline::errors::{render_lex_parse_errors, get_module_source};
+
+// ===========================================================================
+// RUN PIPELINE
+// ===========================================================================
+
+/// Run the run pipeline: check + evaluate main.
+pub fn run_run(opts: RunOpts) -> PipelineResult {
+    let use_color = stderr_is_tty();
+    let max_errors = opts.max_errors;
+    
+    match parse_module_tree(opts.file, Nil) {
+        Err(err_msg) => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++ ": " ++ err_msg);
+            PipelineErr(1)
+        },
+        Ok(result) => {
+            let (module, _visited) = result;
+            run_parsed_module(module, opts, use_color, max_errors)
+        }
+    }
+}
+
+/// Run a parsed module: check for errors, elaborate, then evaluate main.
+fn run_parsed_module(module: ParsedModule, opts: RunOpts,
+                     use_color: Bool, max_errors: Nat) -> PipelineResult {
+    let lex_errs = parsed_module_lex_errors(module);
+    let parse_errs = parsed_module_parse_errors(module);
+    
+    if has_errors(lex_errs) || parse_has_errors(parse_errs) {
+        let total_errs = error_count(lex_errs) + parse_error_count(parse_errs);
+        render_lex_parse_errors(module, max_errors, use_color);
+        PipelineErr(total_errs)
+    } else {
+        elaborate_and_run(module, opts, use_color, max_errors)
+    }
+}
+
+/// Elaborate module and run main if successful.
+fn elaborate_and_run(module: ParsedModule, opts: RunOpts,
+                     use_color: Bool, max_errors: Nat) -> PipelineResult {
+    let module_info = build_module_info(module);
+    // Per-module elaboration (W6.3a)
+    let elab_result = elaborate_module_tree(module, module_info, ElabCompile);
+    
+    if not(elab_result_ok(elab_result)) {
+        let source = get_module_source(module);
+        let src_info = source_info_new(opts.file, source);
+        let deduped = errors_deduplicate(elab_result.errors);
+        let rendered = render_diagnostics_limited(deduped, src_info, max_errors, use_color);
+        eprintln(rendered);
+        PipelineErr(elab_result_error_count(elab_result))
+    } else {
+        find_and_run_main(elab_result.defs, opts, use_color)
+    }
+}
+
+/// Find main function and evaluate it.
+fn find_and_run_main(defs: List<ElabDef>, opts: RunOpts, use_color: Bool) -> PipelineResult {
+    match find_main_def(defs) {
+        None() => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++ 
+                    ": no `main` function found");
+            PipelineErr(1)
+        },
+        Some(main_def) => evaluate_main_def(main_def, defs, opts, use_color)
+    }
+}
+
+/// Build evaluation environment and evaluate main.
+fn evaluate_main_def(main_def: ElabDef, defs: List<ElabDef>,
+                     opts: RunOpts, use_color: Bool) -> PipelineResult {
+    let eval_env = eval_env_new();
+    build_eval_env_from_defs(eval_env, defs, main_def.name);
+    
+    if opts.verbose {
+        eprintln(colorize_bold("info", ColorCyan, use_color) ++ ": evaluating main()...")
+    };
+    
+    match eval_run(main_def.term, eval_env) {
+        None() => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++ ": evaluation failed");
+            eval_env_free(eval_env);
+            PipelineErr(1)
+        },
+        Some(result_handle) => display_eval_result(result_handle, eval_env, use_color)
+    }
+}
+
+/// Display evaluation result and clean up.
+fn display_eval_result(result_handle: TermHandle, eval_env: EvalEnvHandle,
+                       use_color: Bool) -> PipelineResult {
+    match eval_display_value(result_handle) {
+        None() => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++ ": could not display result");
+            eval_env_free(eval_env);
+            PipelineErr(1)
+        },
+        Some(result_str) => {
+            println(result_str);
+            eval_env_free(eval_env);
+            PipelineOk(1)
+        }
+    }
+}
+
+/// Find the main function in a list of elaborated definitions.
+fn find_main_def(defs: List<ElabDef>) -> Option<ElabDef> {
+    match defs {
+        Nil() => None(),
+        Cons(def, rest) => {
+            if string_eq(def.name, "main") {
+                Some(def)
+            } else {
+                find_main_def(rest)
+            }
+        }
+    }
+}
+
+/// Build evaluation environment from elaborated definitions.
+/// Adds all definitions except the one with skip_name.
+fn build_eval_env_from_defs(env: EvalEnvHandle, defs: List<ElabDef>, skip_name: String) -> Unit {
+    match defs {
+        Nil() => (),
+        Cons(def, rest) => {
+            if not(string_eq(def.name, skip_name)) {
+                let _ = eval_env_add(env, def.name, def.term);
+                ()
+            };
+            build_eval_env_from_defs(env, rest, skip_name)
+        }
+    }
+}

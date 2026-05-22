@@ -1,0 +1,228 @@
+// src/compiler/elab/cir/types.tg
+// CodegenIR and CodegenType — pure Tungsten ADTs for code generation.
+//
+// ## Design Principles
+//
+// 1. **Mirrors Core:** Every CodegenIR variant corresponds to a Core term
+// 2. **Named Variables:** Uses source names (not de Bruijn) for readability
+// 3. **Lockstep Construction:** Built alongside Core terms in elaboration
+// 4. **Proof Terms Kept:** CIRRefl, CIRSorry retained for now (erasure in Phase 3.5)
+//
+// ## Constructor Naming Conventions
+//
+// All constructors are prefixed with `CIR`. Domain-specific groups:
+//   Nat:     CIRZero, CIRSucc, CIRNatLit, CIRNatAdd/Sub/Mul/Div/Mod,
+//            CIRNatEq/Lt/Le/Gt/Ge
+//   Bool:    CIRTrue, CIRFalse (NOT CIRBoolLit), CIRBoolAnd/Or/Not
+//   String:  CIRString, CIRStrConcat/Eq/Len (NOT CIRStringLen)
+//   Sums:    CIRInl, CIRInr, CIRCase (7 fields)
+//
+// Use `tungsten info cir constructors <file>` to list all variants with
+// arities, or `tungsten info cir sites <Variant> <file>` to find usage sites.
+//
+// ## Variable Naming
+//
+// Variables use source names with numeric suffix for shadowing:
+//   - First binding: `x`
+//   - Shadowing: `x_1`, `x_2`, etc.
+//
+// This enables readable output while maintaining uniqueness.
+
+use lexer::span::Span;
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// ELAB STATEMENT INFO - For block elaboration
+// ===========================================================================
+
+// Elaborated statement info - saves the CIR from first elaboration pass
+pub type ElabStmtInfo =
+    | ElabStmtLetInfo(String, CodegenType, CodegenIR)  // name, type, rhs_cir
+    | ElabStmtExprInfo(CodegenIR)                       // expr_cir (discard result)
+    | ElabStmtSkip                                      // for items etc
+
+// ===========================================================================
+// CODEGEN IR - TERM REPRESENTATION
+// ===========================================================================
+
+/// CodegenIR - A pure Tungsten representation of Core terms.
+/// Used for Phase 3.5 code generation without FFI traversal.
+pub type CodegenIR =
+    // -------------------------------------------------------------------------
+    // Literals
+    // -------------------------------------------------------------------------
+    | CIRZero                                   // Natural number zero
+    | CIRSucc(CodegenIR)                        // Successor: succ(n)
+    | CIRNatLit(Nat)                            // Natural number literal
+    | CIRTrue                                   // Boolean true
+    | CIRFalse                                  // Boolean false
+    | CIRUnit                                   // Unit value: ()
+    | CIRString(String)                         // String literal
+    
+    // -------------------------------------------------------------------------
+    // Variables and References
+    // -------------------------------------------------------------------------
+    | CIRVar(String, CodegenType)                // Local variable by name + type
+    | CIRGlobal(String)                         // Global reference by qualified path
+    
+    // -------------------------------------------------------------------------
+    // Binding Forms
+    // -------------------------------------------------------------------------
+    | CIRLambda(String, CodegenType, CodegenIR, CIRCaptureList, CodegenType)
+        // Lambda: |name: param_ty| body, captures, ret_ty
+    | CIRApp(CodegenIR, CodegenIR, CodegenType, CodegenType)
+        // Application: f(arg), arg_type, return_type
+    | CIRLet(String, CodegenType, CodegenIR, CodegenIR)  // Let: let name: ty = def in body
+    | CIRFix(String, CodegenType, CodegenIR, CIRCaptureList)
+        // Fixed-point: fix name: ty. body, captures
+    
+    // -------------------------------------------------------------------------
+    // Pairs (Products)
+    // -------------------------------------------------------------------------
+    | CIRPair(CodegenIR, CodegenIR)             // Pair: (a, b)
+    | CIRFst(CodegenIR)                         // First projection: fst(p)
+    | CIRSnd(CodegenIR)                         // Second projection: snd(p)
+    
+    // -------------------------------------------------------------------------
+    // Sums (Coproducts)
+    // -------------------------------------------------------------------------
+    | CIRInl(CodegenIR, CodegenType)            // Left injection: inl(v) : A + B
+    | CIRInr(CodegenIR, CodegenType)            // Right injection: inr(v) : A + B
+    | CIRCase(CodegenIR, CodegenType, String, CodegenIR, String, CodegenIR, CodegenType)
+        // Case analysis: case scrut sum_type of inl(x) => left | inr(y) => right : result_type
+    
+    // -------------------------------------------------------------------------
+    // Arithmetic Operations
+    // -------------------------------------------------------------------------
+    | CIRNatAdd(CodegenIR, CodegenIR)           // Addition: a + b
+    | CIRNatSub(CodegenIR, CodegenIR)           // Subtraction: a - b
+    | CIRNatMul(CodegenIR, CodegenIR)           // Multiplication: a * b
+    | CIRNatDiv(CodegenIR, CodegenIR)           // Division: a / b
+    | CIRNatMod(CodegenIR, CodegenIR)           // Modulo: a % b
+    
+    // -------------------------------------------------------------------------
+    // Comparison Operations
+    // -------------------------------------------------------------------------
+    | CIRNatEq(CodegenIR, CodegenIR)            // Equality: a == b
+    | CIRNatLt(CodegenIR, CodegenIR)            // Less than: a < b
+    | CIRNatLe(CodegenIR, CodegenIR)            // Less or equal: a <= b
+    | CIRNatGt(CodegenIR, CodegenIR)            // Greater than: a > b
+    | CIRNatGe(CodegenIR, CodegenIR)            // Greater or equal: a >= b
+    
+    // -------------------------------------------------------------------------
+    // Boolean Operations
+    // -------------------------------------------------------------------------
+    | CIRBoolAnd(CodegenIR, CodegenIR)          // Logical AND: a && b
+    | CIRBoolOr(CodegenIR, CodegenIR)           // Logical OR: a || b
+    | CIRBoolNot(CodegenIR)                     // Logical NOT: !a
+    
+    // -------------------------------------------------------------------------
+    // String Operations
+    // -------------------------------------------------------------------------
+    | CIRStrConcat(CodegenIR, CodegenIR)        // Concatenation: a ++ b
+    | CIRStrEq(CodegenIR, CodegenIR)            // String equality: a == b
+    | CIRStrLen(CodegenIR)                      // String length: len(s)
+    
+    // -------------------------------------------------------------------------
+    // Control Flow
+    // -------------------------------------------------------------------------
+    | CIRIf(CodegenIR, CodegenIR, CodegenIR)    // Conditional: if c then t else e
+    
+    // -------------------------------------------------------------------------
+    // Recursive Types
+    // -------------------------------------------------------------------------
+    | CIRFold(CodegenType, CodegenIR)           // Fold into μ-type: fold[μX.T](v)
+    | CIRUnfold(CodegenType, CodegenIR)         // Unfold from μ-type: unfold[μX.T](v)
+    
+    // -------------------------------------------------------------------------
+    // References (Mutable State)
+    // -------------------------------------------------------------------------
+    | CIRRefNew(CodegenIR)                      // Create reference: ref(v)
+    | CIRRefGet(CodegenIR)                      // Dereference: *r
+    | CIRRefSet(CodegenIR, CodegenIR)           // Assignment: r := v
+    
+    // -------------------------------------------------------------------------
+    // Proof Terms (kept for debugging, erased in Phase 3.5)
+    // -------------------------------------------------------------------------
+    | CIRRefl(CodegenType, CodegenIR)           // Reflexivity: refl[T](e)
+    | CIRSorry(CodegenType)                     // Placeholder proof: sorry
+    
+    // -------------------------------------------------------------------------
+    // Polymorphism
+    // -------------------------------------------------------------------------
+    | CIRTypeAbs(String, CodegenIR)             // Type abstraction: Λα. body
+    | CIRTypeApp(CodegenIR, CodegenType)        // Type application: e[T]
+    
+    // -------------------------------------------------------------------------
+    // FFI
+    // -------------------------------------------------------------------------
+    | CIRExternCall(String, List<CodegenIR>)            // External call: extern "name"(args)
+    
+    // -------------------------------------------------------------------------
+    // Type Annotation (for explicit types)
+    // -------------------------------------------------------------------------
+    | CIRAnnot(CodegenIR, CodegenType)          // Type annotation: (e : T)
+    
+    // -------------------------------------------------------------------------
+    // Internal: Statement Collection (for block elaboration)
+    // -------------------------------------------------------------------------
+    | CIRStmtLet(String, CodegenType, CodegenIR)  // Collected let statement
+    | CIRStmtExpr(CodegenIR)                      // Collected expression statement
+    | CIRStmtList(List<ElabStmtInfo>)             // List of collected statements
+
+// ===========================================================================
+// CODEGEN TYPE - TYPE REPRESENTATION
+// ===========================================================================
+
+/// CodegenType - A pure Tungsten representation of Core types.
+pub type CodegenType =
+    // -------------------------------------------------------------------------
+    // Base Types
+    // -------------------------------------------------------------------------
+    | CTNat                                     // Natural numbers
+    | CTBool                                    // Booleans
+    | CTString                                  // Strings
+    | CTUnit                                    // Unit type
+    | CTVoid                                    // Empty type
+    | CTProp                                    // Propositions
+    
+    // -------------------------------------------------------------------------
+    // Compound Types
+    // -------------------------------------------------------------------------
+    | CTArrow(CodegenType, CodegenType)         // Function type: A -> B
+    | CTPair(CodegenType, CodegenType)          // Product type: A * B
+    | CTSum(CodegenType, CodegenType)           // Sum type: A + B
+    
+    // -------------------------------------------------------------------------
+    // Reference Types
+    // -------------------------------------------------------------------------
+    | CTRef(CodegenType)                        // Reference type: Ref<T>
+    | CTPtr(CodegenType)                        // Pointer type: *T
+    
+    // -------------------------------------------------------------------------
+    // Polymorphic Types
+    // -------------------------------------------------------------------------
+    | CTVar(String)                             // Type variable
+    | CTForall(String, CodegenType)             // Universal type: ∀α. T
+    
+    // -------------------------------------------------------------------------
+    // Recursive Types
+    // -------------------------------------------------------------------------
+    | CTMu(String, CodegenType)                 // Recursive type: μX. T
+    
+    // -------------------------------------------------------------------------
+    // Equality Types
+    // -------------------------------------------------------------------------
+    | CTEq(CodegenType, CodegenIR, CodegenIR)   // Equality type: a =_{T} b
+
+// ===========================================================================
+// CAPTURE LIST - For closure environment layout
+// ===========================================================================
+
+/// A captured variable: name + its codegen type.
+pub type CIRCapture = { name: String, ty: CodegenType }
+
+/// List of captured variables for a closure's environment.
+pub type CIRCaptureList =
+    | CIRCaptureNil
+    | CIRCaptureCons(CIRCapture, CIRCaptureList)

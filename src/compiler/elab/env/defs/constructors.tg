@@ -1,0 +1,129 @@
+// src/compiler/elab/env/defs/constructors.tg
+// Constructor info and constructor list operations.
+
+use driver::ffi::{List, Nil, Cons};
+use lexer::span::Span;
+use parser::ast::Visibility;
+use elab::ffi::TypeHandle;
+
+// ===========================================================================
+// CONSTRUCTOR INFO
+// ===========================================================================
+
+/// Information about a constructor.
+pub type ConstructorInfo = {
+    name: String,
+    parent_type: String,     // Name of the parent ADT
+    index: Nat,              // Constructor index (0, 1, 2, ...)
+    arity: Nat,              // Number of fields
+    field_types: TypeHandle, // Product type of fields (or Unit for nullary)
+    result_type: TypeHandle, // The fully applied ADT type
+    visibility: Visibility,
+    span: Span
+}
+
+/// Stable identity of a constructor: name + parent + index + arity.
+pub type CtorIdentity = { name: String, parent_type: String, index: Nat, arity: Nat }
+
+/// Create a new constructor info.
+pub fn constructor_info_new(
+    id: CtorIdentity,
+    field_types: TypeHandle,
+    result_type: TypeHandle,
+    visibility: Visibility,
+    span: Span
+) -> ConstructorInfo {
+    {
+        name: id.name,
+        parent_type: id.parent_type,
+        index: id.index,
+        arity: id.arity,
+        field_types: field_types,
+        result_type: result_type,
+        visibility: visibility,
+        span: span
+    }
+}
+
+/// Optional constructor info.
+pub type MaybeConstructor =
+    | NoConstructor
+    | SomeConstructor(ConstructorInfo)
+
+/// Look up a constructor by name.
+pub fn constructor_list_lookup(list: List<ConstructorInfo>, name: String) -> MaybeConstructor {
+    match list {
+        Nil() => NoConstructor,
+        Cons(info, rest) =>
+            if info.name == name {
+                SomeConstructor(info)
+            } else {
+                constructor_list_lookup(rest, name)
+            }
+    }
+}
+
+/// Canonical constructor count for an ADT type.
+/// Computes max(index) + 1 across matching constructors.
+/// Resilient to duplicate entries across elaboration phases —
+/// unlike the removed constructor_list_count_for_type which over-counted.
+/// See ADR 10.5.26e for the TypeHandle phase-locality issue.
+pub fn constructor_list_max_index_plus_one(list: List<ConstructorInfo>, parent_type: String) -> Nat {
+    constructor_list_max_index_acc(list, parent_type, 0, false)
+}
+
+fn constructor_list_max_index_acc(
+    list: List<ConstructorInfo>,
+    parent_type: String,
+    acc: Nat,
+    found: Bool
+) -> Nat {
+    match list {
+        Nil() =>
+            if found { acc + 1 } else { 0 },
+        Cons(info, rest) =>
+            if info.parent_type == parent_type {
+                let new_acc = if found {
+                    if info.index > acc { info.index } else { acc }
+                } else {
+                    info.index
+                };
+                constructor_list_max_index_acc(rest, parent_type, new_acc, true)
+            } else {
+                constructor_list_max_index_acc(rest, parent_type, acc, found)
+            }
+    }
+}
+
+/// Check if two ConstructorInfo values match on identity + field_types.
+fn ctor_fields_match(a: ConstructorInfo, b: ConstructorInfo) -> Bool {
+    a.parent_type == b.parent_type
+        && a.name == b.name
+        && a.index == b.index
+        && a.arity == b.arity
+        && a.field_types == b.field_types
+}
+
+/// Structural dedup guard — checks if a ConstructorInfo already exists
+/// in the list by field equality.
+///
+/// ⚠ This guard fails across elaboration phases because TypeHandle values
+/// differ for the same structural type. In particular, Phase A stubs use
+/// INVALID_HANDLE for field_types/result_type, so they will NOT match
+/// real constructors added in Phase A.5. The export dedup in
+/// extract_global_exports (combined.tg) handles this.
+///
+/// The count is still correct because env_count_constructors uses
+/// constructor_list_max_index_plus_one (index-based, not count-based).
+/// See ADR 10.5.26e.
+pub fn constructor_list_contains_exact(list: List<ConstructorInfo>, target: ConstructorInfo) -> Bool {
+    match list {
+        Nil() => false,
+        Cons(info, rest) =>
+            if ctor_fields_match(info, target) {
+                true
+            } else {
+                constructor_list_contains_exact(rest, target)
+            }
+    }
+}

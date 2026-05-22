@@ -1,0 +1,200 @@
+// src/compiler/parser/ast/nodes/exprs.tg
+// Expression and statement AST node types.
+// Note: Expr has mutual recursion with TypeExpr (via ExprAnnot, ExprTypeApp, etc.)
+// and Stmt has mutual recursion with Item (via StmtItem). The three-phase
+// elaboration pipeline handles this across file boundaries.
+
+use lexer::span::Span;
+use parser::ast::common::{
+    BinOp, UnaryOp,
+    Path, path_span
+};
+use parser::ast::nodes::types::{TypeExpr, MaybeTypeExpr};
+use parser::ast::nodes::items::{Item, item_span};
+use parser::ast::pattern::{Pattern};
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// EXPRESSION SUPPORTING TYPES
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Maybe Expression
+// ---------------------------------------------------------------------------
+
+/// Optional expression.
+pub type MaybeExpr =
+    | NoExpr
+    | SomeExpr(Expr)
+
+// ---------------------------------------------------------------------------
+// Lambda Parameter
+// ---------------------------------------------------------------------------
+
+/// A parameter in a lambda expression.
+pub type LambdaParam = {
+    pattern: Pattern,
+    ty: MaybeTypeExpr,
+    span: Span
+}
+
+/// A motive for `subst`: either a predicate lambda `|x: τ| <type>` or a raw expression.
+pub type Motive
+    = MotiveLambda(LambdaParam, TypeExpr, Span)   // |x: τ| <type-expr>
+    | MotiveExpr(Expr)                              // fallback (error at elab time)
+
+// ---------------------------------------------------------------------------
+// Field Initialization (for record literals)
+// ---------------------------------------------------------------------------
+
+/// A field initialization in a record literal: `name: value`.
+pub type FieldInit = {
+    name: Ident,
+    value: Expr,
+    span: Span
+}
+
+// ---------------------------------------------------------------------------
+// Match Arm
+// ---------------------------------------------------------------------------
+
+/// A single arm in a match expression.
+pub type MatchArm = {
+    pattern: Pattern,
+    guard: MaybeExpr,
+    body: Expr,
+    span: Span
+}
+
+// ---------------------------------------------------------------------------
+// Statement
+// ---------------------------------------------------------------------------
+
+/// A statement in a block.
+/// Note: StmtItem references Item which is defined in items.tg.
+pub type Stmt =
+    | StmtLet(Pattern, MaybeTypeExpr, Expr, Span)  // let x: T = e;
+    | StmtLetElse(Pattern, MaybeTypeExpr, Expr, Expr, Span)  // let P = e else diverge;
+    | StmtExpr(Expr, Span)                          // e;
+    | StmtItem(Item)                                // nested item (fn, type, etc.)
+
+/// Get the span of a statement.
+pub fn stmt_span(s: Stmt) -> Span {
+    match s {
+        StmtLet(_, _, _, span) => span,
+        StmtLetElse(_, _, _, _, span) => span,
+        StmtExpr(_, span) => span,
+        StmtItem(item) => item_span(item)
+    }
+}
+
+// ===========================================================================
+// EXPRESSION
+// ===========================================================================
+
+/// An expression in surface syntax.
+pub type Expr =
+    // Literals
+    | ExprPath(Path)                                      // x, foo::bar
+    | ExprIntLit(Nat, Span)                               // 42
+    | ExprBoolLit(Bool, Span)                             // true, false
+    | ExprStringLit(String, Span)                         // "hello"
+    | ExprUnit(Span)                                      // ()
+    
+    // Functions
+    | ExprLambda(List<LambdaParam>, Expr, Span)           // |x| body, fn(x: T) => body
+    | ExprApp(Expr, List<Expr>, Span)                     // f(x, y)
+    | ExprTypeApp(Expr, List<TypeExpr>, Span)             // f::<T, U>
+    
+    // Operators
+    | ExprBinary(BinOp, Expr, Expr, Span)                 // a + b
+    | ExprUnary(UnaryOp, Expr, Span)                      // !x, -x
+    
+    // Bindings
+    | ExprLet(Pattern, MaybeTypeExpr, Expr, Expr, Span)   // let x: T = e1; e2
+    | ExprBlock(List<Stmt>, MaybeExpr, Span)              // { stmts; expr }
+    
+    // Control flow
+    | ExprIf(Expr, Expr, Expr, Span)                      // if cond { then } else { else }
+    | ExprMatch(Expr, List<MatchArm>, Span)               // match e { arms }
+    
+    // Data structures
+    | ExprTuple(List<Expr>, Span)                         // (a, b, c)
+    | ExprRecordLit(MaybeExpr, List<FieldInit>, Span)     // { ...spread, x: 1, y: 2 }
+    | ExprNamedRecord(Path, MaybeExpr, List<FieldInit>, Span) // Point { ...spread, x: 1 } (ADR 13.5.26h/i)
+    | ExprField(Expr, Ident, Span)                        // e.field
+    
+    // Type annotation
+    | ExprAnnot(Expr, TypeExpr, Span)                     // e : T
+    | ExprParen(Expr, Span)                               // (e)
+    
+    // Proof constructs
+    | ExprHave(Ident, TypeExpr, Expr, Expr, Span)         // have h: P = proof; body
+    | ExprShow(TypeExpr, Expr, Span)                      // show P { proof }
+    | ExprAssume(Ident, TypeExpr, Expr, Span)             // assume h: P; body
+    | ExprRefl(Span)                                      // refl
+    | ExprSubst(Expr, Motive, Expr, Span)                 // subst(proof, motive, witness)
+    | ExprSym(Expr, Span)                                 // sym(proof)
+    | ExprTrans(Expr, Expr, Span)                         // trans(h1, h2)
+    | ExprCong(Expr, Expr, Span)                          // cong(f, proof)
+    | ExprNatInd(Motive, Expr, Expr, Expr, Span)           // natind(motive, base, step, n)
+    | ExprNatRec(TypeExpr, Expr, Expr, Expr, Span)         // natrec(type, base, step, n)
+    | ExprSorry(Span)                                     // sorry
+    | ExprReturn(MaybeExpr, Span)                         // return e
+    | ExprTry(Expr, Span)                                   // expr?
+    | ExprTryBlock(Expr, Span)                              // try { ... }
+    | ExprLetElse(Pattern, MaybeTypeExpr, Expr, Expr, Expr, Span) // let P = e else diverge; body
+    | ExprIfLet(Pattern, Expr, Expr, MaybeExpr, Span)               // if let P = e { body } [else { fallback }]
+    | ExprIfLetChain(List<IfLetCondition>, Expr, MaybeExpr, Span)   // if let P1 = e1 && ... { body } [else { fallback }] (ADR 15.5.26d)
+    
+    // Error
+    | ExprError(Span)                                     // Error recovery placeholder
+
+/// A condition in an `if let` chain (ADR 15.5.26d).
+pub type IfLetCondition
+    = IfLetBind(Pattern, Expr)    // let P = e
+    | IfLetGuard(Expr)            // boolean guard
+
+/// Get the span of an expression.
+pub fn expr_span(e: Expr) -> Span {
+    match e {
+        ExprPath(p) => path_span(p),
+        ExprIntLit(_, s) => s,
+        ExprBoolLit(_, s) => s,
+        ExprStringLit(_, s) => s,
+        ExprUnit(s) => s,
+        ExprLambda(_, _, s) => s,
+        ExprApp(_, _, s) => s,
+        ExprTypeApp(_, _, s) => s,
+        ExprBinary(_, _, _, s) => s,
+        ExprUnary(_, _, s) => s,
+        ExprLet(_, _, _, _, s) => s,
+        ExprBlock(_, _, s) => s,
+        ExprIf(_, _, _, s) => s,
+        ExprMatch(_, _, s) => s,
+        ExprTuple(_, s) => s,
+        ExprRecordLit(_, _, s) => s,
+        ExprNamedRecord(_, _, _, s) => s,
+        ExprField(_, _, s) => s,
+        ExprAnnot(_, _, s) => s,
+        ExprParen(_, s) => s,
+        ExprHave(_, _, _, _, s) => s,
+        ExprShow(_, _, s) => s,
+        ExprAssume(_, _, _, s) => s,
+        ExprRefl(s) => s,
+        ExprSubst(_, _, _, s) => s,
+        ExprSym(_, s) => s,
+        ExprTrans(_, _, s) => s,
+        ExprCong(_, _, s) => s,
+        ExprNatInd(_, _, _, _, s) => s,
+        ExprNatRec(_, _, _, _, s) => s,
+        ExprSorry(s) => s,
+        ExprReturn(_, s) => s,
+        ExprTry(_, s) => s,
+        ExprTryBlock(_, s) => s,
+        ExprLetElse(_, _, _, _, _, s) => s,
+        ExprIfLet(_, _, _, _, s) => s,
+        ExprIfLetChain(_, _, _, s) => s,
+        ExprError(s) => s
+    }
+}

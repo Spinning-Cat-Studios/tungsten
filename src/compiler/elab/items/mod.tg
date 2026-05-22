@@ -12,11 +12,13 @@ pub mod result;
 pub mod collect;
 pub mod elaborate;
 pub mod imports;
+pub mod per_module;
 
 pub use elab::items::result::*;
 pub use elab::items::collect::*;
 pub use elab::items::elaborate::*;
 pub use elab::items::imports::*;
+pub use elab::items::per_module::*;
 
 use parser::ast::{SourceFile, source_file_items, Item};
 use driver::ffi::{List, Nil, Cons};
@@ -67,6 +69,19 @@ pub fn elaborate_items_fresh(items: List<Item>) -> ElabResult {
 pub fn elaborate_file_fresh(file: SourceFile) -> ElabResult {
     let env = env_new();
     elaborate_file(env, file)
+}
+
+/// Elaborate a list of items and return both the result and the final env.
+///
+/// Used by per-module elaboration (W6.3a) to extract type defs, value sigs,
+/// and constructors from the final env after elaboration.
+pub fn elaborate_items_with_env(env: Env, items: List<Item>) -> (ElabResult, Env) {
+    let ctx = elab_context_new(env);
+    let collect_result = collect_items(ctx, items);
+    let ctx2 = collect_result_context(collect_result);
+    let (ctx3, defs) = elaborate_item_bodies(ctx2, items);
+    let result = elab_result_new(defs, ctx3.errors);
+    (result, ctx3.env)
 }
 
 // ===========================================================================

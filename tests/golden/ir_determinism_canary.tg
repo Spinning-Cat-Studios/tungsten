@@ -1,0 +1,45 @@
+// IR determinism canary — exercises ordering-sensitive codegen paths:
+//   - Multiple top-level definitions with cross-references (codegen unit ordering)
+//   - Multiple generic instantiations in different orders (mono depot ordering)
+//   - Several constructors per ADT (constructor map iteration)
+//   - Multiple pattern arms (match lowering iteration)
+//   - Closure captures (environment layout)
+
+pub type Option<T> = Some(T) | None
+pub type List<T> = Cons(T, List<T>) | Nil
+pub type Triple<A, B, C> = MkTriple(A, B, C)
+
+// Cross-referencing top-level defs (codegen unit ordering)
+fn map<A, B>(f: A -> B, xs: List<A>) -> List<B> {
+  match xs {
+    Nil() => Nil,
+    Cons(h, t) => Cons(f(h), map(f, t)),
+  }
+}
+
+fn length<T>(xs: List<T>) -> Nat {
+  match xs {
+    Nil() => 0,
+    Cons(_, t) => 1 + length(t),
+  }
+}
+
+fn head<T>(xs: List<T>, default: T) -> T {
+  match xs {
+    Nil() => default,
+    Cons(h, _) => h,
+  }
+}
+
+// Multiple generic instantiations in different orders (mono depot ordering)
+fn use_nat_list() -> Nat { length(Cons(1, Cons(2, Nil))) }
+fn use_bool_list() -> Nat { length(Cons(true, Cons(false, Nil))) }
+fn use_string_list() -> Nat { length(Cons("a", Cons("b", Nil))) }
+
+// Closure capture (environment layout)
+fn add_n(n: Nat) -> Nat -> Nat { |x: Nat| x + n }
+
+fn main() -> Nat {
+  let xs = Cons(1, Cons(2, Cons(3, Nil)));
+  length(map(add_n(10), xs))
+}

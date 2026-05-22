@@ -1,0 +1,255 @@
+// src/compiler/elab/exprs/matches/patterns/mod.tg
+// Pattern helpers for match elaboration.
+//
+// This module provides pattern analysis, binding, and type navigation
+// functions used across match elaboration.
+
+pub mod predicates;
+
+pub use elab::exprs::matches::patterns::predicates::*;
+
+use parser::ast::{
+    Pattern, PatVar, PatWildcard, PatConstructor, PatTuple, MatchArm,
+    Ident, ident_name, Path, MkPath
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
+use elab::ffi::{
+    TypeHandle,
+    tg_type_is_mu, tg_type_get_mu_body, tg_type_get_mu_var,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_substitute,
+    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right
+};
+use elab::env::{Env, env_bind_local, env_resolve_value, env_count_constructors};
+use elab::env::defs::{
+    MaybeResolvedValue, NoResolvedValue, SomeResolvedValue,
+    ResolvedValue, ResolvedConstructor
+};
+
+// ===========================================================================
+// SUM LAYER NAVIGATION
+// ===========================================================================
+
+/// Skip N layers of a right-nested Sum type by taking sum_right repeatedly.
+fn skip_sum_right(ty: TypeHandle, n: Nat) -> TypeHandle {
+    if n == 0 {
+        ty
+    } else {
+        skip_sum_right(tg_type_get_sum_right(ty), n - 1)
+    }
+}
+
+/// Get the payload type for a constructor at a given index in a sum type.
+pub fn get_variant_payload(sum_ty: TypeHandle, index: Nat, total: Nat) -> TypeHandle {
+    let at_depth = skip_sum_right(sum_ty, index);
+    if index == total - 1 {
+        at_depth
+    } else {
+        tg_type_get_sum_left(at_depth)
+    }
+}
+
+// ===========================================================================
+// ARM BINDING TYPE RESOLUTION
+// ===========================================================================
+
+/// Get the correct binding type for a match arm's pattern.
+pub fn get_arm_binding_type(
+    env: Env,
+    arm: MatchArm,
+    fallback_ty: TypeHandle,
+    sum_ty: TypeHandle,
+    orig_scrut_ty: TypeHandle
+) -> TypeHandle {
+    if is_catch_all_pattern(arm.pattern) {
+        orig_scrut_ty
+    } else {
+        let ctor_name = pattern_constructor_name(arm.pattern);
+        if ctor_name == "" {
+            fallback_ty
+        } else {
+            get_arm_binding_type_resolved(env, ctor_name, fallback_ty, orig_scrut_ty)
+        }
+    }
+}
+
+fn get_arm_binding_type_resolved(
+    env: Env,
+    ctor_name: String,
+    fallback_ty: TypeHandle,
+    orig_scrut_ty: TypeHandle
+) -> TypeHandle {
+    match env_resolve_value(env, ctor_name) {
+        NoResolvedValue() => fallback_ty,
+        SomeResolvedValue(resolved) =>
+            get_arm_binding_from_resolved(env, resolved, fallback_ty, orig_scrut_ty)
+    }
+}
+
+fn get_arm_binding_from_resolved(
+    env: Env,
+    resolved: ResolvedValue,
+    fallback_ty: TypeHandle,
+    orig_scrut_ty: TypeHandle
+) -> TypeHandle {
+    match resolved {
+        ResolvedConstructor(info) => {
+            let full_sum = if tg_type_is_mu(orig_scrut_ty) {
+                tg_type_get_mu_body(orig_scrut_ty)
+            } else {
+                orig_scrut_ty
+            };
+            let total = env_count_constructors(env, info.parent_type);
+            let payload = get_variant_payload(full_sum, info.index, total);
+            if tg_type_is_mu(orig_scrut_ty) {
+                let mu_var = tg_type_get_mu_var(orig_scrut_ty);
+                tg_type_substitute(payload, mu_var, orig_scrut_ty)
+            } else {
+                payload
+            }
+        },
+        _ => fallback_ty
+    }
+}
+
+// ===========================================================================
+// PATTERN BINDING
+// ===========================================================================
+
+/// Bind pattern variables in scope with their correct types.
+pub fn bind_pattern_in_scope(env: Env, p: Pattern, ty: TypeHandle) -> (Env, String) {
+    match p {
+        PatVar(id) => {
+            let name = ident_name(id);
+            (env_bind_local(env, name, ty), name)
+        },
+        PatWildcard(_) => (env_bind_local(env, "_", ty), "_"),
+        PatConstructor(_, sub_pats, _) =>
+            bind_constructor_in_scope(env, sub_pats, ty),
+        PatTuple(sub_pats, _) => {
+            // Destructure tuple: bind each sub-pattern to its projected type.
+            let env2 = bind_tuple_sub_patterns(env, sub_pats, ty);
+            (env2, "_tuple")
+        },
+        _ => {
+            let name = pattern_to_var_name(p);
+            (env_bind_local(env, name, ty), name)
+        }
+    }
+}
+
+fn bind_constructor_in_scope(env: Env, sub_pats: List<Pattern>, ty: TypeHandle) -> (Env, String) {
+    match sub_pats {
+        Nil() =>
+            (env_bind_local(env, "_ctor", ty), "_ctor"),
+        Cons(first_pat, rest_pats) =>
+            if list_is_empty(rest_pats) {
+                bind_pattern_in_scope(env, first_pat, ty)
+            } else {
+                let case_var = "_payload";
+                let env2 = env_bind_local(env, case_var, ty);
+                let env3 = bind_sub_patterns(env2, sub_pats, ty);
+                (env3, case_var)
+            }
+    }
+}
+
+/// Bind sub-pattern variables by projecting into the product type.
+fn bind_sub_patterns(env: Env, pats: List<Pattern>, ty: TypeHandle) -> Env {
+    match pats {
+        Nil() => env,
+        Cons(pat, rest) =>
+            if list_is_empty(rest) {
+                match_bind_single_pattern(env, pat, ty)
+            } else {
+                let left_ty = tg_type_get_product_left(ty);
+                let right_ty = tg_type_get_product_right(ty);
+                let env2 = match_bind_single_pattern(env, pat, left_ty);
+                bind_sub_patterns(env2, rest, right_ty)
+            }
+    }
+}
+
+/// Bind a single pattern variable (non-constructor) in a match arm.
+fn match_bind_single_pattern(env: Env, p: Pattern, ty: TypeHandle) -> Env {
+    match p {
+        PatVar(id) => env_bind_local(env, ident_name(id), ty),
+        PatWildcard(_) => env,
+        PatTuple(sub_pats, _) => bind_tuple_sub_patterns(env, sub_pats, ty),
+        _ => env
+    }
+}
+
+/// Bind sub-patterns of a tuple by projecting into the product type.
+/// For (a, b, c) with type Product(A, Product(B, C)):
+///   a gets type A (product_left), b gets B, c gets C.
+fn bind_tuple_sub_patterns(env: Env, pats: List<Pattern>, ty: TypeHandle) -> Env {
+    match pats {
+        Nil() => env,
+        Cons(pat, rest) =>
+            if list_is_empty(rest) {
+                // Last element: use the remaining type directly
+                match_bind_single_pattern(env, pat, ty)
+            } else {
+                let left_ty = tg_type_get_product_left(ty);
+                let right_ty = tg_type_get_product_right(ty);
+                let env2 = match_bind_single_pattern(env, pat, left_ty);
+                bind_tuple_sub_patterns(env2, rest, right_ty)
+            }
+    }
+}
+
+// ===========================================================================
+// PATTERN PREDICATES (simple)
+// ===========================================================================
+
+/// Check if a pattern is a catch-all (variable or wildcard).
+pub fn is_catch_all_pattern(p: Pattern) -> Bool {
+    match p {
+        PatWildcard(_) => true,
+        PatVar(_) => true,
+        _ => false
+    }
+}
+
+/// Extract variable name from a pattern (for binding).
+pub fn pattern_to_var_name(p: Pattern) -> String {
+    match p {
+        PatWildcard(_) => "_",
+        PatVar(id) => ident_name(id),
+        PatConstructor(_, sub_pats, _) =>
+            pattern_to_var_name_from_subs(sub_pats),
+        _ => "_pat"
+    }
+}
+
+fn pattern_to_var_name_from_subs(sub_pats: List<Pattern>) -> String {
+    match sub_pats {
+        Nil() => "_",
+        Cons(sub_pat, _) => pattern_to_var_name(sub_pat)
+    }
+}
+
+/// Extract the constructor name from a pattern.
+pub fn pattern_constructor_name(p: Pattern) -> String {
+    match p {
+        PatConstructor(path, _, _) =>
+            path_constructor_name(path),
+        _ => ""
+    }
+}
+
+fn path_constructor_name(path: Path) -> String {
+    match path {
+        MkPath(segments, _) =>
+            path_first_segment_name(segments)
+    }
+}
+
+fn path_first_segment_name(segments: List<Ident>) -> String {
+    match segments {
+        Nil() => "",
+        Cons(id, _) => ident_name(id)
+    }
+}

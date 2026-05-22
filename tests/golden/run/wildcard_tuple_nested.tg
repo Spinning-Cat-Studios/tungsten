@@ -1,0 +1,8 @@
+// Golden test: wildcard in nested tuple — let (a, (_, c)) = pair
+// Verifies inner wildcard correctly skips inner fst.
+
+fn main() -> Nat {
+    let pair = (10, (20, 30));
+    let (a, (_, c)) = pair;
+    a + c
+}

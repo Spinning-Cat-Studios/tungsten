@@ -7,5 +7,14 @@
    │                       │   
    │                       ╰─── expected due to argument 1
 ───╯
+note: parameter type declared in `process_strings`
+    ╭─[tests/golden/error/cross_module_generic_type_mismatch/list.tg:7:1]
+    │
+  7 │ ╭─▶ pub fn process_strings(xs: List<String>) -> Nat {
+    ┆ ┆   
+ 12 │ ├─▶ }
+    │ │       
+    │ ╰─────── parameter type declared in `process_strings`
+────╯
 
 error: aborting due to 1 error

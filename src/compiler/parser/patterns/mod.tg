@@ -1,0 +1,71 @@
+// src/compiler/parser/patterns/mod.tg
+// Pattern parsing for the Tungsten self-hosted compiler.
+//
+// Implements parsing of all pattern forms:
+// - Or-patterns (left-associative): A | B | C
+// - Wildcards: _
+// - Variables: x, foo
+// - Constructors: Some(x), None, Foo::Bar(a, b)
+// - Literals: 42, true, false, "hello"
+// - Tuples: (a, b, c) with optional trailing comma (a, b,)
+//
+// Note: parse_pattern_atom is exported for use in lambda pipe syntax (|x, y| ...)
+// where or-patterns are not allowed due to ambiguity with the pipe delimiter.
+
+pub mod atoms;
+pub mod constructors;
+
+pub use parser::patterns::atoms::{parse_pattern_atom};
+
+use lexer::token::{Token, TokenKind, TokPipe};
+use lexer::span::{Span, span_merge, span_empty};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek, cursor_peek_kind, cursor_check, cursor_advance};
+use parser::option::{Option, None, Some};
+use parser::ast::pattern::{Pattern, PatOr, pattern_span};
+use parser::patterns::atoms::{get_cursor_span};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Result, Ok, Err};
+
+
+// ===========================================================================
+// PATTERN PARSING - ENTRY POINT
+// ===========================================================================
+
+/// Parse a pattern expression.
+/// 
+/// This is the main entry point for pattern parsing. It handles or-patterns
+/// at the top level: `A | B | C` (left-associative).
+/// 
+/// For contexts where or-patterns are not allowed (e.g., lambda pipe syntax),
+/// use `parse_pattern_atom` directly.
+pub fn parse_pattern(cur: Cursor) -> Result<(Pattern, Cursor), ParseError> {
+    parse_pattern_or(cur)
+}
+
+// ===========================================================================
+// PATTERN PARSING - OR PATTERNS
+// ===========================================================================
+
+/// Parse or-patterns: P1 | P2 | P3 (left-associative)
+fn parse_pattern_or(cur: Cursor) -> Result<(Pattern, Cursor), ParseError> {
+    let (left, cur2) = parse_pattern_atom(cur)?;
+    parse_pattern_or_rest(left, cur2)
+}
+
+/// Parse continuation of or-pattern after the first pattern.
+fn parse_pattern_or_rest(left: Pattern, cur: Cursor) -> Result<(Pattern, Cursor), ParseError> {
+    // Check for | 
+    if cursor_check(cur, TokPipe()) {
+        let cur2 = cursor_advance(cur);
+        // Parse right-hand pattern (atom only, not full or-pattern for left-associativity)
+        let (right, cur3) = parse_pattern_atom(cur2)?;
+        let combined_span = span_merge(pattern_span(left), pattern_span(right));
+        let combined = PatOr(left, right, combined_span);
+        // Continue parsing more | patterns
+        parse_pattern_or_rest(combined, cur3)
+    } else {
+        // No more |, return accumulated pattern
+        Ok((left, cur))
+    }
+}

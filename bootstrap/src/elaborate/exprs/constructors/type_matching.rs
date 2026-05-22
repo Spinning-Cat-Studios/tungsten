@@ -65,9 +65,9 @@ impl<'a> Elaborator<'a> {
     fn contains_free_type_vars_impl(&self, ty: &Type, bound: &mut HashSet<String>) -> bool {
         match ty {
             Type::TyVar(name) => {
-                // μ-bound variables (α_*) are not free type vars
+                // μ-bound variables (α_*) and named types (@*) are not free type vars
                 // Regular type variables (T, A, etc.) are free type vars
-                !name.starts_with("α_") && !bound.contains(name)
+                !name.starts_with("α_") && !name.starts_with('@') && !bound.contains(name)
             }
             Type::Mu(var, body) => {
                 bound.insert(var.clone());
@@ -108,24 +108,20 @@ impl<'a> Elaborator<'a> {
             (Type::TyVar(name), _) if type_params.contains(name) => true,
             // Same type variables must match
             (Type::TyVar(n1), Type::TyVar(n2)) => n1 == n2,
-            // Structural matching for compound types
-            (Type::Sum(p1, p2), Type::Sum(c1, c2)) => {
+
+            // Binary structural matching
+            (Type::Sum(p1, p2), Type::Sum(c1, c2))
+            | (Type::Product(p1, p2), Type::Product(c1, c2))
+            | (Type::Arrow(p1, p2), Type::Arrow(c1, c2)) => {
                 self.types_pattern_match(p1, c1, type_params)
                     && self.types_pattern_match(p2, c2, type_params)
             }
-            (Type::Product(p1, p2), Type::Product(c1, c2)) => {
-                self.types_pattern_match(p1, c1, type_params)
-                    && self.types_pattern_match(p2, c2, type_params)
-            }
-            (Type::Arrow(p1, p2), Type::Arrow(c1, c2)) => {
-                self.types_pattern_match(p1, c1, type_params)
-                    && self.types_pattern_match(p2, c2, type_params)
-            }
-            (Type::Mu(_, pb), Type::Mu(_, cb)) => self.types_pattern_match(pb, cb, type_params),
-            // Forall: both must be forall with matching bodies
-            (Type::Forall(_, pb), Type::Forall(_, cb)) => {
+
+            // Binding types: match body structurally
+            (Type::Mu(_, pb), Type::Mu(_, cb)) | (Type::Forall(_, pb), Type::Forall(_, cb)) => {
                 self.types_pattern_match(pb, cb, type_params)
             }
+
             // App: must have same name and matching args
             (Type::App(pn, pa), Type::App(cn, ca)) => {
                 pn == cn
@@ -135,16 +131,18 @@ impl<'a> Elaborator<'a> {
                         .zip(ca.iter())
                         .all(|(p, c)| self.types_pattern_match(p, c, type_params))
             }
+
             // Ref types must match their inner types
             (Type::Ref(p), Type::Ref(c)) => self.types_pattern_match(p, c, type_params),
+
             // Base types must match exactly
-            (Type::Nat, Type::Nat) => true,
-            (Type::Bool, Type::Bool) => true,
-            (Type::String, Type::String) => true,
-            (Type::Unit, Type::Unit) => true,
-            (Type::Void, Type::Void) => true,
-            // Prop (for proofs) must match exactly
-            (Type::Prop, Type::Prop) => true,
+            (Type::Nat, Type::Nat)
+            | (Type::Bool, Type::Bool)
+            | (Type::String, Type::String)
+            | (Type::Unit, Type::Unit)
+            | (Type::Void, Type::Void)
+            | (Type::Prop, Type::Prop) => true,
+
             _ => false,
         }
     }

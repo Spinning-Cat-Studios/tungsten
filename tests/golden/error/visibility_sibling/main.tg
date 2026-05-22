@@ -1,0 +1,6 @@
+// Test: E0016 sibling module cannot access another sibling's private type.
+
+pub mod sibling_a;
+pub mod sibling_b;
+
+fn main() -> Nat { 0 }

@@ -1,0 +1,18 @@
+// tests/type_alias_module/main.tg
+// AC8: Public aliases can be imported and used from another module.
+mod types;
+
+use types::ParseResult;
+use types::Result;
+use types::Ok;
+use types::Err;
+
+fn parse_nat() -> ParseResult<Nat> {
+    Ok((42, 0))
+}
+
+fn test_ac8_cross_module_alias() -> Unit {
+    let x: ParseResult<Nat> = parse_nat();
+    let _ = expect_type(x, "(String + (Nat * Nat))");
+    ()
+}

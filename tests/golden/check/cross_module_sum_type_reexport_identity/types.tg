@@ -1,0 +1,8 @@
+// Types module: defines a sum type using Option from the canonical source.
+// This mirrors cli.tg importing Option from parser::option directly.
+
+use core::{Option};
+
+pub type Opts =
+    | Alpha(String)
+    | Beta(Option<String>)

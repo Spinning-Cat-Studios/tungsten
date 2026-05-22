@@ -1,0 +1,168 @@
+// Test: Nested constructor+tuple patterns (ADR 20.5.26a)
+// Verifies that Ok((a, b)) => a correctly binds tuple sub-pattern
+// variables inside a constructor pattern.
+
+type Result<T, E> =
+    | Ok(T)
+    | Err(E)
+
+type Option<T> =
+    | None
+    | Some(T)
+
+// ---------------------------------------------------------------------------
+// Minimal reproducer from ADR 20.5.26a
+// ---------------------------------------------------------------------------
+
+fn test_nested_ctor_tuple_binding() -> Nat {
+    let r: Result<(Nat, Nat), String> = Ok((10, 20));
+    match r {
+        Ok((a, b)) => a + b,
+        Err(e) => 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Control cases — isolate the failure shape
+// ---------------------------------------------------------------------------
+
+// Control 1: Constructor-only pattern (no tuple) — always worked
+fn test_ctor_only() -> Nat {
+    let r: Result<Nat, String> = Ok(42);
+    match r {
+        Ok(x) => x,
+        Err(e) => 0
+    }
+}
+
+// Control 2: Tuple-only pattern (no constructor) — always worked
+fn test_tuple_only() -> (Nat, String) {
+    let pair: (Nat, String) = (42, "hello");
+    pair
+}
+
+// Control 3: Nested ctor+tuple with three elements
+fn test_ctor_triple_tuple() -> Nat {
+    let r: Result<(Nat, Nat, Nat), String> = Ok((1, 2, 3));
+    match r {
+        Ok((a, b, c)) => a + b + c,
+        Err(e) => 0
+    }
+}
+
+// Control 4: Option<(Nat, String)> — different constructor
+fn test_option_tuple() -> Nat {
+    let o: Option<(Nat, String)> = Some((99, "world"));
+    match o {
+        Some((x, y)) => x,
+        None() => 0
+    }
+}
+
+// Control 5: Err variant with tuple
+fn test_err_tuple() -> Nat {
+    let r: Result<Nat, (Nat, String)> = Err((5, "bad"));
+    match r {
+        Ok(x) => x,
+        Err((code, msg)) => code
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance criteria tests (expect_type, cost 3)
+// ---------------------------------------------------------------------------
+
+// AC1: Binding types are correct in nested ctor+tuple
+pub fn test_binding_types_ok_pair() -> Unit {
+    let r: Result<(Nat, String), Nat> = Ok((10, "hi"));
+    match r {
+        Ok((a, b)) => {
+            let _ = expect_type(a, "Nat");
+            let _ = expect_type(b, "String");
+            ()
+        },
+        Err(e) => ()
+    }
+}
+
+// AC2: Binding types in Err tuple variant
+pub fn test_binding_types_err_pair() -> Unit {
+    let r: Result<Nat, (String, Bool)> = Err(("fail", true));
+    match r {
+        Ok(x) => (),
+        Err((msg, flag)) => {
+            let _ = expect_type(msg, "String");
+            let _ = expect_type(flag, "Bool");
+            ()
+        }
+    }
+}
+
+// AC3: Triple tuple binding types
+pub fn test_binding_types_triple() -> Unit {
+    let r: Result<(Nat, String, Bool), Nat> = Ok((1, "two", true));
+    match r {
+        Ok((a, b, c)) => {
+            let _ = expect_type(a, "Nat");
+            let _ = expect_type(b, "String");
+            let _ = expect_type(c, "Bool");
+            ()
+        },
+        Err(e) => ()
+    }
+}
+
+// AC4: Option<(Nat, Nat)> binding types
+pub fn test_binding_types_option() -> Unit {
+    let o: Option<(Nat, Nat)> = Some((7, 8));
+    match o {
+        Some((x, y)) => {
+            let _ = expect_type(x, "Nat");
+            let _ = expect_type(y, "Nat");
+            ()
+        },
+        None() => ()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases (check-adr suggested tests)
+// ---------------------------------------------------------------------------
+
+// AC5: Wildcard inside tuple inside constructor
+pub fn test_wildcard_in_tuple() -> Unit {
+    let r: Result<(Nat, String), Nat> = Ok((42, "skip"));
+    match r {
+        Ok((x, _)) => {
+            let _ = expect_type(x, "Nat");
+            ()
+        },
+        Err(e) => ()
+    }
+}
+
+// AC6: Nested ctor-in-ctor-in-tuple (3-level nesting)
+pub fn test_nested_ctor_in_ctor_tuple() -> Unit {
+    let r: Option<Result<(Nat, String), Bool>> = Some(Ok((5, "deep")));
+    match r {
+        Some(inner) =>
+            match inner {
+                Ok((a, b)) => {
+                    let _ = expect_type(a, "Nat");
+                    let _ = expect_type(b, "String");
+                    ()
+                },
+                Err(e) => ()
+            },
+        None() => ()
+    }
+}
+
+// AC7: All-wildcards tuple inside constructor (no bindings needed)
+pub fn test_all_wildcards_tuple() -> Unit {
+    let r: Result<(Nat, String), Nat> = Ok((1, "x"));
+    match r {
+        Ok((_, _)) => (),
+        Err(_) => ()
+    }
+}

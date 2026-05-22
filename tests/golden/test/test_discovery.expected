@@ -1,0 +1,7 @@
+
+running 2 tests
+
+test test_nat_type ... ok
+test test_bool_type ... ok
+
+result: ok. 2 passed; 0 failed; 0 skipped; finished in 0.00s

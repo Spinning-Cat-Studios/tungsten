@@ -1,0 +1,33 @@
+{
+  "name": "Tungsten Development (x86_64)",
+  "build": { "dockerfile": "Dockerfile" },
+  "runArgs": ["--platform", "linux/amd64", "--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined"],
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": true
+    }
+  },
+  "postCreateCommand": ".devcontainer/x86_64/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb",
+        "serayuzgur.crates"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.features": "all",
+        "rust-analyzer.checkOnSave.command": "clippy",
+        "editor.formatOnSave": true
+      }
+    }
+  },
+  "containerEnv": {
+    "LLVM_SYS_180_PREFIX": "/usr/lib/llvm-18",
+    "CARGO_TARGET_DIR": "/tmp/target_x86",
+    "RUST_MIN_STACK": "67108864"
+  },
+  "remoteUser": "vscode"
+}

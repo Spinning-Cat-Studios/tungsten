@@ -1,0 +1,4 @@
+// util module - exports same-named function for collision test
+pub fn add(a: Nat, b: Nat) -> Nat {
+    a + b
+}

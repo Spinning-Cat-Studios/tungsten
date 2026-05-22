@@ -35,24 +35,18 @@ impl Parser<'_> {
             }
             TokenKind::IntLiteral => {
                 let text = self.current_text();
-                let value = self.parse_int_literal(&text);
+                let value = self.parse_int_literal(text);
                 self.advance();
                 Some(Pattern::Literal(LiteralPattern::Int(
                     value,
                     Span::new(start, self.prev_span().end),
                 )))
             }
-            TokenKind::True => {
+            TokenKind::True | TokenKind::False => {
+                let value = self.current().kind == TokenKind::True;
                 self.advance();
                 Some(Pattern::Literal(LiteralPattern::Bool(
-                    true,
-                    Span::new(start, self.prev_span().end),
-                )))
-            }
-            TokenKind::False => {
-                self.advance();
-                Some(Pattern::Literal(LiteralPattern::Bool(
-                    false,
+                    value,
                     Span::new(start, self.prev_span().end),
                 )))
             }
@@ -65,58 +59,62 @@ impl Parser<'_> {
                     Span::new(start, self.prev_span().end),
                 )))
             }
-            TokenKind::LParen => {
-                self.advance();
-                if self.check(TokenKind::RParen) {
-                    self.advance();
-                    Some(Pattern::Tuple(
-                        Vec::new(),
-                        Span::new(start, self.prev_span().end),
-                    ))
-                } else {
-                    let first = self.parse_pattern()?;
-                    if self.check(TokenKind::Comma) {
-                        let mut patterns = vec![first];
-                        while self.eat(TokenKind::Comma) {
-                            if self.check(TokenKind::RParen) {
-                                break;
-                            }
-                            patterns.push(self.parse_pattern()?);
-                        }
-                        let end = self.expect(TokenKind::RParen)?.end;
-                        Some(Pattern::Tuple(patterns, Span::new(start, end)))
-                    } else {
-                        self.expect(TokenKind::RParen)?;
-                        Some(first)
-                    }
-                }
-            }
-            TokenKind::Ident => {
-                let path = self.parse_path()?;
-                if self.check(TokenKind::LParen) {
-                    // Constructor pattern
-                    self.advance();
-                    let mut args = Vec::new();
-                    while !self.check(TokenKind::RParen) && !self.at_eof() {
-                        args.push(self.parse_pattern()?);
-                        if !self.eat(TokenKind::Comma) {
-                            break;
-                        }
-                    }
-                    let end = self.expect(TokenKind::RParen)?.end;
-                    Some(Pattern::Constructor(path, args, Span::new(start, end)))
-                } else if path.is_simple() {
-                    // Single identifier - treat as variable binding
-                    Some(Pattern::Var(path.item_name().clone()))
-                } else {
-                    // Multi-segment path without args - must be a constructor
-                    Some(Pattern::Constructor(path.clone(), Vec::new(), path.span))
-                }
-            }
+            TokenKind::LParen => self.parse_paren_or_tuple_pattern(start),
+            TokenKind::Ident => self.parse_ident_pattern(start),
             _ => {
                 self.error(ParseErrorKind::InvalidPattern);
                 Some(Pattern::Error(self.current_span()))
             }
+        }
+    }
+
+    /// Parse a parenthesized pattern `(P)`, empty tuple `()`, or tuple `(A, B)`.
+    fn parse_paren_or_tuple_pattern(&mut self, start: u32) -> Option<Pattern> {
+        self.advance();
+        if self.check(TokenKind::RParen) {
+            self.advance();
+            return Some(Pattern::Tuple(
+                Vec::new(),
+                Span::new(start, self.prev_span().end),
+            ));
+        }
+
+        let first = self.parse_pattern()?;
+        if self.check(TokenKind::Comma) {
+            let mut patterns = vec![first];
+            while self.eat(TokenKind::Comma) {
+                if self.check(TokenKind::RParen) {
+                    break;
+                }
+                patterns.push(self.parse_pattern()?);
+            }
+            let end = self.expect(TokenKind::RParen)?.end;
+            Some(Pattern::Tuple(patterns, Span::new(start, end)))
+        } else {
+            self.expect(TokenKind::RParen)?;
+            Some(first)
+        }
+    }
+
+    /// Parse an identifier-led pattern: variable, constructor, or qualified path.
+    fn parse_ident_pattern(&mut self, start: u32) -> Option<Pattern> {
+        let path = self.parse_path()?;
+        if self.check(TokenKind::LParen) {
+            // Constructor pattern with arguments
+            self.advance();
+            let mut args = Vec::new();
+            while !self.check(TokenKind::RParen) && !self.at_eof() {
+                args.push(self.parse_pattern()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            let end = self.expect(TokenKind::RParen)?.end;
+            Some(Pattern::Constructor(path, args, Span::new(start, end)))
+        } else if path.is_simple() {
+            Some(Pattern::Var(path.item_name().clone()))
+        } else {
+            Some(Pattern::Constructor(path.clone(), Vec::new(), path.span))
         }
     }
 }

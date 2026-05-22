@@ -1,18 +1,196 @@
-// src/compiler/elab/env/types.tg
-// Basic utility types for the environment module.
+// Core type definitions for the elaboration environment.
+//
+// These types are defined separately from the operations so that
+// sibling modules (ops.tg, resolve.tg) can import them without
+// circular dependencies.
+//
+// ## Sub-Environment Types
+//
+// The Env type is logically decomposed into four focused sub-envs.
+// These types are introduced here as the first step of Env decomposition.
+// Broad call-site migration (passing ScopeEnv/TypeEnv/ModuleEnv directly
+// instead of Env) is deferred to a later ADR to limit churn.
+//
+// ScopeEnv   — local variable scopes (ScopeStack)
+// TypeEnv    — bound type variables (forall binders)
+// ModuleEnv  — module path, module map, driver registry
+// EnvContext — depth counter and return type
+
+use driver::ffi::{List, Nil, Cons};
+use elab::env::scope::ScopeStack;
+use elab::env::module::{
+    ElabModulePath, ModuleMap, ModuleContents,
+    MaybeModuleContents, NoModuleContents, SomeModuleContents,
+    module_map_lookup, module_contents_empty
+};
+use driver::modules::info::{ModuleInfo};
 
 // ===========================================================================
-// STRING LIST
+// SUB-ENVIRONMENT TYPES
 // ===========================================================================
 
-// StringList is now List<String> using driver::ffi::{List, Nil, Cons}
-// 
-// Helper functions now use generic versions from driver::util:
-//   - list_len<T> replaces string_list_len
-//   - list_is_empty<T> replaces string_list_is_empty
-//   - list_contains_string replaces string_list_contains
-//   - list_eq_string replaces string_list_eq
-//   - list_append_string replaces string_list_append
-//   - list_head_string replaces string_list_head
-//   - list_init_string replaces string_list_init
-//   - list_is_prefix_or_eq_string replaces string_list_is_prefix_or_eq
+/// Local variable scope sub-environment.
+pub type ScopeEnv = {
+    stack: ScopeStack           // Local variable scopes
+}
+
+/// Type-variable sub-environment.
+pub type TypeEnv = {
+    vars: List<String>          // Bound type variables (for forall)
+}
+
+/// Module sub-environment.
+pub type ModuleEnv = {
+    current: ElabModulePath,    // Current module path
+    map: ModuleMap,             // All module contents
+    registry: ModuleInfo        // Driver-level module info
+}
+
+/// Elaboration context sub-environment (depth and return type).
+// Named EnvContext to avoid collision with ElabContext in elab::items::result.
+pub type EnvContext = {
+    depth: Nat,                 // Current binding depth (for de Bruijn)
+    return_type: MaybeTypeHandle // Expected return type (for return expressions)
+}
+
+// ===========================================================================
+// ELABORATION MODE
+// ===========================================================================
+
+/// Elaboration mode — controls expect_type behaviour (ADR 4.5.26g §2.4).
+pub type ElabMode =
+    | ElabCheck     // tungsten check: validate expect_type args, skip comparison
+    | ElabTest      // tungsten test: validate + compare types
+    | ElabCompile   // tungsten compile/run: reject expect_type
+
+// ===========================================================================
+// MAIN ENVIRONMENT TYPE
+// ===========================================================================
+
+/// The elaboration environment.
+pub type Env = {
+    scopes: ScopeStack,           // Local variable scopes
+    type_vars: List<String>,      // Bound type variables (for forall)
+    current_module: ElabModulePath,   // Current module path
+    modules: ModuleMap,           // All module contents
+    module_registry: ModuleInfo,  // Driver-level module info (W6.1: stored, not yet used for resolution)
+    depth: Nat,                   // Current binding depth (for de Bruijn)
+    return_type: MaybeTypeHandle, // Expected return type (for return expressions)
+    elab_mode: ElabMode           // Elaboration mode (ADR 4.5.26g)
+}
+
+/// Optional type handle for return_type.
+///
+/// This is the extension point for return-context variants. New control-flow
+/// features that need custom return semantics (e.g., try blocks) add a variant
+/// here rather than modifying the Env struct — which would require updating
+/// every `env_with_*` helper. The `?` operator and `return` expression each
+/// pattern-match on the variant to decide their behaviour.
+pub type MaybeTypeHandle =
+    | NoTypeHandle
+    | SomeTypeHandle(TypeHandle)
+    | TryBlockTypeHandle(TypeHandle)  // Inside try block: ? uses this, return rejects it
+
+/// Optional span for tracking source locations.
+pub type MaybeSpan =
+    | NoSpan
+    | SomeSpan(Span)
+
+// ===========================================================================
+// MAIN ENV HELPERS
+// ===========================================================================
+
+/// Get the current module contents.
+pub fn env_current_module_contents(env: Env) -> ModuleContents {
+    match module_map_lookup(env.modules, env.current_module) {
+        SomeModuleContents(c) => c,
+        NoModuleContents() => module_contents_empty(env.current_module)
+    }
+}
+
+// ===========================================================================
+// SUB-ENVIRONMENT ACCESSOR FUNCTIONS
+// ===========================================================================
+
+/// Extract the scope sub-environment (local variable scopes).
+pub fn env_scope_env(env: Env) -> ScopeEnv {
+    { stack: env.scopes }
+}
+
+/// Extract the type sub-environment (bound type variables).
+pub fn env_type_env(env: Env) -> TypeEnv {
+    { vars: env.type_vars }
+}
+
+/// Extract the module sub-environment (path, map, registry).
+pub fn env_module_env(env: Env) -> ModuleEnv {
+    { current: env.current_module, map: env.modules, registry: env.module_registry }
+}
+
+/// Extract the elaboration context (depth, return type).
+pub fn env_context(env: Env) -> EnvContext {
+    { depth: env.depth, return_type: env.return_type }
+}
+
+// ===========================================================================
+// SUB-ENVIRONMENT UPDATE HELPERS
+// ===========================================================================
+// These helpers replace a single sub-env concern in the Env while keeping
+// all other fields unchanged. They eliminate the error-prone pattern of
+// manually reconstructing all 7 fields in every env mutation function.
+
+/// Return a new Env with a different scope stack.
+pub fn env_with_scopes(env: Env, scopes: ScopeStack) -> Env {
+    { scopes: scopes, type_vars: env.type_vars, current_module: env.current_module,
+      modules: env.modules, module_registry: env.module_registry,
+      depth: env.depth, return_type: env.return_type, elab_mode: env.elab_mode }
+}
+
+/// Return a new Env with a different type-variable list.
+pub fn env_with_type_vars(env: Env, type_vars: List<String>) -> Env {
+    { scopes: env.scopes, type_vars: type_vars, current_module: env.current_module,
+      modules: env.modules, module_registry: env.module_registry,
+      depth: env.depth, return_type: env.return_type, elab_mode: env.elab_mode }
+}
+
+/// Return a new Env with a different module sub-env (path + map + registry).
+pub fn env_with_modules(env: Env, current_module: ElabModulePath, modules: ModuleMap, module_registry: ModuleInfo) -> Env {
+    { scopes: env.scopes, type_vars: env.type_vars, current_module: current_module,
+      modules: modules, module_registry: module_registry,
+      depth: env.depth, return_type: env.return_type, elab_mode: env.elab_mode }
+}
+
+/// Return a new Env with a different module map only (path and registry unchanged).
+pub fn env_with_module_map(env: Env, modules: ModuleMap) -> Env {
+    { scopes: env.scopes, type_vars: env.type_vars, current_module: env.current_module,
+      modules: modules, module_registry: env.module_registry,
+      depth: env.depth, return_type: env.return_type, elab_mode: env.elab_mode }
+}
+
+/// Return a new Env with a different current module path (map and registry unchanged).
+pub fn env_with_current_module(env: Env, current_module: ElabModulePath, modules: ModuleMap) -> Env {
+    { scopes: env.scopes, type_vars: env.type_vars, current_module: current_module,
+      modules: modules, module_registry: env.module_registry,
+      depth: env.depth, return_type: env.return_type, elab_mode: env.elab_mode }
+}
+
+/// Return a new Env with a different depth.
+pub fn env_with_depth(env: Env, depth: Nat) -> Env {
+    { scopes: env.scopes, type_vars: env.type_vars, current_module: env.current_module,
+      modules: env.modules, module_registry: env.module_registry,
+      depth: depth, return_type: env.return_type, elab_mode: env.elab_mode }
+}
+
+/// Return a new Env with a different return type.
+pub fn env_with_return_type(env: Env, return_type: MaybeTypeHandle) -> Env {
+    { scopes: env.scopes, type_vars: env.type_vars, current_module: env.current_module,
+      modules: env.modules, module_registry: env.module_registry,
+      depth: env.depth, return_type: return_type, elab_mode: env.elab_mode }
+}
+
+/// Return a new Env with a different elaboration mode.
+pub fn env_with_elab_mode(env: Env, elab_mode: ElabMode) -> Env {
+    { scopes: env.scopes, type_vars: env.type_vars, current_module: env.current_module,
+      modules: env.modules, module_registry: env.module_registry,
+      depth: env.depth, return_type: env.return_type, elab_mode: elab_mode }
+}

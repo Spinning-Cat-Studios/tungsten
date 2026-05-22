@@ -1,0 +1,43 @@
+// src/compiler/codegen/ir_closures/application.tg
+// Closure application — extract fn_ptr + env_ptr, indirect call.
+//
+// Closure layout: { ptr, ptr } = { fn_ptr, env_ptr }
+// Application:
+//   %fn_ptr  = extractvalue { ptr, ptr } %closure, 0
+//   %env_ptr = extractvalue { ptr, ptr } %closure, 1
+//   %result  = call <ret_type> %fn_ptr(ptr %env_ptr, <arg_type> %arg)
+
+use elab::cir::types::{CodegenType};
+use codegen::ir_builder::{IRState, fresh_name, emit_line};
+use codegen::ir_types::{llvm_type};
+
+// ===========================================================================
+// CLOSURE APPLICATION
+// ===========================================================================
+
+/// Emit an indirect call through a closure pair.
+///
+/// Extracts the function pointer and environment pointer from the closure
+/// struct, then emits an indirect call passing the env pointer as the
+/// first argument followed by the actual argument.
+pub fn emit_app(
+    st: IRState, closure_val: String, arg_val: String,
+    arg_type: CodegenType, return_type: CodegenType
+) -> (String, IRState) {
+    let arg_ty_str = llvm_type(arg_type);
+    let ret_ty_str = llvm_type(return_type);
+
+    // Extract fn_ptr (slot 0) and env_ptr (slot 1)
+    let (fn_ptr, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ fn_ptr ++ " = extractvalue { ptr, ptr } " ++ closure_val ++ ", 0");
+
+    let (env_ptr, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ env_ptr ++ " = extractvalue { ptr, ptr } " ++ closure_val ++ ", 1");
+
+    // Indirect call: fn_ptr(env_ptr, arg)
+    let (result, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ result ++ " = call " ++ ret_ty_str
+        ++ " " ++ fn_ptr ++ "(ptr " ++ env_ptr ++ ", " ++ arg_ty_str ++ " " ++ arg_val ++ ")");
+
+    (result, st)
+}

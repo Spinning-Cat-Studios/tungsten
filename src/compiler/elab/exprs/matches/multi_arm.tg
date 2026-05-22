@@ -1,0 +1,209 @@
+// Multi-arm match elaboration (> 2 arms).
+//
+// Builds nested case expressions using recursive case peeling.
+// For a sum type A + (B + (C + D)) and arms [arm1, arm2, arm3, arm4]:
+//   case scrut of inl(x1) => body1 | inr(rest) =>
+//     case rest of inl(x2) => body2 | inr(rest2) =>
+//       case rest2 of inl(x3) => body3 | inr(x4) => body4
+
+use parser::ast::{
+    Pattern, PatVar, PatWildcard, PatConstructor, MatchArm, Expr,
+    Ident, Path
+};
+use lexer::span::Span;
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_case, tg_term_var_named,
+    tg_type_is_mu, tg_type_get_mu_body, tg_type_get_mu_var,
+    tg_type_is_sum, tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_substitute,
+    tg_string_to_cstr
+};
+use elab::cir::{CodegenIR, CIRVar, ct_unit, build_cir_case_from_handles, type_handle_to_codegen_type};
+use elab::env::{Env, env_push_scope, env_pop_scope};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr};
+use elab::exprs::forms::result::{elab_expr_error, add_expected_because};
+use elab::error::ExpMatchBranch;
+use elab::exprs::{check, synth};
+use elab::exprs::matches::patterns::{
+    bind_pattern_in_scope, get_arm_binding_type
+};
+use elab::exprs::matches::{ScrutInfo};
+use elab::exprs::matches::adt_match::{AdtMatchScrutInfo};
+
+// ===========================================================================
+// INTERNAL RECORD TYPES
+// ===========================================================================
+
+/// Components for building a case expression (left branch already elaborated).
+type CaseParts = {
+    scrut_term: TermHandle,
+    scrut_cir: CodegenIR,
+    scrut_sum_ty: TypeHandle,
+    left_var: String,
+    left_body: TermHandle,
+    left_cir: CodegenIR
+}
+
+/// Check context threaded through multi-arm rest recursion.
+type MatchCheckCtx = {
+    expected: TypeHandle,
+    span: Span,
+    first_arm_span: Span
+}
+
+/// Elaborate multi-arm match (> 2 arms) in synth mode.
+pub fn elab_multi_arm_match(
+    env: Env,
+    ms: AdtMatchScrutInfo,
+    arms: List<MatchArm>,
+    span: Span
+) -> ElabExprResult {
+    match arms {
+        Nil() => ElabExprErr(elab_expr_error("empty match arms", span)),
+        Cons(arm1, rest) => {
+            let left_ty = tg_type_get_sum_left(ms.sum_ty);
+            let left_ty = if tg_type_is_mu(ms.orig_ty) {
+                let mu_var = tg_type_get_mu_var(ms.orig_ty);
+                tg_type_substitute(left_ty, mu_var, ms.orig_ty)
+            } else { left_ty };
+            
+            let arm1_bind_ty = get_arm_binding_type(env, arm1, left_ty, ms.sum_ty, ms.orig_ty);
+            let (_, var1) = bind_pattern_in_scope(env, arm1.pattern, arm1_bind_ty);
+            let arm1_span = arm1.span;
+            
+            let env1 = env_push_scope(env);
+            let (env1, _) = bind_pattern_in_scope(env1, arm1.pattern, arm1_bind_ty);
+            
+            match synth(env1, arm1.body) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, body1, result_ty, body1_cir) => {
+                    let env2 = env_pop_scope(env2);
+                    let right_ty = tg_type_get_sum_right(ms.sum_ty);
+                    let right_ms: AdtMatchScrutInfo = { term: ms.term, sum_ty: right_ty, orig_ty: ms.orig_ty, cir: ms.cir };
+                    let check_ctx: MatchCheckCtx = { expected: result_ty, span: span, first_arm_span: arm1_span };
+                    let parts: CaseParts = { scrut_term: ms.term, scrut_cir: ms.cir, scrut_sum_ty: ms.sum_ty, left_var: var1, left_body: body1, left_cir: body1_cir };
+                    elab_multi_arm_rest(env2, right_ms, rest, check_ctx, parts)
+                }
+            }
+        }
+    }
+}
+
+/// Helper to build the rest of a multi-arm match (after first arm synthesized).
+fn elab_multi_arm_rest(
+    env: Env,
+    ms: AdtMatchScrutInfo,
+    arms: List<MatchArm>,
+    check_ctx: MatchCheckCtx,
+    parts: CaseParts
+) -> ElabExprResult {
+    match arms {
+        Nil() => ElabExprErr(elab_expr_error("too few match arms for sum type", check_ctx.span)),
+        Cons(arm2, rest) =>
+            match rest {
+                Nil() => {
+                    // Last arm — sum_ty IS the type we bind
+                    let right_ty = if tg_type_is_mu(ms.orig_ty) {
+                        let mu_var = tg_type_get_mu_var(ms.orig_ty);
+                        tg_type_substitute(ms.sum_ty, mu_var, ms.orig_ty)
+                    } else { ms.sum_ty };
+                    
+                    let arm2_bind_ty = get_arm_binding_type(env, arm2, right_ty, ms.sum_ty, ms.orig_ty);
+                    let (_, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+                    let env2 = env_push_scope(env);
+                    let (env2, _) = bind_pattern_in_scope(env2, arm2.pattern, arm2_bind_ty);
+                    
+                    match check(env2, arm2.body, check_ctx.expected) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(check_ctx.first_arm_span))),
+                        ElabExprOk(env3, body2, _, body2_cir) =>
+                            let term = tg_term_case(
+                                parts.scrut_term,
+                                tg_string_to_cstr(parts.left_var), parts.left_body,
+                                tg_string_to_cstr(var2), body2
+                            );
+                            let cir = build_cir_case_from_handles(parts.scrut_cir, parts.scrut_sum_ty, parts.left_var, parts.left_cir, var2, body2_cir, check_ctx.expected);
+                            ElabExprOk(env_pop_scope(env3), term, check_ctx.expected, cir)
+                    }
+                },
+                Cons(_, _) => {
+                    // More arms remain — need nested case
+                    let left_ty = tg_type_get_sum_left(ms.sum_ty);
+                    let left_ty = if tg_type_is_mu(ms.orig_ty) {
+                        let mu_var = tg_type_get_mu_var(ms.orig_ty);
+                        tg_type_substitute(left_ty, mu_var, ms.orig_ty)
+                    } else { left_ty };
+                    
+                    let arm2_bind_ty = get_arm_binding_type(env, arm2, left_ty, ms.sum_ty, ms.orig_ty);
+                    let (_, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+                    let env2 = env_push_scope(env);
+                    let (env2, _) = bind_pattern_in_scope(env2, arm2.pattern, arm2_bind_ty);
+                    
+                    match check(env2, arm2.body, check_ctx.expected) {
+                        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(check_ctx.first_arm_span))),
+                        ElabExprOk(env3, body2, _, body2_cir) => {
+                            let env3 = env_pop_scope(env3);
+                            let right_ty = tg_type_get_sum_right(ms.sum_ty);
+                            let rest_var = "_rest";
+                            let rest_var_term = tg_term_var_named(tg_string_to_cstr(rest_var));
+                            let rest_var_cir = CIRVar(rest_var, type_handle_to_codegen_type(right_ty));
+                            
+                            let inner_ms: AdtMatchScrutInfo = { term: rest_var_term, sum_ty: right_ty, orig_ty: ms.orig_ty, cir: rest_var_cir };
+                            let inner_parts: CaseParts = { scrut_term: rest_var_term, scrut_cir: rest_var_cir, scrut_sum_ty: right_ty, left_var: var2, left_body: body2, left_cir: body2_cir };
+                            match elab_multi_arm_rest(env3, inner_ms, rest, check_ctx, inner_parts) {
+                                ElabExprErr(e) => ElabExprErr(e),
+                                ElabExprOk(env4, inner_term, _, inner_cir) =>
+                                    let term = tg_term_case(
+                                        parts.scrut_term,
+                                        tg_string_to_cstr(parts.left_var), parts.left_body,
+                                        tg_string_to_cstr(rest_var), inner_term
+                                    );
+                                    let cir = build_cir_case_from_handles(parts.scrut_cir, parts.scrut_sum_ty, parts.left_var, parts.left_cir, rest_var, inner_cir, check_ctx.expected);
+                                    ElabExprOk(env4, term, check_ctx.expected, cir)
+                            }
+                        }
+                    }
+                }
+            }
+    }
+}
+
+/// Elaborate multi-arm match with expected type.
+pub fn elab_multi_arm_match_checked(
+    env: Env,
+    ms: AdtMatchScrutInfo,
+    arms: List<MatchArm>,
+    expected: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    match arms {
+        Nil() => ElabExprErr(elab_expr_error("empty match arms", span)),
+        Cons(arm1, rest) => {
+            let left_ty = tg_type_get_sum_left(ms.sum_ty);
+            let left_ty = if tg_type_is_mu(ms.orig_ty) {
+                let mu_var = tg_type_get_mu_var(ms.orig_ty);
+                tg_type_substitute(left_ty, mu_var, ms.orig_ty)
+            } else { left_ty };
+            
+            let arm1_bind_ty = get_arm_binding_type(env, arm1, left_ty, ms.sum_ty, ms.orig_ty);
+            let (_, var1) = bind_pattern_in_scope(env, arm1.pattern, arm1_bind_ty);
+            let arm1_span = arm1.span;
+            
+            let env1 = env_push_scope(env);
+            let (env1, _) = bind_pattern_in_scope(env1, arm1.pattern, arm1_bind_ty);
+            
+            match check(env1, arm1.body, expected) {
+                ElabExprErr(e) => ElabExprErr(e),
+                ElabExprOk(env2, body1, _, body1_cir) => {
+                    let env2 = env_pop_scope(env2);
+                    let right_ty = tg_type_get_sum_right(ms.sum_ty);
+                    let right_ms: AdtMatchScrutInfo = { term: ms.term, sum_ty: right_ty, orig_ty: ms.orig_ty, cir: ms.cir };
+                    let check_ctx: MatchCheckCtx = { expected: expected, span: span, first_arm_span: arm1_span };
+                    let parts: CaseParts = { scrut_term: ms.term, scrut_cir: ms.cir, scrut_sum_ty: ms.sum_ty, left_var: var1, left_body: body1, left_cir: body1_cir };
+                    elab_multi_arm_rest(env2, right_ms, rest, check_ctx, parts)
+                }
+            }
+        }
+    }
+}

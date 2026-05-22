@@ -1,0 +1,2 @@
+// == sugar with mismatched types: Nat vs Bool
+fn f() -> 0 == true { refl }

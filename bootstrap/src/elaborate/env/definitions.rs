@@ -9,6 +9,9 @@ use tungsten_core::Type;
 use super::ModulePath;
 
 /// A type definition (ADT or type alias).
+///
+/// **Elaboration** representation (`Type`/`TypeDefKind`).
+/// See also: `ast::items::TypeDef` (AST/surface syntax representation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeDef {
     /// Name of the type
@@ -31,6 +34,29 @@ pub struct TypeDef {
     /// None if not yet computed or type has parameters.
     #[serde(skip)]
     pub encoded_type: Option<Type>,
+    /// Per-field visibility for record types (parallel to record fields in
+    /// `TypeDefKind::Record`). Empty for non-record types.
+    /// `None` per-entry = inherit parent type visibility.
+    #[serde(default)]
+    pub field_visibilities: Vec<Option<Visibility>>,
+}
+
+#[cfg(test)]
+impl TypeDef {
+    /// Minimal test constructor with sensible defaults.
+    /// `visibility: Public`, empty params/field_visibilities, no encoded type.
+    pub fn test_stub(name: &str, kind: TypeDefKind) -> Self {
+        Self {
+            name: name.to_string(),
+            params: vec![],
+            kind,
+            visibility: Visibility::Public,
+            span: Span::default(),
+            defining_module: None,
+            encoded_type: None,
+            field_visibilities: vec![],
+        }
+    }
 }
 
 /// The kind of a type definition.
@@ -55,8 +81,36 @@ pub struct Constructor {
     pub fields: Vec<Type>,
     /// Index of this constructor in the ADT (for encoding as sum type)
     pub index: usize,
+    /// Explicit visibility (None = inherit parent type visibility)
+    pub visibility: Option<Visibility>,
     /// Source span
     pub span: Span,
+}
+
+#[cfg(test)]
+impl Constructor {
+    /// Minimal test constructor with sensible defaults.
+    /// `visibility: None` (inherit parent), empty fields, default span.
+    pub fn test_stub(name: &str, index: usize) -> Self {
+        Self {
+            name: name.to_string(),
+            fields: vec![],
+            index,
+            visibility: None,
+            span: Span::default(),
+        }
+    }
+
+    /// Test constructor with specified fields.
+    pub fn test_with_fields(name: &str, index: usize, fields: Vec<Type>) -> Self {
+        Self {
+            name: name.to_string(),
+            fields,
+            index,
+            visibility: None,
+            span: Span::default(),
+        }
+    }
 }
 
 /// Information about a constructor, including its parent type.
@@ -68,10 +122,27 @@ pub struct ConstructorInfo {
     pub index: usize,
     /// Number of fields
     pub arity: usize,
+    /// Explicit visibility (None = inherit parent type visibility)
+    pub visibility: Option<Visibility>,
     /// The module where this constructor's type is canonically defined.
     /// Used for canonical type lookup when the constructor is imported.
     #[serde(skip)]
     pub defining_module: Option<ModulePath>,
+}
+
+#[cfg(test)]
+impl ConstructorInfo {
+    /// Minimal test constructor with sensible defaults.
+    /// `visibility: None` (inherit parent), `defining_module: None`.
+    pub fn test_stub(type_name: &str, index: usize, arity: usize) -> Self {
+        Self {
+            type_name: type_name.to_string(),
+            index,
+            arity,
+            visibility: None,
+            defining_module: None,
+        }
+    }
 }
 
 /// A value definition (function, theorem, or axiom).

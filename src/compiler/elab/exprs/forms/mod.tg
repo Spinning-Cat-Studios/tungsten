@@ -1,0 +1,21 @@
+// src/compiler/elab/exprs/forms/mod.tg
+// Expression form elaboration: result types, literals, tuples, proofs, patterns, comparison.
+
+pub mod result;
+pub mod compare;
+pub mod literals;
+pub mod tuples;
+pub mod proofs;
+pub mod equality;
+pub mod induction;
+pub mod annot;
+pub mod patterns;
+
+pub use elab::exprs::forms::compare::*;
+pub use elab::exprs::forms::literals::*;
+pub use elab::exprs::forms::tuples::{synth_tuple, check_tuple};
+pub use elab::exprs::forms::proofs::{synth_refl, check_refl, synth_have, synth_show, synth_assume, HaveParts};
+pub use elab::exprs::forms::equality::{synth_subst, synth_sym, synth_trans, synth_cong};
+pub use elab::exprs::forms::induction::{synth_natind, synth_natrec};
+pub use elab::exprs::forms::annot::synth_annot;
+pub use elab::exprs::forms::result::*;

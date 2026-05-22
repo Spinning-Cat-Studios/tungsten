@@ -1,0 +1,25 @@
+[E0010] Error: expected `Nat`, found `Bool`
+    ╭─[tests/golden/error/cross_file_diagnostic/main.tg:10:5]
+    │
+  9 │ fn main() -> Nat {
+    │              ─┬─  
+    │               ╰─── expected due to return type
+ 10 │     get_value()
+    │     ─────┬─────  
+    │          ╰─────── expected `Nat`, found `Bool`
+    │ 
+    │ Note: type expectation flows from:
+          → tests/golden/error/cross_file_diagnostic/main.tg:10  get_value call (expected Nat)
+          → tests/golden/error/cross_file_diagnostic/helper.tg:3  return type declared in `get_value`
+────╯
+note: return type declared in `get_value`
+   ╭─[tests/golden/error/cross_file_diagnostic/helper.tg:3:1]
+   │
+ 3 │ ╭─▶ pub fn get_value() -> Bool {
+   ┆ ┆   
+ 5 │ ├─▶ }
+   │ │       
+   │ ╰─────── return type declared in `get_value`
+───╯
+
+error: aborting due to 1 error

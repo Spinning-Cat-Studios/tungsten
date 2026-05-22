@@ -1,0 +1,111 @@
+// Benchmark: Closure chains (higher-order function composition)
+//
+// Tests: Closure allocation, environment capture, function application overhead
+// Chains multiple closures together and applies them repeatedly.
+//
+// Note: Uses addition-only composition (no mul) to keep Peano values small.
+// compose(add_n(3), add_n(2)) = add 5, applied 10 times to 0 = 50.
+// Map add_5 over range(20), sum = 310. Total = 360.
+// Default: 5000 iterations for ~200ms runtime.
+// Usage: ./closure_chain [iterations]  (default: 5000)
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+pub type PNat = PZero | PSucc(PNat)
+pub type PList = PNil | PCons(PNat, PList)
+
+fn padd(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => b,
+    PSucc(p) => PSucc(padd(p, b)),
+  }
+}
+
+fn to_nat(n: PNat) -> Nat {
+  match n {
+    PZero() => 0,
+    PSucc(p) => 1 + to_nat(p),
+  }
+}
+
+fn compose(f: PNat -> PNat, g: PNat -> PNat) -> PNat -> PNat {
+  |x: PNat| f(g(x))
+}
+
+fn add_n(n: PNat) -> PNat -> PNat {
+  |x: PNat| padd(x, n)
+}
+
+fn apply_n_times(f: PNat -> PNat, n: PNat, x: PNat) -> PNat {
+  match n {
+    PZero() => x,
+    PSucc(p) => apply_n_times(f, p, f(x)),
+  }
+}
+
+fn pmap(f: PNat -> PNat, xs: PList) -> PList {
+  match xs {
+    PNil() => PNil,
+    PCons(h, t) => PCons(f(h), pmap(f, t)),
+  }
+}
+
+fn psum(xs: PList) -> PNat {
+  match xs {
+    PNil() => PZero,
+    PCons(h, t) => padd(h, psum(t)),
+  }
+}
+
+fn prange(n: PNat) -> PList {
+  match n {
+    PZero() => PNil,
+    PSucc(p) => PCons(n, prange(p)),
+  }
+}
+
+fn pmul(a: PNat, b: PNat) -> PNat {
+  match a {
+    PZero() => PZero,
+    PSucc(p) => padd(b, pmul(p, b)),
+  }
+}
+
+fn mk_5() -> PNat { PSucc(PSucc(PSucc(PSucc(PSucc(PZero))))) }
+fn mk_10() -> PNat { PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PZero)))))))))) }
+
+fn run_once() -> Nat {
+  let p2 = PSucc(PSucc(PZero));
+  let p3 = PSucc(p2);
+  let p10 = PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PZero))))))))));
+  let p20 = PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(
+            PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(PSucc(
+            PZero))))))))))))))))))));
+  let f = compose(add_n(p3), add_n(p2));
+  let result1 = apply_n_times(f, p10, PZero);
+  let xs = prange(p20);
+  let mapped = pmap(f, xs);
+  to_nat(padd(result1, psum(mapped)))
+}
+
+fn repeat_bench(n: PNat, acc: Nat) -> Nat {
+  match n {
+    PZero() => acc,
+    PSucc(p) => repeat_bench(p, acc + run_once()),
+  }
+}
+
+fn from_nat(n: Nat) -> PNat {
+  if n == 0 { PZero } else { PSucc(from_nat(n - 1)) }
+}
+
+fn get_iterations() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 5000 }
+}
+
+fn main() -> Nat {
+  // Default: 5000 iterations, each = 360. Total = 1800000
+  repeat_bench(from_nat(get_iterations()), 0)
+}

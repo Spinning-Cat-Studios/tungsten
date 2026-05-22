@@ -1,0 +1,12 @@
+// Module defining an ADT with constructors.
+
+pub type Shape =
+    | Circle(Nat)
+    | Square(Nat)
+
+pub fn area(s: Shape) -> Nat {
+    match s {
+        Circle(r) => r,
+        Square(w) => w
+    }
+}

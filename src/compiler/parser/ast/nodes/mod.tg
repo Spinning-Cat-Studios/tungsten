@@ -1,0 +1,21 @@
+// src/compiler/parser/ast/nodes/mod.tg
+// AST node types module — re-exports all sub-modules for backwards compatibility.
+// Types have mutual recursion across files (TypeExpr ↔ Expr ↔ Stmt ↔ Item);
+// the three-phase elaboration pipeline handles this via global stub registration.
+
+pub mod types;
+pub mod exprs;
+pub mod items;
+
+// Re-export everything from sub-modules
+pub use parser::ast::nodes::types::*;
+pub use parser::ast::nodes::exprs::*;
+pub use parser::ast::nodes::items::*;
+
+// Re-export pattern types for convenience (was in original nodes.tg)
+pub use parser::ast::pattern::{Pattern, pattern_span};
+
+// Re-export common types for convenience (was in original nodes.tg)
+pub use parser::ast::common::{Path, MkPath, path_new, path_simple, path_span, path_segments, path_append};
+pub use parser::ast::common::{ident_list_singleton, ident_list_append};
+pub use parser::ast::common::{PathSegment};

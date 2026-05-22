@@ -1,0 +1,95 @@
+// Test: Three-outcome type argument extraction (ADR 20.5.26c)
+//
+// Verifies that extract_type_arg_from_match correctly distinguishes
+// Found / Compatible / Mismatch via observable polymorphic instantiation
+// behaviour.
+
+pub type List<T> = | Nil | Cons(T, List<T>)
+
+pub type Option<T> = | None | Some(T)
+
+pub type Result<T, E> =
+    | Ok(T)
+    | Err(E)
+
+pub type Pair<A, B> = { fst: A, snd: B }
+
+// ---------------------------------------------------------------------------
+// Case 1: Found — target variable is extracted (existing behaviour)
+// Ok(42) checked against Result<Nat, String> finds T=Nat
+// ---------------------------------------------------------------------------
+
+fn test_found_basic() -> Unit {
+    let x: Result<Nat, String> = Ok(42);
+    expect_type(x, "(Nat + String)");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 2: Compatible — ground types match without target variable
+// Nil checked against List<Nat> — the Sum(Unit, ...) left branch is
+// Unit vs Unit (Compatible), then right branch finds T=Nat
+// ---------------------------------------------------------------------------
+
+fn test_compatible_ground_types() -> Unit {
+    let x: List<Nat> = Nil;
+    expect_type(x, "List<Nat>");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 3: Compatible — non-target TyVar in pattern
+// Result<T, E>: Err("msg") checked against Result<Nat, String>
+// The T in Sum(T, E) is non-target when solving E, returns Compatible
+// ---------------------------------------------------------------------------
+
+fn test_compatible_non_target_tyvar() -> Unit {
+    let x: Result<Nat, String> = Err("msg");
+    expect_type(x, "(Nat + String)");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 4: Multi-param — Compatible on left, Found on right
+// Result<Nat, String>: both T and E must be solved independently.
+// When solving T from Ok(42), the E branch is Compatible (non-target).
+// ---------------------------------------------------------------------------
+
+fn test_compatible_then_found() -> Unit {
+    let x: Result<Nat, String> = Ok(42);
+    expect_type(x, "(Nat + String)");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 5: Nested Compatible — deep structure with ground types
+// Ok((42, "hello")) checked against Result<(Nat, String), Bool>
+// Product(Nat, String) matched against Product(Nat, String) — all Compatible,
+// then error branch finds E=Bool
+// ---------------------------------------------------------------------------
+
+fn test_nested_compatible() -> Unit {
+    let x: Result<(Nat, String), Bool> = Ok((42, "hello"));
+    expect_type(x, "((Nat × String) + Bool)");
+    ()
+}
+
+// ---------------------------------------------------------------------------
+// Case 6: Mismatch — structurally incompatible types produce error
+// Trying to assign a Nat where a String is expected inside a constructor
+// ---------------------------------------------------------------------------
+
+fn test_mismatch_produces_error() -> Unit {
+    expect_error(
+        {
+            let x: Result<String, Bool> = Ok(42);
+            x
+        },
+        "E0010"
+    );
+    ()
+}
+
+fn main() -> Nat {
+    0
+}

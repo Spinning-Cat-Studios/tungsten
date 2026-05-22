@@ -1,0 +1,254 @@
+// src/compiler/elab/cir/constructors.tg
+// Helper constructor functions for CodegenIR and CodegenType.
+
+use driver::ffi::{List, Nil, Cons, cstring_to_string};
+use elab::ffi::{
+    TypeHandle,
+    tg_type_tag,
+    tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
+    tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_get_forall_var, tg_type_get_forall_body,
+    tg_type_get_mu_var, tg_type_get_mu_body,
+    tg_type_get_tyvar_name
+};
+use elab::cir::free_vars::free_vars;
+use elab::cir::types::{CodegenIR, CodegenType,
+    CIRNatLit, CIRVar, CIRGlobal, CIRLambda, CIRApp, CIRLet,
+    CIRPair, CIRFst, CIRSnd, CIRInl, CIRInr, CIRCase,
+    CIRIf, CIRFold, CIRUnfold, CIRExternCall,
+    CIRCaptureList, CIRCaptureNil,
+    CTNat, CTBool, CTString, CTUnit, CTVoid, CTProp,
+    CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq
+};
+
+// ===========================================================================
+// TERM HELPER CONSTRUCTORS
+// ===========================================================================
+
+/// Create a natural number literal CIR.
+pub fn cir_nat_lit(n: Nat) -> CodegenIR {
+    CIRNatLit(n)
+}
+
+/// Create a variable reference.
+pub fn cir_var(name: String, ty: CodegenType) -> CodegenIR {
+    CIRVar(name, ty)
+}
+
+/// Create a global reference.
+pub fn cir_global(path: String) -> CodegenIR {
+    CIRGlobal(path)
+}
+
+/// Create a lambda with automatically computed captures.
+pub fn cir_lambda(name: String, ty: CodegenType, body: CodegenIR, ret_ty: CodegenType) -> CodegenIR {
+    let captures = free_vars(body, Cons(name, Nil()));
+    CIRLambda(name, ty, body, captures, ret_ty)
+}
+
+/// Create an application.
+pub fn cir_app(func: CodegenIR, arg: CodegenIR, arg_ty: CodegenType, ret_ty: CodegenType) -> CodegenIR {
+    CIRApp(func, arg, arg_ty, ret_ty)
+}
+
+/// Create a let binding.
+pub fn cir_let(name: String, ty: CodegenType, def: CodegenIR, body: CodegenIR) -> CodegenIR {
+    CIRLet(name, ty, def, body)
+}
+
+/// Create a pair.
+pub fn cir_pair(fst: CodegenIR, snd: CodegenIR) -> CodegenIR {
+    CIRPair(fst, snd)
+}
+
+/// Create first projection.
+pub fn cir_fst(p: CodegenIR) -> CodegenIR {
+    CIRFst(p)
+}
+
+/// Create second projection.
+pub fn cir_snd(p: CodegenIR) -> CodegenIR {
+    CIRSnd(p)
+}
+
+/// Create left injection.
+pub fn cir_inl(v: CodegenIR, sum_ty: CodegenType) -> CodegenIR {
+    CIRInl(v, sum_ty)
+}
+
+/// Create right injection.
+pub fn cir_inr(v: CodegenIR, sum_ty: CodegenType) -> CodegenIR {
+    CIRInr(v, sum_ty)
+}
+
+/// Create case analysis from TypeHandle values (converts to CodegenType).
+/// Avoids repeating type_handle_to_codegen_type at every CIRCase site.
+pub fn build_cir_case_from_handles(
+    scrut_cir: CodegenIR,
+    sum_ty_handle: TypeHandle,
+    left_name: String,
+    left_cir: CodegenIR,
+    right_name: String,
+    right_cir: CodegenIR,
+    result_ty_handle: TypeHandle
+) -> CodegenIR {
+    let sum_ct = type_handle_to_codegen_type(sum_ty_handle);
+    let result_ct = type_handle_to_codegen_type(result_ty_handle);
+    CIRCase(scrut_cir, sum_ct, left_name, left_cir, right_name, right_cir, result_ct)
+}
+
+/// Create an if-then-else.
+pub fn cir_if(cond: CodegenIR, then_e: CodegenIR, else_e: CodegenIR) -> CodegenIR {
+    CIRIf(cond, then_e, else_e)
+}
+
+/// Create a fold.
+pub fn cir_fold(mu_ty: CodegenType, v: CodegenIR) -> CodegenIR {
+    CIRFold(mu_ty, v)
+}
+
+/// Create an unfold.
+pub fn cir_unfold(mu_ty: CodegenType, v: CodegenIR) -> CodegenIR {
+    CIRUnfold(mu_ty, v)
+}
+
+/// Create an extern call.
+pub fn cir_extern_call(name: String, args: List<CodegenIR>) -> CodegenIR {
+    CIRExternCall(name, args)
+}
+
+// ===========================================================================
+// TYPE HELPER CONSTRUCTORS
+// ===========================================================================
+
+/// Create Nat type.
+pub fn ct_nat() -> CodegenType {
+    CTNat
+}
+
+/// Create Bool type.
+pub fn ct_bool() -> CodegenType {
+    CTBool
+}
+
+/// Create String type.
+pub fn ct_string() -> CodegenType {
+    CTString
+}
+
+/// Create Unit type.
+pub fn ct_unit() -> CodegenType {
+    CTUnit
+}
+
+/// Create Void type.
+pub fn ct_void() -> CodegenType {
+    CTVoid
+}
+
+/// Create Prop type.
+pub fn ct_prop() -> CodegenType {
+    CTProp
+}
+
+/// Create Arrow type.
+pub fn ct_arrow(domain: CodegenType, codomain: CodegenType) -> CodegenType {
+    CTArrow(domain, codomain)
+}
+
+/// Create Product type.
+pub fn ct_pair(left: CodegenType, right: CodegenType) -> CodegenType {
+    CTPair(left, right)
+}
+
+/// Create Sum type.
+pub fn ct_sum(left: CodegenType, right: CodegenType) -> CodegenType {
+    CTSum(left, right)
+}
+
+/// Create Ref type.
+pub fn ct_ref(inner: CodegenType) -> CodegenType {
+    CTRef(inner)
+}
+
+/// Create Ptr type.
+pub fn ct_ptr(inner: CodegenType) -> CodegenType {
+    CTPtr(inner)
+}
+
+/// Create type variable.
+pub fn ct_var(name: String) -> CodegenType {
+    CTVar(name)
+}
+
+/// Create forall type.
+pub fn ct_forall(name: String, body: CodegenType) -> CodegenType {
+    CTForall(name, body)
+}
+
+/// Create mu (recursive) type.
+pub fn ct_mu(name: String, body: CodegenType) -> CodegenType {
+    CTMu(name, body)
+}
+
+/// Create equality type.
+pub fn ct_eq(ty: CodegenType, lhs: CodegenIR, rhs: CodegenIR) -> CodegenType {
+    CTEq(ty, lhs, rhs)
+}
+
+// ===========================================================================
+// TYPE HANDLE → CODEGEN TYPE CONVERSION
+// ===========================================================================
+
+/// Convert a TypeHandle (opaque Nat) to a CodegenType using FFI introspection.
+///
+/// Uses tg_type_tag() to identify the type variant and recursively converts
+/// composite types. Falls back to CTUnit for unrecognized types.
+pub fn type_handle_to_codegen_type(ty: TypeHandle) -> CodegenType {
+    let tag = tg_type_tag(ty);
+    if tag == 0 { CTNat }
+    else if tag == 1 { CTBool }
+    else if tag == 2 { CTString }
+    else if tag == 3 { CTUnit }
+    else if tag == 4 { CTVoid }
+    else if tag == 5 { CTProp }
+    else if tag == 6 {
+        // Arrow
+        let d = type_handle_to_codegen_type(tg_type_get_arrow_domain(ty));
+        let c = type_handle_to_codegen_type(tg_type_get_arrow_codomain(ty));
+        CTArrow(d, c)
+    }
+    else if tag == 7 {
+        // Product
+        let l = type_handle_to_codegen_type(tg_type_get_product_left(ty));
+        let r = type_handle_to_codegen_type(tg_type_get_product_right(ty));
+        CTPair(l, r)
+    }
+    else if tag == 8 {
+        // Sum
+        let l = type_handle_to_codegen_type(tg_type_get_sum_left(ty));
+        let r = type_handle_to_codegen_type(tg_type_get_sum_right(ty));
+        CTSum(l, r)
+    }
+    else if tag == 9 {
+        // TyVar
+        CTVar(cstring_to_string(tg_type_get_tyvar_name(ty)))
+    }
+    else if tag == 10 {
+        // Forall
+        let v = cstring_to_string(tg_type_get_forall_var(ty));
+        let b = type_handle_to_codegen_type(tg_type_get_forall_body(ty));
+        CTForall(v, b)
+    }
+    else if tag == 11 {
+        // Mu
+        let v = cstring_to_string(tg_type_get_mu_var(ty));
+        let b = type_handle_to_codegen_type(tg_type_get_mu_body(ty));
+        CTMu(v, b)
+    }
+    else {
+        // Eq (12), Ref (13), Ptr (14), App (15), unknown (99)
+        CTUnit
+    }
+}

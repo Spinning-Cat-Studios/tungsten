@@ -1,0 +1,212 @@
+// src/compiler/elab/exprs/records/named.tg
+// Named record constructor elaboration (ADR 13.5.26h/i).
+//
+// Handles `TypeName { field: value, ... }` and `TypeName { ...spread, field: value }` syntax.
+// Validates fields and reorders to canonical order before delegating to check_record_fields.
+
+use lexer::span::Span;
+use parser::ast::{Ident, ident_name, Path, path_item_name, FieldInit};
+use parser::ast::nodes::{MaybeExpr, NoExpr, SomeExpr};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_len, list_contains_string, list_reverse};
+use elab::ffi::{TypeHandle, INVALID_HANDLE};
+use elab::env::{
+    Env, env_lookup_type_def,
+    TypeDefInfo,
+    MaybeTypeDef, NoTypeDef, SomeTypeDef,
+    MaybeRecordFields, NoRecordFields, SomeRecordFields,
+    RecordFieldInfo
+};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error};
+use elab::exprs::records::deep_eq::{check_record_fields, get_structural_type};
+use elab::exprs::records::spread::{SpreadArgs, synth_named_spread};
+
+// ===========================================================================
+// NAMED RECORD CONSTRUCTOR
+// ===========================================================================
+
+/// Synthesize a named record constructor: `TypeName { field: value, ... }`
+/// or `TypeName { ...spread, field: value, ... }` (ADR 13.5.26h/i)
+///
+/// 1. Resolve type name
+/// 2. Reject generic records (unsupported)
+/// 3. Verify it's a record type with fields
+/// 4. If spread: delegate to spread handler
+///    Else: check for duplicates, reorder, elaborate
+pub fn synth_named_record(
+    env: Env,
+    name: Path,
+    spread: MaybeExpr,
+    fields: List<FieldInit>,
+    span: Span
+) -> ElabExprResult {
+    let type_name = ident_name(path_item_name(name));
+
+    match env_lookup_type_def(env, type_name) {
+        NoTypeDef() =>
+            ElabExprErr(elab_expr_error("undefined type in named record constructor", span)),
+        SomeTypeDef(info) =>
+            synth_named_record_resolved(env, info, spread, fields, span)
+    }
+}
+
+fn synth_named_record_resolved(
+    env: Env,
+    info: TypeDefInfo,
+    spread: MaybeExpr,
+    fields: List<FieldInit>,
+    span: Span
+) -> ElabExprResult {
+    if info.arity > 0 {
+        ElabExprErr(elab_expr_error(
+            "named record constructor for generic types is not yet supported",
+            span
+        ))
+    } else {
+        match info.record_fields {
+            NoRecordFields() =>
+                ElabExprErr(elab_expr_error(
+                    "named record constructor requires a record type, not an ADT or alias",
+                    span
+                )),
+            SomeRecordFields(def_fields) =>
+                match spread {
+                    SomeExpr(spread_expr) =>
+                        let expected = info.encoded_type;
+                        let args: SpreadArgs = { spread_expr: spread_expr, fields: fields, def_fields: def_fields, expected: expected };
+                        synth_named_spread(env, args, span),
+                    NoExpr() =>
+                        synth_named_no_spread(env, info, def_fields, fields, span)
+                }
+        }
+    }
+}
+
+fn synth_named_no_spread(
+    env: Env,
+    info: TypeDefInfo,
+    def_fields: List<RecordFieldInfo>,
+    fields: List<FieldInit>,
+    span: Span
+) -> ElabExprResult {
+    match find_duplicate_field(fields) {
+        SomeDupField(dup_name) =>
+            ElabExprErr(elab_expr_error("duplicate field in named record constructor", span)),
+        NoDupField() =>
+            let expected = info.encoded_type;
+            synth_named_reordered(env, expected, def_fields, fields, span)
+    }
+}
+
+fn synth_named_reordered(
+    env: Env,
+    expected: TypeHandle,
+    def_fields: List<RecordFieldInfo>,
+    fields: List<FieldInit>,
+    span: Span
+) -> ElabExprResult {
+    match reorder_fields(def_fields, fields, span) {
+        ReorderErr(msg) => ElabExprErr(elab_expr_error(msg, span)),
+        ReorderOk(reordered) =>
+            check_record_fields(env, expected, reordered, span)
+    }
+}
+
+// ===========================================================================
+// FIELD REORDERING
+// ===========================================================================
+
+/// Result of field reordering.
+type ReorderResult =
+    | ReorderOk(List<FieldInit>)
+    | ReorderErr(String)
+
+/// Reorder user-provided fields to match the canonical definition order.
+/// Also checks for missing and extra fields.
+fn reorder_fields(
+    def_fields: List<RecordFieldInfo>,
+    user_fields: List<FieldInit>,
+    span: Span
+) -> ReorderResult {
+    // Check count: user fields must match def fields
+    let def_count = list_len(def_fields);
+    let user_count = list_len(user_fields);
+    if user_count > def_count {
+        ReorderErr("extra field in named record constructor")
+    } else if user_count < def_count {
+        ReorderErr("missing field in named record constructor")
+    } else {
+        reorder_fields_loop(def_fields, user_fields, Nil)
+    }
+}
+
+/// For each definition field (in order), find the matching user field.
+fn reorder_fields_loop(
+    def_fields: List<RecordFieldInfo>,
+    user_fields: List<FieldInit>,
+    acc: List<FieldInit>
+) -> ReorderResult {
+    match def_fields {
+        Nil() => ReorderOk(list_reverse(acc)),
+        Cons(def_field, rest_defs) =>
+            reorder_one_field(def_field, rest_defs, user_fields, acc)
+    }
+}
+
+fn reorder_one_field(
+    def_field: RecordFieldInfo,
+    rest_defs: List<RecordFieldInfo>,
+    user_fields: List<FieldInit>,
+    acc: List<FieldInit>
+) -> ReorderResult {
+    match find_user_field(user_fields, def_field.name) {
+        NoUserField() =>
+            ReorderErr("missing field in named record constructor"),
+        SomeUserField(found) =>
+            reorder_fields_loop(rest_defs, user_fields, Cons(found, acc))
+    }
+}
+
+/// Find a user field by name.
+pub type UserFieldResult =
+    | SomeUserField(FieldInit)
+    | NoUserField
+
+pub fn find_user_field(fields: List<FieldInit>, name: String) -> UserFieldResult {
+    match fields {
+        Nil() => NoUserField,
+        Cons(f, rest) =>
+            if ident_name(f.name) == name {
+                SomeUserField(f)
+            } else {
+                find_user_field(rest, name)
+            }
+    }
+}
+
+// ===========================================================================
+// DUPLICATE FIELD DETECTION
+// ===========================================================================
+
+/// Result of duplicate field check.
+pub type DupFieldResult =
+    | NoDupField
+    | SomeDupField(String)
+
+/// Check if any field name appears more than once.
+pub fn find_duplicate_field(fields: List<FieldInit>) -> DupFieldResult {
+    find_duplicate_field_loop(fields, Nil)
+}
+
+fn find_duplicate_field_loop(fields: List<FieldInit>, seen: List<String>) -> DupFieldResult {
+    match fields {
+        Nil() => NoDupField,
+        Cons(f, rest) =>
+            let name = ident_name(f.name);
+            if list_contains_string(seen, name) {
+                SomeDupField(name)
+            } else {
+                find_duplicate_field_loop(rest, Cons(name, seen))
+            }
+    }
+}
