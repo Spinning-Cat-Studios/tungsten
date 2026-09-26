@@ -1,0 +1,29 @@
+// CONTROL — a single-constructor, TWO-field wrapper (ADR 18.9.26d).
+//
+// `Pair = MkPair(Nat, Nat)` encodes to a product, so its match already takes
+// the dispatcher's product arm. Same answer as the subject: if this passes
+// and the subject does not, the defect is the one-field (unwrapped) encoding,
+// not single-constructor matching in general.
+//
+// The values are built as tuple literals checked against `Pair`, not as
+// `MkPair(4, 0)`: the self-host still elaborates a multi-field constructor
+// APPLICATION to a curried call on a unary lambda, which `tungsten1 run`
+// cannot evaluate (ADR 3.9.26e). That is the construction side; this pair is
+// about the match, so the control must not stand on it.
+
+type Pair = MkPair(Nat, Nat)
+
+fn unpair_checked(pair: Pair) -> Nat {
+    match pair { MkPair(a, b) => a * 10 + b }
+}
+
+fn unpair_synth(pair: Pair) -> Nat {
+    let field_sum = match pair { MkPair(a, b) => a + b };
+    field_sum
+}
+
+pub fn main() -> Nat {
+    let forty: Pair = (4, 0);
+    let seven: Pair = (3, 4);
+    unpair_checked(forty) + unpair_synth(seven)
+}

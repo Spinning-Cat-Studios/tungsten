@@ -1,0 +1,64 @@
+// src/compiler/parser/ast/normalize/common.tg
+// The driver never reaches this module: span normalization is a test affordance,
+// imported only by the AST-comparison entry files. See normalize/mod.tg
+// (ADR 3.9.26a).
+// Span normalization for the AST leaf types: spans, identifiers and paths.
+// See `parser::ast::normalize` (mod.tg) for the policy these implement.
+
+use lexer::span::Span;
+use parser::ast::common::{Ident, ident_new, Path, MkPath, path_new};
+use parser::ast::nodes::attributes::{Attribute, attribute_new};
+use parser::option::{Option, None, Some};
+use driver::ffi::{List, Nil, Cons};
+
+/// The span every normalized node carries.
+///
+/// Its value is arbitrary — all that matters is that it is the SAME for every
+/// normalized node, so that two ASTs differing only in source positions become
+/// structurally equal. An empty span at offset zero is the obvious choice and
+/// matches what the parser itself uses for error recovery.
+pub fn canonical_span() -> Span {
+    { start: 0, end: 0, file: "" }
+}
+
+/// Normalize an identifier, keeping its name and discarding its position.
+pub fn strip_spans_ident(id: Ident) -> Ident {
+    ident_new(id.name, canonical_span())
+}
+
+pub fn strip_spans_ident_list(ids: List<Ident>) -> List<Ident> {
+    match ids {
+        Nil() => Nil(),
+        Cons(id, rest) => Cons(strip_spans_ident(id), strip_spans_ident_list(rest))
+    }
+}
+
+/// Normalize a path: every segment identifier plus the path's own span.
+pub fn strip_spans_path(p: Path) -> Path {
+    match p {
+        MkPath(segments, _) => path_new(strip_spans_ident_list(segments), canonical_span())
+    }
+}
+
+/// Normalize one item attribute: its name, its optional argument, its own span.
+pub fn strip_spans_attribute(attr: Attribute) -> Attribute {
+    attribute_new(
+        strip_spans_ident(attr.name),
+        strip_spans_maybe_ident(attr.arg),
+        canonical_span()
+    )
+}
+
+pub fn strip_spans_attribute_list(attrs: List<Attribute>) -> List<Attribute> {
+    match attrs {
+        Nil() => Nil(),
+        Cons(attr, rest) => Cons(strip_spans_attribute(attr), strip_spans_attribute_list(rest))
+    }
+}
+
+fn strip_spans_maybe_ident(id: Option<Ident>) -> Option<Ident> {
+    match id {
+        None() => None,
+        Some(inner) => Some(strip_spans_ident(inner))
+    }
+}

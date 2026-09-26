@@ -7,18 +7,27 @@
 //! Legacy flat paths (e.g., `doctor check stubs`) remain as hidden aliases.
 //! See ADR 16.4.26b for original design rationale.
 
+pub mod audit_dead_definitions;
+pub mod audit_driver_reach;
 pub mod audit_mutual_types;
-mod audit_recursion;
-mod check_ir;
-mod check_type;
+pub mod audit_orphan_sources;
+pub mod audit_recursion;
+mod check_commands;
 pub mod checks;
 pub mod diff_types;
 mod dispatch;
+/// Shared route-lowering probe (ADR 12.7.26c) — instantiates a `TypeLowering`,
+/// so it is only present under the `codegen` feature. `pub` so the bin's
+/// `info type lowering` can share it with the doctor check.
+#[cfg(feature = "codegen")]
+pub mod lowering_probe;
 mod map_span;
 mod module_overlap;
 mod self_test;
 pub(crate) mod suggest_tools;
 
+#[cfg(test)]
+mod cli_tests;
 #[cfg(test)]
 mod tests;
 
@@ -27,9 +36,18 @@ use std::process::ExitCode;
 
 use clap::Subcommand;
 
-pub use check_ir::CheckIrCommands;
-pub use check_type::{CheckTypeCommands, EncodingDepthArgs};
+#[cfg(feature = "codegen")]
+pub use check_commands::check_codegen::{flatten_codegen_check, CheckCodegenCommands};
+pub use check_commands::check_ir::CheckIrCommands;
+pub use check_commands::check_link::CheckLinkCommands;
+pub use check_commands::check_module::CheckModuleCommands;
+pub use check_commands::check_selfhost::CheckSelfhostCommands;
+pub use check_commands::check_type::{CheckTypeCommands, EncodingDepthArgs};
+pub use check_commands::CheckCommands;
 pub use dispatch::cmd_doctor;
+// Module re-exports so dispatch.rs's `use super::*` keeps resolving
+// `check_ir::` / `check_type::` after the check_commands/ grouping.
+pub(crate) use check_commands::{check_ir, check_link, check_module, check_selfhost, check_type};
 
 #[derive(Subcommand)]
 pub enum DoctorCommands {
@@ -72,6 +90,105 @@ pub enum DoctorCommands {
     AuditRecursion {
         /// The source file to analyze
         file: PathBuf,
+
+        /// Skip the codegen consult; report the source-level estimate only
+        /// (ADR 1.7.26b §2.2). Default consults codegen when the backend is
+        /// available so the musttail verdict reflects the *actual* gate.
+        #[arg(long = "source-only")]
+        source_only: bool,
+    },
+
+    /// Census the definitions no entry point reaches (ADR 12.8.26b retrospective)
+    ///
+    /// Reachability from a declared root set, NOT an in-degree count: a
+    /// mutually recursive pair nothing else calls has callers — each other —
+    /// and is still dead.
+    ///
+    /// Roots are `main` and every `test_*` definition (the `tungsten test`
+    /// discovery convention); `--root` adds more. The set is printed on every
+    /// run, because a census that walked from the wrong roots is confidently
+    /// wrong rather than visibly empty.
+    ///
+    /// Reports; never gates. Dead code is a finding to weigh.
+    ///
+    /// Examples:
+    ///   tungsten doctor audit-dead-definitions src/compiler/main.tg
+    ///   tungsten doctor audit-dead-definitions main.tg --root api_entry
+    ///
+    /// See also: `tungsten info def <name> <file> --callers` for one definition.
+    AuditDeadDefinitions {
+        /// The source file to analyze
+        file: PathBuf,
+
+        /// Treat this definition as an entry point (repeatable)
+        #[arg(long = "root")]
+        roots: Vec<String>,
+    },
+
+    /// Partition modules into driver-reached, test-only and unreached (ADR 3.9.26a)
+    ///
+    /// Answers "does the driver run this?" — a question about MODULES that
+    /// spans ENTRY FILES, which `audit-dead-definitions` cannot express: it is
+    /// per entry file and per definition, so it calls a test-only subsystem
+    /// unreachable from `main.tg` and live from `test_codegen.tg`, and neither
+    /// answer is the one you asked for.
+    ///
+    /// Reach is the module-level `use` graph, NOT the module tree: `main.tg`
+    /// declares `mod codegen;` and no driver path imports it. Reaching
+    /// `a::b::c` reaches `a::b` and `a`. Cost 2 (parse only) — the
+    /// occurrence-graph route would cost one full elaboration per entry file.
+    ///
+    /// Test roots are the sibling `test_*.tg` / `mustfail_*.tg` entry files;
+    /// `--test-entry` adds more. Reports, never gates: a module that is
+    /// test-only today and driver-reached tomorrow is progress.
+    ///
+    /// Examples:
+    ///   tungsten doctor audit-driver-reach src/compiler/main.tg
+    ///   tungsten doctor audit-driver-reach main.tg --test-entry suites/extra.tg
+    ///
+    /// See also: `tungsten doctor audit-dead-definitions <file>` for the
+    /// per-definition census, `tungsten info module tree <file>` for the
+    /// declaration hierarchy this deliberately does not use.
+    AuditDriverReach {
+        /// The driver entry file to walk from
+        file: PathBuf,
+
+        /// Treat this file as an additional test entry point (repeatable)
+        #[arg(long = "test-entry")]
+        test_entries: Vec<PathBuf>,
+    },
+
+    /// Census the .tg files on disk that no module tree declares (ADR 3.9.26q)
+    ///
+    /// The filesystem MINUS the module tree, which is the one direction no
+    /// other tool can walk: `tungsten check`, `audit-dead-definitions` and
+    /// `audit-driver-reach` all start from an entry file and follow
+    /// declarations, so a file no `mod` statement names is not in any of their
+    /// starting sets. `code-health` does read the disk, and counts an orphan's
+    /// lines against the size budgets while never asking whether anything
+    /// reads it.
+    ///
+    /// Walks every `.tg` file under the entry file's directory, subtracts the
+    /// modules declared by that file's tree and by each sibling `test_*.tg` /
+    /// `mustfail_*.tg` tree, then splits the remainder three ways: STRANDED
+    /// (nothing names it), BUILD-SWAPPED (a `make` recipe or script copies it
+    /// into place — undeclared by design, not debt) and ENTRY FILES (roots, so
+    /// nothing declares them and nothing should). Cost 2 (parse only).
+    ///
+    /// Reports, never gates: a file can be legitimately undeclared while it is
+    /// being written, and whether a stranded file should be deleted or wired up
+    /// is a judgement.
+    ///
+    /// Examples:
+    ///   tungsten doctor audit-orphan-sources src/compiler/main.tg
+    ///
+    /// See also: `tungsten doctor audit-driver-reach <file>` partitions the
+    /// modules that ARE declared, `tungsten doctor audit-dead-definitions
+    /// <file>` the definitions inside them, `tungsten info module tree <file>`
+    /// the declaration hierarchy this subtracts.
+    AuditOrphanSources {
+        /// The entry file whose directory is walked and whose tree is subtracted
+        file: PathBuf,
     },
 
     /// Identify mutually recursive type groups
@@ -107,16 +224,48 @@ pub enum DoctorCommands {
         file: PathBuf,
     },
 
+    /// Check that each failure mode's companion diagnostic still reports (ADR 12.8.26a)
+    ///
+    /// Making a gate hard can make its own reporting tool unreachable: the tool
+    /// elaborates the file before printing, so a gate that aborts elaboration
+    /// deletes the diagnostic aimed at exactly the files it rejects. Nothing
+    /// else notices — the subcommand still exists and still describes its old
+    /// behaviour. Runs each (gate, companion) pairing against a fixture the gate
+    /// rejects and fails when reality disagrees with what the pairing declares,
+    /// **in either direction**. Cost 3 (elaborates small fixtures).
+    ///
+    /// A sibling of `suggest-tools` rather than a `check` subcommand: both ask
+    /// about the diagnostic surface itself, not about a program.
+    ///
+    /// See also: `tungsten doctor check type termination`,
+    /// `tungsten info def <name> <file> --why-not-certified`,
+    /// `tungsten doctor check type positivity`,
+    /// `tungsten doctor check type vacuous-mu`,
+    /// `tungsten info type type-encoding <T>` — the paired companions. Run the
+    /// command for the current table rather than counting them here: a figure
+    /// in prose is the drift this check exists to catch.
+    ///
+    /// Examples:
+    ///   tungsten doctor tool-reachability
+    #[command(name = "tool-reachability")]
+    ToolReachability,
+
     /// Suggest diagnostic tools for an error description (ADR 21.4.26d)
     ///
     /// Maps a free-text error description to ranked diagnostic commands.
     /// Uses keyword matching against a static pattern registry. Cost 1
     /// (no file I/O, no elaboration). Designed for AI agent consumption.
     ///
+    /// Describe what you SAW. Each pattern carries the words of the message
+    /// and the words of the observation (ADR 4.9.26d), so a description that
+    /// names no cause reaches the same commands as one that does — which is
+    /// the case the mandated first step exists for.
+    ///
     /// Examples:
     ///   tungsten doctor suggest-tools "SIGSEGV when running compiled program"
+    ///   tungsten doctor suggest-tools "reading a field gives back the wrong value"
     ///   tungsten doctor suggest-tools "type mismatch" --json
-    ///   tungsten doctor suggest-tools "stack overflow in recursive function"
+    ///   tungsten doctor suggest-tools "the compiler has printed nothing for ten minutes"
     SuggestTools {
         /// Free-text error description to match against
         description: String,
@@ -152,196 +301,11 @@ pub enum DoctorCommands {
     /// and IR hygiene. Each check targets a specific subsystem.
     ///
     /// Examples:
-    ///   tungsten doctor check stubs examples/hello.tg
+    ///   tungsten doctor check type integrity type-stubs examples/hello.tg
     ///   tungsten doctor check fold-consistency examples/list.tg
     ///   tungsten doctor check declares --from-existing-ir target/ll/
     ///
     /// See also: `tungsten info` for read-only inspection, `tungsten explain` for documentation.
     #[command(subcommand)]
     Check(CheckCommands),
-}
-
-/// Health check subcommands grouped under `tungsten doctor check`.
-///
-/// Sub-namespaces (ADR 12.5.26h):
-/// - `doctor check type ...` — type-system checks
-/// - `doctor check ir ...` — IR validation checks
-#[derive(Subcommand)]
-pub enum CheckCommands {
-    // ── Visible grouped sub-namespaces ──
-    /// Type-system health checks
-    ///
-    /// Sub-namespace for type encoding, normalization, phase invariant,
-    /// and constructor validation checks.
-    /// See `tungsten doctor check type --help` for details.
-    #[command(subcommand)]
-    Type(CheckTypeCommands),
-
-    /// IR validation checks
-    ///
-    /// Sub-namespace for LLVM IR layout and declaration hygiene checks.
-    /// See `tungsten doctor check ir --help` for details.
-    #[command(subcommand)]
-    Ir(CheckIrCommands),
-
-    // ── Visible top-level checks ──
-    /// Check pub use re-export completeness (ADR 8.5.26f)
-    ///
-    /// Walks the module tree and checks that every `pub use` declaration
-    /// actually copied items. Reports declarations that resolved to zero
-    /// items or had missing named imports.
-    ///
-    /// Examples:
-    ///   tungsten doctor check reexport-completeness src/compiler/main.tg
-    ReexportCompleteness {
-        /// The root source file to check
-        file: PathBuf,
-    },
-
-    /// Check for symbol collisions across object files (ADR 6.5.26d §2.5)
-    ///
-    /// Runs `nm -g` on object files in a directory and reports duplicate
-    /// defined text symbols that would cause linker errors.
-    ///
-    /// Examples:
-    ///   tungsten doctor check link-collisions /tmp/tungsten_codegen/
-    #[cfg(feature = "codegen")]
-    LinkCollisions {
-        /// Directory containing .o files to check
-        dir: PathBuf,
-    },
-
-    /// Check mono ownership coverage for all TyApp sites (ADR 8.5.26i)
-    ///
-    /// Runs the mono discovery + ownership pipeline, then walks all term
-    /// trees to verify every `TyApp(Global(name), ty)` has a corresponding
-    /// entry in the frozen ownership map.
-    ///
-    /// Examples:
-    ///   tungsten doctor check mono-coverage src/compiler/main.tg
-    #[cfg(feature = "codegen")]
-    MonoCoverage {
-        /// The root source file to check
-        file: PathBuf,
-    },
-
-    /// Detect foo.rs + foo/mod.rs coexistence (E0761 prevention)
-    ///
-    /// Walks Rust source directories and reports any file that has both
-    /// a standalone .rs file and a directory module with mod.rs.
-    /// Cost 1: filesystem walk only, no parsing or elaboration.
-    ///
-    /// Examples:
-    ///   tungsten doctor check module-overlap
-    ///   tungsten doctor check module-overlap --path tungsten_codegen/src
-    ///   tungsten doctor check module-overlap --json
-    ModuleOverlap {
-        /// Directory to scan (replaces default roots: bootstrap/src/ + tungsten_codegen/src/)
-        #[arg(long)]
-        path: Option<PathBuf>,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Check Phase A.5 global collection health (ADR 13.5.26g §2.3)
-    ///
-    /// Runs Phase A.5 (build combined AST + global collection) and reports
-    /// success or failure with source-level diagnostics. Cost 3 (elaboration).
-    ///
-    /// Examples:
-    ///   tungsten doctor check phase-a5 src/compiler/main.tg
-    ///   tungsten doctor check phase-a5 examples/list.tg
-    #[command(name = "phase-a5")]
-    PhaseA5 {
-        /// The root source file to check
-        file: PathBuf,
-    },
-
-    /// Verify compiled binary link health (ADR 19.5.26d)
-    ///
-    /// Checks that a compiled Tungsten binary has the expected properties:
-    /// stack size, executability, and correct linker flags. Cost 1 (no elaboration).
-    ///
-    /// Examples:
-    ///   tungsten doctor check link-health ./tungsten1
-    ///   tungsten doctor check link-health ./tungsten1 -v
-    LinkHealth {
-        /// Path to the compiled binary to check
-        binary: PathBuf,
-    },
-
-    /// Pre-flight checks for self-compile readiness (ADR 19.5.26d)
-    ///
-    /// Validates that the current platform and environment can successfully
-    /// self-compile: filesystem case sensitivity, C compiler, linker capabilities,
-    /// LLVM availability, and static library presence. Cost 1 (no elaboration).
-    ///
-    /// Examples:
-    ///   tungsten doctor check self-compile-readiness
-    ///   tungsten doctor check self-compile-readiness -v
-    SelfCompileReadiness,
-
-    /// Detect nested constructor+tuple match patterns (ADR 20.5.26a)
-    ///
-    /// Walks the AST and reports patterns of the form `Ctor((a, b))` where
-    /// a constructor pattern contains a tuple subpattern. These patterns are
-    /// known to cause "unknown value" errors in tungsten1. Cost 2 (parse only).
-    ///
-    /// Examples:
-    ///   tungsten doctor check nested-patterns src/compiler/main.tg
-    ///   tungsten doctor check nested-patterns src/compiler/main.tg -v
-    #[command(name = "nested-patterns")]
-    NestedPatterns {
-        /// The root source file to check
-        file: PathBuf,
-    },
-
-    // ── Hidden legacy aliases (ADR 12.5.26h §2.3) ──
-    #[command(name = "normalization-consistency", hide = true)]
-    NormalizationConsistencyLegacy { file: PathBuf },
-
-    #[command(name = "encoding-depth", hide = true)]
-    EncodingDepthLegacy(EncodingDepthArgs),
-
-    #[command(name = "type-sizes", hide = true)]
-    TypeSizesLegacy {
-        file: PathBuf,
-        #[arg(long, default_value_t = 5000)]
-        max_nodes: usize,
-    },
-
-    #[command(name = "phase-invariants", hide = true)]
-    PhaseInvariantsLegacy { file: PathBuf },
-
-    #[command(name = "fold-consistency", hide = true)]
-    FoldConsistencyLegacy {
-        file: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-
-    #[command(name = "ir-layout", hide = true)]
-    IrLayoutLegacy {
-        file: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-
-    #[command(name = "stubs", hide = true)]
-    StubsLegacy { file: PathBuf },
-
-    #[command(name = "constructor-counts", hide = true)]
-    ConstructorCountsLegacy {
-        file: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-
-    #[command(name = "declares", hide = true)]
-    DeclaresLegacy {
-        #[arg(long)]
-        from_existing_ir: PathBuf,
-    },
 }

@@ -1,0 +1,78 @@
+// src/compiler/driver/pipeline/test/harness/rewrite.tg
+// Renaming the user's `main` out of the way, by SPAN rather than by text
+// search (ADR 7.8.26b §2.3).
+//
+// The old `rename_user_main` replaced the first textual `pub fn main(`. Three
+// things were wrong with that, and all three are fixed by asking the parser:
+//
+//   * a non-`pub` `fn main(` survived the rewrite and then collided with the
+//     harness's own `main`;
+//   * a match inside a comment or a string literal was rewritten;
+//   * a file with no `main` at all — which is all 16 `src/compiler/test_*.tg` —
+//     paid a full string scan to find nothing.
+//
+// `Ident` carries a `Span`, so the identifier's exact byte range is already
+// known. Splicing it is total, and needs no notion of what `pub` looks like.
+//
+// ORDERING IS LOAD-BEARING: spans are byte offsets into the ORIGINAL source,
+// and `generate_harness_source` concatenates the (rewritten) user source with
+// the harness text — user source FIRST, so its prefix is preserved and the
+// offsets stay valid. Splice before concatenating. A future reorder that put
+// the harness first would shift every offset silently, with no type error.
+
+use driver::ffi::{List, Nil, Cons, string_len};
+use driver::util::{Option, Some, None, string_eq};
+use driver::util::strings::{string_slice};
+use lexer::span::{Span};
+use parser::ast::nodes::{Item, ItemFn};
+
+/// The span of the root `main` IDENTIFIER, if the file declares one.
+///
+/// The identifier, not the item: the replacement is a name, so splicing the
+/// item span would delete the function.
+pub fn root_main_name_span(items: List<Item>) -> Option<Span> {
+    match items {
+        Nil() => None,
+        Cons(item, rest) => first_main_span(item_main_name_span(item), rest)
+    }
+}
+
+// Partial (ADR 11.8.26b): the descent is on `rest`, but it crosses a helper
+// whose own parameter `rest` is not a subterm of ITS caller's root, so no call
+// site passes a strict structural subterm. A measure recursion in E0062's
+// sense; executable code no proof reaches.
+#[partial]
+fn first_main_span(here: Option<Span>, rest: List<Item>) -> Option<Span> {
+    match here {
+        Some(sp) => Some(sp),
+        None() => root_main_name_span(rest)
+    }
+}
+
+fn item_main_name_span(item: Item) -> Option<Span> {
+    match item {
+        ItemFn(f) => main_span_of(f.name.name, f.name.span),
+        _ => None
+    }
+}
+
+fn main_span_of(name: String, span: Span) -> Option<Span> {
+    if string_eq(name, "main") { Some(span) } else { None }
+}
+
+/// Rename the user's `main` so the harness's own `main` is the only one.
+///
+/// `None` — no root `main` — returns the source untouched, which is the common
+/// case and now costs nothing.
+pub fn rename_user_main(source: String, name_span: Option<Span>) -> String {
+    match name_span {
+        None() => source,
+        Some(sp) => splice_range(source, sp.start, sp.end, "_tungsten_user_main")
+    }
+}
+
+/// Replace `[start, end)` of `source` with `replacement`.
+pub fn splice_range(source: String, start: Nat, end: Nat, replacement: String) -> String {
+    string_slice(source, 0, start) ++ replacement ++
+        string_slice(source, end, string_len(source))
+}

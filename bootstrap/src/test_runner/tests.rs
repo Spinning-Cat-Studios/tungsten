@@ -1,7 +1,11 @@
-use super::{discover_tests, paint, scope_defs_to_module, CoreDef, ModuleScopeResult, Style};
+use super::{
+    classify_empty_suite, discover_tests, paint, scope_defs_to_module, EmptySuiteAction,
+    ModuleScopeResult, Style,
+};
 use crate::cli::{Cli, ColorMode, Commands};
 use clap::Parser;
 use std::path::{Path, PathBuf};
+use tungsten_bootstrap::elaborate::CoreDef;
 use tungsten_bootstrap::span::Span;
 use tungsten_core::terms::SpannedTerm;
 use tungsten_core::Type;
@@ -292,6 +296,56 @@ fn color_auto_is_default() {
                 color
             );
         }
+        other => panic!("expected Test command, got {:?}", other.map(|_| "other")),
+    }
+}
+
+// ── --require-tests: vacuous-empty-suite detection (ADR 2.7.26b T5b) ────────
+
+#[test]
+fn require_tests_fails_on_zero_discovered() {
+    // Nothing discovered, nothing skipped → still a failure under the flag.
+    assert_eq!(
+        classify_empty_suite(0, 0, true),
+        EmptySuiteAction::FailRequireTests
+    );
+}
+
+#[test]
+fn require_tests_fails_when_all_tests_skipped() {
+    // The `make tg-test` regression: every test_* returned Bool and was
+    // skipped-with-warning, leaving "ok. 0 passed" green while testing nothing.
+    assert_eq!(
+        classify_empty_suite(0, 5, true),
+        EmptySuiteAction::FailRequireTests
+    );
+}
+
+#[test]
+fn without_flag_empty_suite_reports_no_tests() {
+    assert_eq!(
+        classify_empty_suite(0, 0, false),
+        EmptySuiteAction::ReportNoTests
+    );
+}
+
+#[test]
+fn without_flag_skips_still_proceed_to_report() {
+    // Skip warnings must still print via run_and_report (existing behavior).
+    assert_eq!(classify_empty_suite(0, 3, false), EmptySuiteAction::Proceed);
+}
+
+#[test]
+fn runnable_tests_proceed_regardless_of_flag() {
+    assert_eq!(classify_empty_suite(2, 0, true), EmptySuiteAction::Proceed);
+    assert_eq!(classify_empty_suite(2, 4, false), EmptySuiteAction::Proceed);
+}
+
+#[test]
+fn require_tests_flag_parses() {
+    let cli = Cli::try_parse_from(["tungsten", "test", "file.tg", "--require-tests"]).unwrap();
+    match cli.command {
+        Some(Commands::Test { require_tests, .. }) => assert!(require_tests),
         other => panic!("expected Test command, got {:?}", other.map(|_| "other")),
     }
 }

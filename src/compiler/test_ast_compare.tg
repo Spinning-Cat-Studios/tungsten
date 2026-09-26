@@ -1,0 +1,242 @@
+// Structural comparison of the compiler's own surface-AST types
+// (ADR 29.6.26f — AC 7 span policy, AC 2 partial).
+//
+// These are LITERAL compiler AST types, not mini-AST mirrors: `Pattern` is a
+// genuinely recursive AST node type, and `Ident` / `Span` are the span-carrying
+// records every AST node is built from. Each test runs the full chain
+// `assert_eq → compare → __cmp<T> synthesis → CompareResult → failure flag`.
+//
+// EVERY type asserted on here is proven non-vacuous by the companion file
+// `mustfail_ast_compare.tg` (`make check-ast-compare-nonvacuous`), which asserts
+// the SAME types the wrong way round and requires every case to FAIL. That
+// companion is not optional bookkeeping — `compare` at a type whose comparator
+// cannot be synthesized goes silently Stuck in the evaluator, the body's asserts
+// never execute, and the test is reported `ok`. A suite of only-passing
+// assertions cannot tell that apart from success. See §4.1 of the ADR.
+//
+// Scope: the types whose comparability is **self-contained** — the span-carrying
+// records, and `Pattern`, whose μ-chain closes over itself. The mutually
+// recursive `TypeExpr` / `Stmt` / `Expr` cluster is a different comparability
+// problem (it is reached through generic ADT instantiations) and lives in
+// `test_ast_compare_cluster.tg`, with its own twins.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::compare::{assert_eq, assert_ne};
+use driver::ffi::types::{List, Nil, Cons};
+use lexer::span::{Span, span_new};
+use parser::ast::common::{Ident, ident_new, Path, path_simple};
+use parser::ast::pattern::{Pattern, PatVar, PatWildcard, PatTuple, PatConstructor, PatOr};
+use parser::ast::normalize::{strip_spans_pattern, strip_spans_ident, canonical_span};
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+fn sp(a: Nat, b: Nat) -> Span {
+    span_new(a, b, "t.tg")
+}
+
+fn id_at(name: String, a: Nat, b: Nat) -> Ident {
+    ident_new(name, sp(a, b))
+}
+
+fn path_at(name: String, a: Nat, b: Nat) -> Path {
+    path_simple(id_at(name, a, b))
+}
+
+// ---------------------------------------------------------------------------
+// The span-carrying records every AST node is built from
+// ---------------------------------------------------------------------------
+
+pub fn test_span_equal() -> Unit {
+    assert_eq(sp(0, 3), sp(0, 3))
+}
+
+pub fn test_span_offset_differs() -> Unit {
+    assert_ne(sp(0, 3), sp(40, 43))
+}
+
+/// Spans compare by every field, including the file — two identical ranges in
+/// different files are different spans.
+pub fn test_span_file_differs() -> Unit {
+    assert_ne(span_new(0, 3, "a.tg"), span_new(0, 3, "b.tg"))
+}
+
+pub fn test_ident_equal() -> Unit {
+    assert_eq(id_at("x", 0, 1), id_at("x", 0, 1))
+}
+
+pub fn test_ident_name_differs() -> Unit {
+    assert_ne(id_at("x", 0, 1), id_at("y", 0, 1))
+}
+
+/// A record nested inside a record: the difference is in `Ident.span.start`.
+pub fn test_ident_span_differs() -> Unit {
+    assert_ne(id_at("x", 0, 1), id_at("x", 40, 41))
+}
+
+// ---------------------------------------------------------------------------
+// AC 2 (partial) — `Pattern`, a literal recursive compiler AST type
+// ---------------------------------------------------------------------------
+
+pub fn test_pattern_var_equal() -> Unit {
+    assert_eq(PatVar(id_at("x", 0, 1)), PatVar(id_at("x", 0, 1)))
+}
+
+pub fn test_pattern_var_name_differs() -> Unit {
+    assert_ne(PatVar(id_at("x", 0, 1)), PatVar(id_at("y", 0, 1)))
+}
+
+/// Constructor tag mismatch with no payload to fall back on.
+pub fn test_pattern_constructor_tag_differs() -> Unit {
+    assert_ne(PatVar(id_at("x", 0, 1)), PatWildcard(sp(0, 1)))
+}
+
+/// Recursive descent through a tuple pattern's element list, with the
+/// difference in the second element (the first is equal).
+pub fn test_pattern_tuple_element_differs() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("a", 1, 2)), Cons(PatVar(id_at("b", 4, 5)), Nil));
+    let rs: List<Pattern> = Cons(PatVar(id_at("a", 1, 2)), Cons(PatWildcard(sp(4, 5)), Nil));
+    assert_ne(PatTuple(ls, sp(0, 6)), PatTuple(rs, sp(0, 6)))
+}
+
+pub fn test_pattern_tuple_equal() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("a", 1, 2)), Cons(PatVar(id_at("b", 4, 5)), Nil));
+    let rs: List<Pattern> = Cons(PatVar(id_at("a", 1, 2)), Cons(PatVar(id_at("b", 4, 5)), Nil));
+    assert_eq(PatTuple(ls, sp(0, 6)), PatTuple(rs, sp(0, 6)))
+}
+
+// ---------------------------------------------------------------------------
+// ADR 1.8.26b D1 — constructors with THREE payload fields
+//
+// Three is the exact boundary: at arity ≤2 the payload has no nesting, so the
+// old left-nested type and the right-nested value coincided and the defect was
+// invisible. Each case below differs in a DIFFERENT field position, because a
+// projection that is wrong at one depth can still be right at another — the
+// pre-fix accessor read field 2 correctly and fields 0/1 not at all.
+// ---------------------------------------------------------------------------
+
+pub fn test_pattern_constructor_equal() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let rs: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    assert_eq(PatConstructor(path_at("Some", 0, 4), ls, sp(0, 7)),
+              PatConstructor(path_at("Some", 0, 4), rs, sp(0, 7)))
+}
+
+/// Difference in the FIRST of three fields.
+pub fn test_pattern_constructor_path_differs() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let rs: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    assert_ne(PatConstructor(path_at("Some", 0, 4), ls, sp(0, 7)),
+              PatConstructor(path_at("None", 0, 4), rs, sp(0, 7)))
+}
+
+/// Difference in the MIDDLE of three fields.
+pub fn test_pattern_constructor_args_differ() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let rs: List<Pattern> = Cons(PatWildcard(sp(5, 6)), Nil);
+    assert_ne(PatConstructor(path_at("Some", 0, 4), ls, sp(0, 7)),
+              PatConstructor(path_at("Some", 0, 4), rs, sp(0, 7)))
+}
+
+/// Difference in the LAST of three fields.
+pub fn test_pattern_constructor_span_differs() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let rs: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    assert_ne(PatConstructor(path_at("Some", 0, 4), ls, sp(0, 7)),
+              PatConstructor(path_at("Some", 0, 4), rs, sp(40, 47)))
+}
+
+pub fn test_pattern_or_equal() -> Unit {
+    assert_eq(PatOr(PatVar(id_at("a", 0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)),
+              PatOr(PatVar(id_at("a", 0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)))
+}
+
+pub fn test_pattern_or_left_differs() -> Unit {
+    assert_ne(PatOr(PatVar(id_at("a", 0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)),
+              PatOr(PatWildcard(sp(0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)))
+}
+
+pub fn test_pattern_or_right_differs() -> Unit {
+    assert_ne(PatOr(PatVar(id_at("a", 0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)),
+              PatOr(PatVar(id_at("a", 0, 1)), PatVar(id_at("c", 4, 5)), sp(0, 5)))
+}
+
+// ---------------------------------------------------------------------------
+// AC 7 — spans are significant, and normalization is explicit
+// ---------------------------------------------------------------------------
+
+/// The policy under test: comparison is EXACT, so two otherwise-identical nodes
+/// built at different source positions are NOT equal.
+pub fn test_spans_are_significant() -> Unit {
+    assert_ne(PatVar(id_at("x", 0, 1)), PatVar(id_at("x", 40, 41)))
+}
+
+/// A span difference nested deep in the tree is still found — the comparator
+/// does not stop normalizing (or comparing) at some depth.
+pub fn test_spans_are_significant_when_nested() -> Unit {
+    let inner_l: List<Pattern> = Cons(PatWildcard(sp(4, 5)), Nil);
+    let inner_r: List<Pattern> = Cons(PatWildcard(sp(44, 45)), Nil);
+    let l: Pattern = PatTuple(Cons(PatVar(id_at("a", 0, 1)), Cons(PatTuple(inner_l, sp(4, 6)), Nil)), sp(0, 7));
+    let r: Pattern = PatTuple(Cons(PatVar(id_at("a", 0, 1)), Cons(PatTuple(inner_r, sp(4, 6)), Nil)), sp(0, 7));
+    assert_ne(l, r)
+}
+
+/// …and `strip_spans_*` is how a test opts out, per the ADR's equality policy.
+pub fn test_strip_spans_makes_patterns_equal() -> Unit {
+    let l: Pattern = PatTuple(Cons(PatVar(id_at("a", 0, 1)), Cons(PatWildcard(sp(4, 5)), Nil)), sp(0, 6));
+    let r: Pattern = PatTuple(Cons(PatVar(id_at("a", 30, 31)), Cons(PatWildcard(sp(34, 35)), Nil)), sp(30, 36));
+    assert_ne(l, r);
+    assert_eq(strip_spans_pattern(l), strip_spans_pattern(r))
+}
+
+/// Normalization reaches every depth, including through a pattern list.
+pub fn test_strip_spans_reaches_nested_spans() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("a", 1, 2)), Cons(PatWildcard(sp(4, 5)), Nil));
+    let rs: List<Pattern> = Cons(PatVar(id_at("a", 61, 62)), Cons(PatWildcard(sp(64, 65)), Nil));
+    let l: Pattern = PatTuple(ls, sp(0, 6));
+    let r: Pattern = PatTuple(rs, sp(60, 66));
+    assert_ne(l, r);
+    assert_eq(strip_spans_pattern(l), strip_spans_pattern(r))
+}
+
+/// The load-bearing negative: `strip_spans` normalizes spans and NOTHING else.
+/// A normalizer that flattened real content would make every test above pass
+/// vacuously, so this pins it down — patterns differing in a NAME stay unequal
+/// after normalization.
+pub fn test_strip_spans_preserves_names() -> Unit {
+    assert_ne(strip_spans_pattern(PatVar(id_at("x", 0, 1))),
+              strip_spans_pattern(PatVar(id_at("y", 40, 41))))
+}
+
+/// Same guard on structure rather than a name: an arity difference survives
+/// normalization.
+pub fn test_strip_spans_preserves_structure() -> Unit {
+    let one: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let two: List<Pattern> = Cons(PatVar(id_at("v", 50, 51)), Cons(PatVar(id_at("w", 53, 54)), Nil));
+    assert_ne(strip_spans_pattern(PatTuple(one, sp(0, 7))),
+              strip_spans_pattern(PatTuple(two, sp(45, 55))))
+}
+
+/// Normalizing an already-normalized value changes nothing.
+pub fn test_strip_spans_is_idempotent() -> Unit {
+    let start: List<Pattern> = Cons(PatVar(id_at("a", 0, 1)), Cons(PatWildcard(sp(4, 5)), Nil));
+    let once = strip_spans_pattern(PatTuple(start, sp(0, 6)));
+    assert_eq(once, strip_spans_pattern(once))
+}
+
+/// Normalized nodes carry `canonical_span()` — the property the whole scheme
+/// rests on, asserted directly rather than only through equality of two
+/// normalized values (which would hold even if both were left untouched).
+pub fn test_normalized_nodes_carry_the_canonical_span() -> Unit {
+    assert_eq(strip_spans_ident(id_at("x", 40, 41)), ident_new("x", canonical_span()))
+}
+
+pub fn test_normalized_pattern_carries_the_canonical_span() -> Unit {
+    assert_eq(strip_spans_pattern(PatWildcard(sp(40, 41))), PatWildcard(canonical_span()))
+}
+

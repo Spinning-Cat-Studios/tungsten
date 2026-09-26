@@ -1,0 +1,13 @@
+// ADR 20.8.26c AC2: `substring`'s third argument is a LENGTH, not an end index.
+//
+// The two readings disagree on this input by construction. The start offset (6)
+// is greater than the requested length (3) — the shape every identifier in a
+// real source file has once the lexer slices it out of the buffer, since
+// `lex_slice` passes `pos - start`. Under the length reading this is "ghi";
+// under an end-index reading `i >= end` holds immediately and it is "".
+//
+// Both compilers must print "ghi": the bootstrap intercepts `substring` before
+// name resolution and so does the self-host (ADR 20.8.26c D2, port arm).
+pub fn main() -> String {
+    substring("abcdefghij", 6, 3)
+}

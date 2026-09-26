@@ -177,7 +177,7 @@ fn test_extract_type_args_arrow() {
 //
 // The fix handles the case where adt_type is App("List", [Token]) instead
 // of a Mu-encoded type. This happens when field types come from record
-// definitions (Phase 1c stores App form, not μ-form).
+// definitions (Type-Body Collection stores App form, not μ-form).
 
 /// Helper: register a List<T> ADT in the environment.
 fn register_list_adt(elab: &mut Elaborator<'_>) {
@@ -317,5 +317,71 @@ fn test_resolve_type_apps_preserves_record() {
         matches!(&result, Type::App(_, _)),
         "Expected App for record type, got {:?}",
         result
+    );
+}
+
+// ========================================================================
+// The poisoned binding walk (ADR 15.8.26d) — a pure function over the AST
+// ========================================================================
+
+/// `collect_poisoned_pattern_bindings` is a pure walk over the AST, so the
+/// one pattern form the parser accepts but no match form elaborates yet —
+/// an or-pattern — is covered directly: every variable on either side binds,
+/// at poison, and wildcards and literals bind nothing.
+#[test]
+fn the_poisoned_binding_walk_binds_both_sides_of_an_or_pattern() {
+    use crate::ast::{Ident, LiteralPattern, Path, Pattern};
+    use crate::span::Span;
+    let span = Span::new(0, 0);
+    let var = |name: &str| Pattern::Var(Ident::new(name, span));
+    let ctor = |name: &str, subs: Vec<Pattern>| {
+        Pattern::Constructor(Path::simple(Ident::new(name, span)), subs, span)
+    };
+    let pattern = Pattern::Or(
+        Box::new(ctor("Tick", vec![var("n"), Pattern::Wildcard(span)])),
+        Box::new(Pattern::Tuple(
+            vec![var("m"), Pattern::Literal(LiteralPattern::Int(0, span))],
+            span,
+        )),
+        span,
+    );
+    let mut bindings = Vec::new();
+    super::poison::collect_poisoned_pattern_bindings(&pattern, &mut bindings);
+    let names: Vec<&str> = bindings.iter().map(|b| b.var_name.as_str()).collect();
+    assert_eq!(names, vec!["n", "m"]);
+    assert!(bindings.iter().all(|b| matches!(b.var_ty, Type::Error)));
+}
+
+/// `with_pattern_bindings` binds every name for the closure's duration —
+/// visible as a depth one deeper per binding — and restores the depth
+/// afterwards, whatever the closure returned.
+#[test]
+fn with_pattern_bindings_restores_the_depth_it_advanced() {
+    let mut elab = make_elaborator();
+    let bindings = vec![
+        PatternBinding {
+            var_name: "n".to_string(),
+            var_ty: Type::Error,
+        },
+        PatternBinding {
+            var_name: "m".to_string(),
+            var_ty: Type::Error,
+        },
+    ];
+    let before = elab.depth;
+    let inside = elab
+        .with_pattern_bindings(&bindings, |inner| {
+            assert!(inner.env.lookup_local("m").is_some());
+            Ok(inner.depth)
+        })
+        .expect("the closure's result passes through");
+    assert_eq!(inside, before + 2);
+    assert_eq!(
+        elab.depth, before,
+        "the depth must be restored, not advanced twice"
+    );
+    assert!(
+        elab.env.lookup_local("m").is_none(),
+        "the scope must be popped"
     );
 }

@@ -57,7 +57,7 @@ impl<'a> Elaborator<'a> {
         aliases
     }
 
-    /// Extract cached type encodings (Phase 1e results).
+    /// Extract cached type encodings (Encoding Finalization results).
     ///
     /// Returns a map from type name to its cached encoded Type.
     /// Only non-parameterized types with successful encoding are included.
@@ -71,7 +71,7 @@ impl<'a> Elaborator<'a> {
         encoded
     }
 
-    /// Extract mutual recursion groups (Phase 1c.5 SCC results).
+    /// Extract mutual recursion groups (Recursion Grouping SCC results).
     ///
     /// Returns a map from type name to its full SCC group members.
     /// Only populated for types in SCCs of size > 1.
@@ -82,7 +82,7 @@ impl<'a> Elaborator<'a> {
     /// Extract parent type visibilities for all types (ADR 14.5.26c).
     ///
     /// Returns a map from type name → declared visibility. Used by
-    /// `info type visibility` to compute effective member visibilities.
+    /// `info type members visibility` to compute effective member visibilities.
     pub fn get_type_visibilities(
         &self,
     ) -> std::collections::HashMap<String, crate::ast::Visibility> {

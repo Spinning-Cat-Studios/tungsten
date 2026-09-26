@@ -1,4 +1,4 @@
-//! Type encoding cache and pattern building (Phase 1e).
+//! Type encoding cache and pattern building (Encoding Finalization).
 //!
 //! Caches encoded type representations for reverse lookup from Core types
 //! to user-defined names, enabling cleaner error messages.
@@ -9,7 +9,7 @@ use super::env::TypeDefKind;
 use super::Elaborator;
 
 impl<'a> Elaborator<'a> {
-    /// Cache encoded types for type name reverse lookup (Phase 1e).
+    /// Cache encoded types for type name reverse lookup (Encoding Finalization).
     ///
     /// This enables reverse lookup from Core types to user-defined type names
     /// for cleaner error messages.
@@ -20,13 +20,10 @@ impl<'a> Elaborator<'a> {
     pub(super) fn cache_type_encodings(&mut self) {
         use crate::driver::{register_type_name, register_type_pattern};
 
-        // Collect all non-stub type names
-        let type_names: Vec<String> = self
-            .env
-            .iter_types()
-            .filter(|(_, def)| !matches!(def.kind, TypeDefKind::Stub))
-            .map(|(name, _)| name.clone())
-            .collect();
+        // Encode in a deterministic, dependency-respecting order
+        // (ADR 22.7.26c) — never in `HashMap` iteration order, which made
+        // the stored trees' inline depth vary run-to-run.
+        let type_names: Vec<String> = self.dependency_respecting_type_order();
 
         for name in type_names {
             let type_def = match self.env.lookup_type(&name) {
@@ -35,7 +32,19 @@ impl<'a> Elaborator<'a> {
             };
 
             if type_def.params.is_empty() {
-                // Non-parameterized type: register for exact match
+                // Non-parameterized type: register for exact match.
+                //
+                // Deferred-TyVar Resolution (`resolve_deferred_type_references`) clears
+                // `encoded_type` to `None` for every non-stub type, so in the
+                // normal flow this loop populates every entry from scratch.
+                // The guard keeps the pass idempotent for any entry that
+                // arrives already-encoded (a pre-seeded / re-run path): it is
+                // left untouched rather than re-encoded. Note the mid-loop
+                // `encode_adt_type` cache reads below see a *mix* of encoded
+                // (earlier in this loop) and not-yet-encoded referents — which
+                // referent is already cached is what made the stored inline
+                // depth order-sensitive until `phase1e_encode_order`
+                // (ADR 22.7.26c) fixed the iteration order.
                 if type_def.encoded_type.is_some() {
                     continue; // Already cached
                 }
@@ -62,6 +71,69 @@ impl<'a> Elaborator<'a> {
                 }
             }
         }
+    }
+
+    /// The deterministic, dependency-respecting type-pass order shared by
+    /// Deferred-TyVar Resolution (`resolve_deferred_type_references`, ADR 22.7.26d) and
+    /// Encoding Finalization (`cache_type_encodings`, ADR 22.7.26c).
+    ///
+    /// Nodes are ALL non-stub types — ADTs, records, and aliases,
+    /// parameterized ones included (so pattern registration is deterministic
+    /// too); edges come from constructor fields, record field types, and
+    /// alias bodies (`@`-deferred references included — the edge collector
+    /// strips the prefix, so the graph is the same at Phase-1d time as at
+    /// Phase-1e time). [`tarjan_scc`] emits SCCs in reverse-topological order
+    /// (referents before referrers) and sorts nodes, dependencies, and
+    /// within-SCC members lexicographically, so flattening its emission is
+    /// both byte-stable across runs and maximally inlining: a non-recursive
+    /// referent is always processed before its referrer, so each direct
+    /// reference inlines the referent's full resolved (1d) / cached (1e)
+    /// form. Genuine recursion cycles still bottom out in μ-bound variables.
+    ///
+    /// Edges are restricted to **inline-relevant targets** (ADTs and
+    /// aliases, ADR 22.7.26d): a reference to a record stays nominal by
+    /// design, so a referrer→record edge cannot constrain resolution order —
+    /// but left in the graph it welds unrelated types into one giant SCC
+    /// through nominal back-edges (main.tg: `Item → TypeDef (record) →
+    /// TypeDefBody → TypeExpr → … → Stmt → Item`), and the lexicographic
+    /// within-SCC order then resolves a record before its referents, freezing
+    /// `@`-deferred references inside its embeds.
+    pub(super) fn dependency_respecting_type_order(&self) -> Vec<String> {
+        use crate::doctor::audit_mutual_types::encode_order_sccs;
+        use std::collections::HashSet;
+
+        let type_refs: Vec<(String, Vec<&Type>)> = self
+            .env
+            .iter_types()
+            .filter(|(_, def)| !matches!(def.kind, TypeDefKind::Stub))
+            .map(|(name, def)| {
+                let referenced: Vec<&Type> = match &def.kind {
+                    TypeDefKind::ADT(ctors) => {
+                        ctors.iter().flat_map(|ctor| ctor.fields.iter()).collect()
+                    }
+                    TypeDefKind::Record(fields) => {
+                        fields.iter().map(|(_, field_ty)| field_ty).collect()
+                    }
+                    TypeDefKind::Alias(ty) => vec![ty],
+                    TypeDefKind::Stub => Vec::new(),
+                };
+                (name.clone(), referenced)
+            })
+            .collect();
+
+        let inline_relevant_targets: HashSet<String> = self
+            .env
+            .iter_types()
+            .filter(|(_, def)| matches!(def.kind, TypeDefKind::ADT(_) | TypeDefKind::Alias(_)))
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        // Shared kernel with `info type encode-order` — the diagnostic cannot
+        // report an order the compiler does not use (ADR 22.7.26d).
+        encode_order_sccs(&type_refs, &inline_relevant_targets)
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Build a type pattern for a parameterized type.
@@ -126,6 +198,11 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Substitute type parameters in a type.
+    ///
+    /// Only `TyVar` is non-structural (a parameter is replaced by its
+    /// argument); every other variant recurses uniformly into its children
+    /// via [`Type::map_children`], which also preserves names, binders, and
+    /// `Eq` witness terms.
     pub(super) fn substitute_type_params(
         &self,
         ty: &Type,
@@ -141,46 +218,7 @@ impl<'a> Elaborator<'a> {
                     ty.clone()
                 }
             }
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(self.substitute_type_params(a, params, args)),
-                Box::new(self.substitute_type_params(b, params, args)),
-            ),
-            Type::Product(a, b) => Type::Product(
-                Box::new(self.substitute_type_params(a, params, args)),
-                Box::new(self.substitute_type_params(b, params, args)),
-            ),
-            Type::Sum(a, b) => Type::Sum(
-                Box::new(self.substitute_type_params(a, params, args)),
-                Box::new(self.substitute_type_params(b, params, args)),
-            ),
-            Type::Forall(v, body) => Type::Forall(
-                v.clone(),
-                Box::new(self.substitute_type_params(body, params, args)),
-            ),
-            Type::Mu(v, body) => Type::Mu(
-                v.clone(),
-                Box::new(self.substitute_type_params(body, params, args)),
-            ),
-            Type::Ptr(inner) => {
-                Type::Ptr(Box::new(self.substitute_type_params(inner, params, args)))
-            }
-            Type::Ref(inner) => {
-                Type::Ref(Box::new(self.substitute_type_params(inner, params, args)))
-            }
-            Type::Eq(inner_ty, t1, t2) => Type::Eq(
-                Box::new(self.substitute_type_params(inner_ty, params, args)),
-                t1.clone(),
-                t2.clone(),
-            ),
-            Type::App(name, type_args) => Type::App(
-                name.clone(),
-                type_args
-                    .iter()
-                    .map(|a| self.substitute_type_params(a, params, args))
-                    .collect(),
-            ),
-            // Base types pass through unchanged
-            _ => ty.clone(),
+            _ => ty.map_children(|child| self.substitute_type_params(child, params, args)),
         }
     }
 }

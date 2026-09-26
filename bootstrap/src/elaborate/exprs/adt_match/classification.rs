@@ -66,6 +66,8 @@ impl<'a> Elaborator<'a> {
                     self.classify_catch_all_arm(arm, *s, &mut catch_all_arm, &mut catch_all_span);
                 }
                 _ => {
+                    // Defensive: exotic pattern forms are rejected with E0021
+                    // before classification — uncoded by design (ADR 15.8.26b).
                     return Err(ElabError::new(
                         arm.pattern.span(),
                         ElabErrorKind::Other("unsupported pattern in match arm".to_string()),

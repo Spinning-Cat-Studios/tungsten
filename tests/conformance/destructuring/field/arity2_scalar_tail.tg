@@ -1,0 +1,8 @@
+// CONTROL for `arity2_product_tail.tg` — arity 2, scalar tail.
+
+type PairScalar = { head: Nat, tail: Nat }
+
+pub fn main() -> Nat {
+    let r: PairScalar = { head: 1, tail: 23 };
+    r.head * 100 + r.tail
+}

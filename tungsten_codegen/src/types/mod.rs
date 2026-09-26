@@ -22,7 +22,10 @@
 mod analysis;
 mod encoding;
 mod lowering;
+mod route;
 mod setup;
+
+pub use route::Route;
 
 use inkwell::context::Context;
 use inkwell::targets::TargetData;

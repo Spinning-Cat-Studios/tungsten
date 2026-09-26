@@ -1,0 +1,117 @@
+// Typing tests for the signed integer type (ADR 14.9.26c AC 1).
+// Cost 3: every assertion here is `expect_type` / `expect_error` — no
+// runtime value is compared, so no LLVM and no evaluator extern is needed.
+//
+// `expect_type` compares the RENDERED type name, which is why the one
+// `Display` arm for `Type::Int` is what makes `"Int"` work here.
+
+// Literals default to Nat; Int is expected-type-driven.
+fn test_literal_defaults_to_nat() -> () {
+    expect_type(5, "Nat");
+    ()
+}
+
+fn test_annotated_literal_is_int() -> () {
+    expect_type((5 : Int), "Int");
+    ()
+}
+
+// A negated literal can be nothing but Int.
+fn test_negated_literal_is_int() -> () {
+    expect_type(-5, "Int");
+    ()
+}
+
+fn test_signed_minimum_is_spelled_as_a_negated_literal() -> () {
+    expect_type(-9223372036854775808, "Int");
+    ()
+}
+
+// Operators dispatch on the operand type: the left decides …
+fn test_int_plus_literal() -> () {
+    let x: Int = 3;
+    expect_type(x + 1, "Int");
+    expect_type(x - 1, "Int");
+    expect_type(x * 2, "Int");
+    expect_type(x / 2, "Int");
+    expect_type(x % 2, "Int");
+    ()
+}
+
+// … unless the left is a bare literal and the right is not.
+fn test_literal_plus_int() -> () {
+    let x: Int = 3;
+    expect_type(1 + x, "Int");
+    expect_type(10 - x, "Int");
+    ()
+}
+
+fn test_negation_of_int() -> () {
+    let x: Int = 3;
+    expect_type(-x, "Int");
+    ()
+}
+
+fn test_int_comparisons_are_bool() -> () {
+    let x: Int = 3;
+    expect_type(x < 0, "Bool");
+    expect_type(x <= 0, "Bool");
+    expect_type(x > 0, "Bool");
+    expect_type(x >= 0, "Bool");
+    expect_type(x == 0, "Bool");
+    expect_type(x != 0, "Bool");
+    ()
+}
+
+// The bridges.
+fn test_to_int_is_int() -> () {
+    expect_type(to_int(3), "Int");
+    ()
+}
+
+fn test_from_int_is_nat() -> () {
+    let x: Int = 3;
+    expect_type(from_int(x), "Nat");
+    ()
+}
+
+// Nat stays Nat: the same operators on Nat operands are unchanged.
+fn test_nat_arithmetic_is_still_nat() -> () {
+    let n: Nat = 3;
+    expect_type(n + 1, "Nat");
+    expect_type(n - 5, "Nat");
+    expect_type(n < 1, "Bool");
+    ()
+}
+
+// An Int operand and a Nat operand do not mix: no coercion (E0010).
+fn test_int_plus_nat_is_a_type_mismatch() -> () {
+    let x: Int = 3;
+    expect_error(x + (3 : Nat), "E0010");
+    ()
+}
+
+// Negating a Nat keeps its refusal (E0100, reworded to point at Int).
+fn test_negating_a_nat_is_refused() -> () {
+    expect_error(-(3 : Nat), "E0100");
+    ()
+}
+
+// One past the signed maximum is the new out-of-range error (E0090).
+fn test_literal_above_signed_max_is_out_of_range() -> () {
+    expect_error((9223372036854775808 : Int), "E0090");
+    ()
+}
+
+fn test_negated_literal_below_signed_min_is_out_of_range() -> () {
+    expect_error(-9223372036854775809, "E0090");
+    ()
+}
+
+// A Nat that fits Nat but not Int is still refused as an Int literal.
+fn test_nat_maximum_is_out_of_range_for_int() -> () {
+    expect_error((18446744073709551615 : Int), "E0090");
+    ()
+}
+
+fn main() -> Nat { 0 }

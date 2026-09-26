@@ -1,0 +1,8 @@
+// CONTROL for `arity3_expr_let.tg` — the same arity-3 destructuring in block
+// statement position.
+
+pub fn main() -> Nat {
+    let p = (1, 2, 3);
+    let (a, b, c) = p;
+    a * 100 + b * 10 + c
+}

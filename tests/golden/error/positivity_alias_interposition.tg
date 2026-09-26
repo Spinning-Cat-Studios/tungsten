@@ -1,0 +1,5 @@
+// ADR 7.8.26e D9: an alias interposed between `Bad4` and its arrow. Aliases are
+// inlined before the walk, so the violation is attributed to `Bad4`'s
+// constructor rather than to `F`, which has no constructor to point at.
+type F<T> = T -> Nat
+type Bad4 = B(F<Bad4>)

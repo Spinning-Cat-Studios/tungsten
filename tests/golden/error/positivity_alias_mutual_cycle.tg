@@ -1,0 +1,6 @@
+// ADR 7.8.26e D3/D9: the mutual cycle is only visible once the alias is
+// inlined - `Fun` is not a node in any type graph, so the cycle C -> D -> C runs
+// through it invisibly to the ADT-only graph.
+type Fun<T> = T -> Nat
+type C = MkC(Fun<D>)
+type D = MkD(C)

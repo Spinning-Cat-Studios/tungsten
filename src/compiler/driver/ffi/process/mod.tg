@@ -1,0 +1,212 @@
+// Process control, CLI arguments, and console output FFI wrappers.
+
+use driver::ffi::types::{
+    CString, CInt, Ptr, Never,
+    string_to_cstring, cstring_to_string, cstring_is_null,
+    string_len,
+    tg_free_string, ffi_negative_one,
+    List, Nil, Cons, ffi_list_reverse
+};
+use driver::ffi::last_error::{driver_last_error};
+
+// --- Subprocess Outcome ---
+
+/// What came back from a subprocess: it ran and exited with a code, or it never
+/// started at all.
+///
+/// `tg_exec_process` folds both into one `CInt` — a spawn failure is `-1`, which
+/// arrives here wrapped to `18446744073709551615` and reads as an absurd exit
+/// code. The distinction is worth keeping because the two want different fixes:
+/// a non-zero exit is the child's own verdict, while a spawn failure means the
+/// path was wrong, unreadable, or built for another platform (ADR 3.9.26b D3).
+pub type ExecOutcome =
+    | ExecExited(Nat)
+    | ExecSpawnFailed(String)
+
+/// Is this "the child left no exit status" rather than an exit code?
+///
+/// `tg_exec_process` answers `-1` when it has no status to report — the child
+/// was killed by a signal, or never got far enough to have one — and the `CInt`
+/// return is unsigned, so that arrives as `ffi_negative_one()`. It is not a
+/// code and must never be rendered as one; printing it raw is how
+/// `exit code 18446744073709551615` reached a user (ADR 3.9.26b).
+///
+/// The predicate lives here rather than beside the sentinel because the
+/// question is about processes: the same bit pattern is an ordinary `Nat`
+/// everywhere else, and the arena's `invalid_handle()` is a third meaning again
+/// (ADR 3.9.26s D2).
+pub fn exec_code_is_absent(code: CInt) -> Bool {
+    code == ffi_negative_one()
+}
+
+// --- Raw FFI Declarations ---
+
+extern "C" fn tg_argc() -> CInt
+extern "C" fn tg_argv(index: CInt) -> CString
+extern "C" fn tg_print(s: CString, len: Nat) -> Unit
+extern "C" fn tg_println(s: CString, len: Nat) -> Unit
+extern "C" fn tg_eprintln(s: CString, len: Nat) -> Unit
+extern "C" fn tg_exit(code: CInt) -> Never
+extern "C" fn tg_exec_process(program: CString, args: CString) -> CInt
+extern "C" fn tg_getenv(name: CString) -> CString
+extern "C" fn tg_current_exe_dir() -> CString
+extern "C" fn tg_stdout_is_tty() -> CInt
+extern "C" fn tg_stderr_is_tty() -> CInt
+
+// --- CLI Argument Wrappers ---
+
+pub fn argc() -> Nat {
+    tg_argc()
+}
+
+pub fn argv(index: Nat) -> Option<String> {
+    let result_c = tg_argv(index);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let arg = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(arg)
+    }
+}
+
+pub fn get_args() -> List<String> {
+    get_args_acc(0, argc(), Nil)
+}
+
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn get_args_acc(i: Nat, n: Nat, acc: List<String>) -> List<String> {
+    if i >= n {
+        ffi_list_reverse(acc)
+    } else {
+        match argv(i) {
+            Some(arg) => get_args_acc(i + 1, n, Cons(arg, acc)),
+            None() => get_args_acc(i + 1, n, acc)
+        }
+    }
+}
+
+// --- Console Output Wrappers ---
+
+pub fn print(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_print(c, len);
+    tg_free_string(c);
+}
+
+pub fn println(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_println(c, len);
+    tg_free_string(c);
+}
+
+pub fn eprintln(s: String) {
+    let c = string_to_cstring(s);
+    let len = string_len(s);
+    tg_eprintln(c, len);
+    tg_free_string(c);
+}
+
+// --- Process Control Wrappers ---
+
+pub fn process_exit(code: Nat) -> Never {
+    tg_exit(code)
+}
+
+pub fn exec_process(program: String, args: List<String>) -> CInt {
+    let program_c = string_to_cstring(program);
+    let args_str = join_with_newline(args);
+    let args_c = string_to_cstring(args_str);
+    let code = tg_exec_process(program_c, args_c);
+    tg_free_string(program_c);
+    tg_free_string(args_c);
+    code
+}
+
+/// Run a program, keeping "never spawned" apart from "spawned and exited".
+///
+/// Prefer this over `exec_process` wherever the caller reports the failure to a
+/// human: `exec_process`'s `CInt` cannot express the difference, and printing it
+/// raw is how `exit code 18446744073709551615` reached a user (ADR 3.9.26b).
+pub fn exec_process_outcome(program: String, args: List<String>) -> ExecOutcome {
+    let code = exec_process(program, args);
+    classify_exec_result(code)
+}
+
+/// Read the driver error the spawn attempt may have left behind.
+///
+/// Kept separate from the spawn itself so the ordering is explicit: the driver
+/// error must be read AFTER `tg_exec_process` returns and BEFORE any other
+/// driver call, because every one of them clears it on entry.
+fn classify_exec_result(code: CInt) -> ExecOutcome {
+    match driver_last_error() {
+        Some(err) => ExecSpawnFailed(err),
+        None() => ExecExited(code)
+    }
+}
+
+/// Did the program run and exit cleanly? A process that never spawned did not.
+pub fn exec_succeeded(outcome: ExecOutcome) -> Bool {
+    match outcome {
+        ExecExited(code) => code == 0,
+        ExecSpawnFailed(_) => false
+    }
+}
+
+pub fn get_env_var(name: String) -> Option<String> {
+    let name_c = string_to_cstring(name);
+    let result_c = tg_getenv(name_c);
+    tg_free_string(name_c);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let val = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(val)
+    }
+}
+
+pub fn current_exe_dir() -> Option<String> {
+    let result_c = tg_current_exe_dir();
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let dir = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(dir)
+    }
+}
+
+// --- TTY Detection Wrappers ---
+
+pub fn stdout_is_tty() -> Bool {
+    tg_stdout_is_tty() == 1
+}
+
+pub fn stderr_is_tty() -> Bool {
+    tg_stderr_is_tty() == 1
+}
+
+// --- Helpers ---
+
+fn join_with_newline(strs: List<String>) -> String {
+    match strs {
+        Nil() => "",
+        Cons(first, rest) => join_with_newline_acc(rest, first)
+    }
+}
+
+fn join_with_newline_acc(strs: List<String>, acc: String) -> String {
+    match strs {
+        Nil() => acc,
+        Cons(s, rest) => {
+            let new_acc = acc ++ "\n" ++ s;
+            join_with_newline_acc(rest, new_acc)
+        }
+    }
+}

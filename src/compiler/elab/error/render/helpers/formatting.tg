@@ -71,6 +71,10 @@ pub fn make_carets(n: Nat) -> String {
     repeat_string("^", n)
 }
 
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 pub fn repeat_string(s: String, n: Nat) -> String {
     if n == 0 {
         ""
@@ -87,6 +91,10 @@ pub fn count_digits(n: Nat) -> Nat {
     else { 5 }
 }
 
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 pub fn pad_left(s: String, width: Nat, padding: String) -> String {
     let len = string_len(s);
     if len >= width {

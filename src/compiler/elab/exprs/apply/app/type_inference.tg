@@ -57,6 +57,10 @@ pub fn infer_type_param(param_ty: TypeHandle, arg_ty: TypeHandle, var_name: Nat)
 /// no arrow is found inside the nested foralls.
 /// Used to check if an outer forall variable appears in the value parameter
 /// position of a multi-param generic constructor.
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 pub fn get_nested_arrow_domain(ty: TypeHandle) -> TypeHandle {
     if tg_type_is_arrow(ty) {
         tg_type_get_arrow_domain(ty)
@@ -70,6 +74,10 @@ pub fn get_nested_arrow_domain(ty: TypeHandle) -> TypeHandle {
 /// Check whether a type variable (identified by var_name CStr) occurs anywhere
 /// in the given type. Used to determine if forall type inference from arguments
 /// is possible (T must appear in the domain).
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 pub fn tyvar_occurs_in_type(ty: TypeHandle, var_name: Nat) -> Bool {
     if tg_type_is_tyvar(ty) {
         let pname = tg_type_get_tyvar_name(ty);
@@ -96,6 +104,10 @@ pub fn tyvar_occurs_in_type(ty: TypeHandle, var_name: Nat) -> Bool {
 /// Nullary constructors like Nil() synthesize as forall T. List<T>.
 /// When used as a value argument, we strip the forall to get the body
 /// for correct type parameter inference.
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 pub fn strip_foralls(ty: TypeHandle) -> TypeHandle {
     if tg_type_is_forall(ty) {
         strip_foralls(tg_type_get_forall_body(ty))
@@ -106,6 +118,10 @@ pub fn strip_foralls(ty: TypeHandle) -> TypeHandle {
 
 /// Search for TyVar(var_name) in `pattern` and extract the corresponding
 /// type from `target`. Returns the extracted type, or `fallback` if not found.
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 fn search_tyvar_in_type(
     pattern: TypeHandle,
     target: TypeHandle,

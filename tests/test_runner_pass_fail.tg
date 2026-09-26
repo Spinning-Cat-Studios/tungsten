@@ -1,0 +1,13 @@
+// Regression test for the `tungsten test` runner actually consulting the runtime
+// failure flag (ADR 29.6.26f / T13). Before the fix, every elaborated test_* was
+// reported `ok` unconditionally — a silent-failure trap. `make check-test-runner`
+// runs this file and asserts the runner reports the failing test AND exits nonzero.
+//
+// Expected: `test_pass_*` → ok, `test_deliberately_fails` → FAILED, process exit 1.
+
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+fn assert_eq_nat(a: Nat, b: Nat) -> Unit { tg_assert_eq_nat(a, b) }
+
+pub fn test_pass_arithmetic() -> Unit { assert_eq_nat(2 + 2, 4) }
+pub fn test_deliberately_fails() -> Unit { assert_eq_nat(1, 2) }
+pub fn test_pass_identity() -> Unit { assert_eq_nat(7, 7) }

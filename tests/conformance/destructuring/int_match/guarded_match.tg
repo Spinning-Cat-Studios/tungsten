@@ -1,0 +1,34 @@
+// SUBJECT — an integer `match` (ADR 18.9.26e).
+//
+// Nothing is taken apart here: the discriminating axis is ARM SELECTION. The
+// two elaborators each lower the arms to a conditional chain, and they agree
+// only if they agree on first-match-wins, on a guard falling through to the
+// NEXT arm, on a variable arm's binding scoping only its own guard and body,
+// and on a negative literal's equality. Each digit below is one selection.
+// The match is in both positions — checked (`classify`'s body has an expected
+// type) and synthesised (`small`'s `let` has none) — because the self-host
+// dispatches the two separately.
+
+fn classify(n: Int) -> Nat {
+    match n {
+        -1 => 1,
+        0 | 7 => 2,
+        x if x > 100 => 3,
+        5 => 4,
+        _ => 5
+    }
+}
+
+fn small(n: Nat) -> Nat {
+    let chosen = match n {
+        0 => 6,
+        1 | 2 => 7,
+        m => m + 5
+    };
+    chosen
+}
+
+pub fn main() -> Nat {
+    classify(-1) * 1000000 + classify(7) * 100000 + classify(500) * 10000
+        + classify(5) * 1000 + classify(-9) * 100 + small(2) * 10 + small(3)
+}

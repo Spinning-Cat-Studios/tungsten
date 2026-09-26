@@ -1,0 +1,225 @@
+// src/compiler/elab/exprs/matches/patterns/projections.tg
+// Payload projections for match arms (ADR 21.8.26a).
+//
+// `bind_pattern_in_scope` (mod.tg) binds a pattern's source variables in the
+// elaboration ENVIRONMENT and hands the Core `Case` arm a single synthetic
+// binder — `_payload` for a multi-field constructor, `_tuple` for a tuple
+// pattern. That is enough to type-check the arm body, and it is NOT enough for
+// anything that reads the term afterwards: `h` and `t` appear in the body as
+// FREE variables, with nothing saying where they came from.
+//
+// This module emits the missing half. Given an arm's pattern, the type the arm
+// binder carries, and the already-elaborated body, it wraps the body in the
+// `let` chain that projects each source variable out of the binder:
+//
+//     let h = fst _payload in let t = snd _payload in <body>
+//
+// which is the shape the bootstrap emits (`arm_product_destruct.rs`), so one
+// walker — termination's descent, an occurrence graph, a size analysis — reads
+// both compilers' terms with no per-compiler arm.
+//
+// **The nesting is RIGHT-nested** (ADR 1.8.26b D1): field `i` of `n` is
+// `snd^i(binder)`, then `fst` unless it is the last field. Three fields is the
+// boundary where left- and right-nesting stop coinciding, so a two-field
+// fixture cannot tell a wrong convention from a right one. Since ADR 3.9.26g
+// this module does not state that convention — `projection_path.tg` does, once,
+// and the CIR mirror beside this file folds the same list.
+//
+// Bindings in `env` are left exactly as they were: this pass is additive, and
+// the type each `let` carries is projected out of the payload product the same
+// way `bind_sub_patterns` projects it, so the two cannot disagree.
+
+use parser::ast::{
+    Pattern, PatVar, PatWildcard, PatConstructor, PatTuple,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_is_empty, list_len};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_let, tg_term_fst, tg_term_snd, tg_term_var_named,
+    tg_string_to_cstr
+};
+use elab::exprs::matches::patterns::projection_path::{
+    ProjectionStep, StepFst, StepSnd,
+    product_field_projection, product_field_type
+};
+
+/// Wrap an arm body in the projections that bind its pattern's variables.
+///
+/// `arm_var` is the binder `bind_pattern_in_scope` returned for the same
+/// pattern and type — the two must be called as a pair, or the projections
+/// name a variable the `Case` arm does not bind.
+pub fn wrap_arm_payload_projections(
+    p: Pattern,
+    ty: TypeHandle,
+    arm_var: String,
+    body: TermHandle
+) -> TermHandle {
+    wrap_payload_projections(p, ty, tg_term_var_named(tg_string_to_cstr(arm_var)), body)
+}
+
+/// Bind a scrutinee to the arm binder, then project the pattern out of it.
+///
+/// A single-arm match — a record destructure, a newtype unwrap, a catch-all —
+/// emits no `Case` at all: the arm body *replaces* the match. So the arm binder
+/// is bound by nothing, and unlike a `Case` arm this shape needs a `let` of its
+/// own before the projections have anything to project from.
+///
+/// A wildcard binds nothing, so the scrutinee is dropped exactly as it was
+/// before — no `let`, no change in what the term evaluates.
+pub fn wrap_scrutinee_projections(
+    p: Pattern,
+    ty: TypeHandle,
+    arm_var: String,
+    scrut: TermHandle,
+    body: TermHandle
+) -> TermHandle {
+    match p {
+        PatWildcard(_) => body,
+        _ =>
+            tg_term_let(
+                tg_string_to_cstr(arm_var),
+                ty,
+                scrut,
+                wrap_arm_payload_projections(p, ty, arm_var, body)
+            )
+    }
+}
+
+/// Wrap a body in the projections that bind `p`'s variables out of `src`.
+///
+/// `src` is duplicated once per field rather than bound to an intermediate
+/// `let`, which is safe because every caller passes a variable reference.
+// Partial (ADR 21.8.26a): this cluster descends on a Pattern and on a
+// List<Pattern> alternately, and no single parameter is the decreasing root of
+// both. Executable compiler code that no proof reaches; E0063 fires if that
+// ever changes.
+#[partial]
+pub fn wrap_payload_projections(
+    p: Pattern,
+    ty: TypeHandle,
+    src: TermHandle,
+    body: TermHandle
+) -> TermHandle {
+    match p {
+        PatConstructor(_, sub_pats, _) =>
+            wrap_ctor_field_projections(sub_pats, ty, src, body),
+        PatTuple(sub_pats, _) =>
+            wrap_product_projections(sub_pats, ty, src, body),
+        // A variable or wildcard pattern IS the arm binder, so the source
+        // variable is already in the term and there is nothing to project.
+        _ => body
+    }
+}
+
+/// Project a constructor's fields, mirroring `bind_constructor_in_scope`.
+///
+/// Nullary and one-field constructors emit nothing: for the first there is no
+/// payload, and for the second `bind_pattern_in_scope` returned the field's own
+/// binder, so the arm binder already IS the source variable.
+fn wrap_ctor_field_projections(
+    sub_pats: List<Pattern>,
+    ty: TypeHandle,
+    src: TermHandle,
+    body: TermHandle
+) -> TermHandle {
+    match sub_pats {
+        Nil() => body,
+        Cons(first_pat, rest_pats) =>
+            if list_is_empty(rest_pats) {
+                wrap_payload_projections(first_pat, ty, src, body)
+            } else {
+                wrap_product_projections(sub_pats, ty, src, body)
+            }
+    }
+}
+
+/// The product a run of field projections comes out of.
+///
+/// Bundled because the walk needs all three at every field and the pattern list
+/// and the field index are what actually move.
+type ProductSource = { ty: TypeHandle, src: TermHandle, arity: Nat }
+
+/// Project each element of a right-nested product, mirroring
+/// `bind_sub_patterns` / `bind_tuple_sub_patterns`.
+///
+/// Every element's chain AND its type come from `product_field_projection`
+/// (ADR 3.9.26g), so a field cannot be typed one way and projected another.
+// Partial (ADR 3.9.26g): the entry hands `pats` to the indexed walk unchanged,
+// which is not a strict subterm of itself, and the walk descends on it from
+// there. Executable compiler code that no proof reaches; E0063 fires if that
+// ever changes.
+#[partial]
+pub fn wrap_product_projections(
+    pats: List<Pattern>,
+    ty: TypeHandle,
+    src: TermHandle,
+    body: TermHandle
+) -> TermHandle {
+    let product: ProductSource = { ty: ty, src: src, arity: list_len(pats) };
+    wrap_field_projections_from(pats, product, body, 0)
+}
+
+/// Wrap `body` in the projections for `pats`, which are fields `index` onward.
+///
+/// The `let`s nest outermost-first, so the inner run is built before this
+/// field's binding wraps it.
+fn wrap_field_projections_from(
+    pats: List<Pattern>,
+    product: ProductSource,
+    body: TermHandle,
+    index: Nat
+) -> TermHandle {
+    match pats {
+        Nil() => body,
+        Cons(pat, rest) =>
+            let inner = wrap_field_projections_from(rest, product, body, index + 1);
+            let steps = product_field_projection(index, product.arity);
+            wrap_field_projection(
+                pat,
+                product_field_type(product.ty, steps),
+                project_term_along_steps(product.src, steps),
+                inner
+            )
+    }
+}
+
+/// Fold a projection chain into `fst`/`snd` term nodes, in application order.
+///
+/// Public because record field access folds the same chain (ADR 4.9.26b): one
+/// chain, one folder, so the two paths cannot build it differently.
+pub fn project_term_along_steps(src: TermHandle, steps: List<ProjectionStep>) -> TermHandle {
+    match steps {
+        Nil() => src,
+        Cons(step, rest) => project_term_along_steps(project_term_one_step(src, step), rest)
+    }
+}
+
+fn project_term_one_step(src: TermHandle, step: ProjectionStep) -> TermHandle {
+    match step {
+        StepFst() => tg_term_fst(src),
+        StepSnd() => tg_term_snd(src)
+    }
+}
+
+/// Bind one field, mirroring `match_bind_single_pattern`.
+///
+/// A wildcard binds nothing, so it emits no `let` — the same choice the
+/// bootstrap makes, and the reason a `Cons(s, _)` arm leaks exactly one free
+/// variable rather than two.
+fn wrap_field_projection(
+    p: Pattern,
+    ty: TypeHandle,
+    src: TermHandle,
+    body: TermHandle
+) -> TermHandle {
+    match p {
+        PatVar(id) =>
+            tg_term_let(tg_string_to_cstr(ident_name(id)), ty, src, body),
+        PatWildcard(_) => body,
+        PatTuple(sub_pats, _) =>
+            wrap_product_projections(sub_pats, ty, src, body),
+        _ => body
+    }
+}

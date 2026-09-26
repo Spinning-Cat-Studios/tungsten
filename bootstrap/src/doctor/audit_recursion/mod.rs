@@ -8,11 +8,14 @@
 //!
 //! See ADR 18.4.26g §4 for design rationale.
 
-mod call_graph;
+mod bridge;
 mod classify;
 #[cfg(test)]
 mod classify_tests;
-mod scc;
+mod decompose_hint;
+
+pub use bridge::{AnalysisMode, CodegenVerdict};
+pub use decompose_hint::DecomposeHint;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,9 +23,9 @@ use std::process::ExitCode;
 
 use crate::driver;
 
-use call_graph::CallGraph;
 use classify::RecursionKind;
-use scc::tarjan_scc;
+use decompose_hint::classify_decompose_hint;
+use tungsten_core::terms::termination::{tarjan_scc, Adjacency, OccurrenceGraph};
 use tungsten_core::types::Type;
 
 /// Result of analyzing a single function's recursion.
@@ -38,8 +41,32 @@ pub struct RecursionInfo {
     pub decompose_hint: DecomposeHint,
 }
 
-/// Run the recursion audit command.
+/// Run the recursion audit command (source-only entry — no codegen consult).
+///
+/// The `#[cfg(not(feature = "codegen"))]` build and `--source-only` reach the
+/// audit through here with [`AnalysisMode::SourceOnly`] and no verdicts. The
+/// codegen-consulting path is dispatched binary-side (ADR 1.7.26b §2.2) and
+/// calls [`cmd_audit_recursion_with_verdicts`].
 pub fn cmd_audit_recursion(file: &PathBuf, verbose: bool, max_errors: usize) -> ExitCode {
+    cmd_audit_recursion_with_verdicts(
+        file,
+        verbose,
+        max_errors,
+        AnalysisMode::SourceOnly,
+        &HashMap::new(),
+    )
+}
+
+/// Run the recursion audit, downgrading over-optimistic `✓ musttail eligible`
+/// verdicts using the actual codegen decisions (ADR 1.7.26b §2.2).
+#[allow(clippy::implicit_hasher)] // Reason: callers all use the default hasher
+pub fn cmd_audit_recursion_with_verdicts(
+    file: &PathBuf,
+    verbose: bool,
+    max_errors: usize,
+    mode: AnalysisMode,
+    verdicts: &HashMap<String, CodegenVerdict>,
+) -> ExitCode {
     // Elaborate the project
     let project = match driver::elaborate_project(file, verbose, max_errors, None) {
         Ok(output) => output,
@@ -57,7 +84,10 @@ pub fn cmd_audit_recursion(file: &PathBuf, verbose: bool, max_errors: usize) -> 
         type_map.insert(def.name.clone(), &def.ty);
     }
 
-    let graph = CallGraph::build(&def_map);
+    // The termination gate's occurrence graph, reused verbatim (ADR 29.6.26e
+    // § Findings): the audit and the gate must not disagree about what a
+    // recursive group is, and two Tarjans over the same terms is how they would.
+    let graph = OccurrenceGraph::build(def_map.iter().map(|(name, term)| (name.as_str(), *term)));
 
     if verbose {
         eprintln!(
@@ -68,11 +98,18 @@ pub fn cmd_audit_recursion(file: &PathBuf, verbose: bool, max_errors: usize) -> 
     }
 
     // Find SCCs and classify recursive functions
-    let sccs = tarjan_scc(&graph);
-    let results = classify_scc_components(&sccs, &graph, &def_map, &type_map);
+    let adjacency = graph.adjacency();
+    let sccs = tarjan_scc(&adjacency);
+    let results = classify_scc_components(&sccs, &adjacency, &def_map, &type_map);
 
     let recursive_count: usize = results.len();
-    print_recursion_report(&results, project.defs.len(), recursive_count);
+    print_recursion_report(
+        &results,
+        project.defs.len(),
+        recursive_count,
+        &mode,
+        verdicts,
+    );
 
     ExitCode::SUCCESS
 }
@@ -80,7 +117,7 @@ pub fn cmd_audit_recursion(file: &PathBuf, verbose: bool, max_errors: usize) -> 
 /// Classify all SCC components into recursion kinds.
 fn classify_scc_components<'a>(
     sccs: &[Vec<String>],
-    graph: &CallGraph,
+    adjacency: &Adjacency,
     def_map: &HashMap<String, &'a tungsten_core::terms::Term>,
     type_map: &HashMap<String, &Type>,
 ) -> Vec<RecursionInfo> {
@@ -89,7 +126,7 @@ fn classify_scc_components<'a>(
     for component in sccs {
         if component.len() == 1 {
             let name = &component[0];
-            if graph.has_edge(name, name) {
+            if adjacency.get(name).is_some_and(|out| out.contains(name)) {
                 let kind = classify_single(name, def_map);
                 let decompose_hint = if kind == RecursionKind::TailRecursive {
                     classify_decompose_hint(name, type_map)
@@ -133,33 +170,51 @@ fn classify_single(
 }
 
 /// Print the recursion audit report.
-fn print_recursion_report(results: &[RecursionInfo], total_defs: usize, recursive_count: usize) {
+fn print_recursion_report(
+    results: &[RecursionInfo],
+    total_defs: usize,
+    recursive_count: usize,
+    mode: &AnalysisMode,
+    verdicts: &HashMap<String, CodegenVerdict>,
+) {
     println!("Recursion Audit Report");
     println!("══════════════════════");
     println!();
+    mode.print_banner();
     println!("Total functions analyzed: {}", total_defs);
     println!("Recursive functions:     {}", recursive_count);
     println!();
 
+    // Only the tail-recursive group's ✓ is downgraded by codegen verdicts —
+    // that is the group that claims "musttail eligible ⇒ constant stack".
     print_recursion_group(
         "TAIL-RECURSIVE (musttail eligible):",
         "✓",
         results,
         RecursionKind::TailRecursive,
+        verdicts,
     );
     print_recursion_group(
         "TREE-RECURSIVE (stack depth = O(tree height)):",
         "⚠",
         results,
         RecursionKind::TreeRecursive,
+        &HashMap::new(),
     );
     print_recursion_group(
         "LINEAR NON-TAIL (stack depth = O(n)):",
         "⚠",
         results,
         RecursionKind::LinearNonTail,
+        &HashMap::new(),
     );
-    print_recursion_group("GENERAL / UNBOUNDED:", "✗", results, RecursionKind::General);
+    print_recursion_group(
+        "GENERAL / UNBOUNDED:",
+        "✗",
+        results,
+        RecursionKind::General,
+        &HashMap::new(),
+    );
 
     if results.is_empty() {
         println!("No recursive functions found.");
@@ -169,11 +224,16 @@ fn print_recursion_report(results: &[RecursionInfo], total_defs: usize, recursiv
 }
 
 /// Print a group of recursion results filtered by kind.
+///
+/// When `verdicts` carries a codegen SKIP for a function (ADR 1.7.26b §2.2), its
+/// `✓` is downgraded to `✗ SKIP: <reason>  O(N) stack` and the source-level
+/// decompose hint is suppressed (the codegen verdict is authoritative).
 fn print_recursion_group(
     header: &str,
     symbol: &str,
     results: &[RecursionInfo],
     kind: RecursionKind,
+    verdicts: &HashMap<String, CodegenVerdict>,
 ) {
     let filtered: Vec<_> = results.iter().filter(|r| r.kind == kind).collect();
     if filtered.is_empty() {
@@ -186,6 +246,11 @@ fn print_recursion_group(
         } else {
             format!(" [mutual: {}]", r.group.join(", "))
         };
+        if let Some((sym, suffix)) = bridge::tail_override(&r.name, verdicts) {
+            // Codegen verdict overrides the source-level ✓ + decompose hint.
+            println!("  {sym} {}{}{}", r.name, group_str, suffix);
+            continue;
+        }
         let hint_str = match &r.decompose_hint {
             DecomposeHint::NoStructParams => "",
             DecomposeHint::Eligible(n) => {
@@ -201,155 +266,4 @@ fn print_recursion_group(
         println!("  {symbol} {}{}{}", r.name, group_str, hint_str);
     }
     println!();
-}
-
-/// Decomposition eligibility hint for musttail (ADR 18.5.26a).
-#[derive(Debug)]
-pub enum DecomposeHint {
-    /// No struct-typed params — musttail works directly.
-    NoStructParams,
-    /// Has struct params that are decomposition-eligible. Count of struct params.
-    Eligible(usize),
-    /// Has struct params but not eligible for decomposition.
-    Ineligible(&'static str),
-    /// Not tail-recursive, so decomposition is irrelevant.
-    NotTailRecursive,
-}
-
-/// Classify a tail-recursive function's decomposition eligibility based on Core IR types.
-fn classify_decompose_hint(name: &str, type_map: &HashMap<String, &Type>) -> DecomposeHint {
-    let ty = match type_map.get(name) {
-        Some(t) => t,
-        None => return DecomposeHint::NoStructParams,
-    };
-    let params = collect_param_types(ty);
-    if params.is_empty() {
-        return DecomposeHint::NoStructParams;
-    }
-    let mut struct_count = 0;
-    for param in &params {
-        match param {
-            // String lowers to { ptr, i64 } — flattenable
-            Type::String => struct_count += 1,
-            // Product lowers to struct — flattenable if fields are scalar
-            Type::Product(_, _) => struct_count += 1,
-            // Sum/Arrow lower to structs with nested struct/array fields
-            Type::Sum(_, _) | Type::Arrow(_, _) => {
-                return DecomposeHint::Ineligible(" [struct params, not flattenable]");
-            }
-            _ => {} // scalar or pointer — no struct issue
-        }
-    }
-    if struct_count > 0 {
-        DecomposeHint::Eligible(struct_count)
-    } else {
-        DecomposeHint::NoStructParams
-    }
-}
-
-/// Extract parameter types from a function type (peeling Arrow wrappers).
-fn collect_param_types(ty: &Type) -> Vec<Type> {
-    let mut params = Vec::new();
-    let mut current = ty;
-    while let Type::Arrow(param, ret) = current {
-        params.push((**param).clone());
-        current = ret;
-    }
-    // Also handle Forall wrappers (polymorphic functions)
-    if let Type::Forall(_, body) = ty {
-        return collect_param_types(body);
-    }
-    params
-}
-
-#[cfg(test)]
-mod decompose_hint_tests {
-    use super::*;
-
-    fn make_type_map(entries: Vec<(&str, Type)>) -> HashMap<String, Type> {
-        entries
-            .into_iter()
-            .map(|(n, t)| (n.to_string(), t))
-            .collect()
-    }
-
-    fn classify_with(name: &str, ty: Type) -> DecomposeHint {
-        let map = make_type_map(vec![(name, ty)]);
-        let ref_map: HashMap<String, &Type> = map.iter().map(|(k, v)| (k.clone(), v)).collect();
-        classify_decompose_hint(name, &ref_map)
-    }
-
-    #[test]
-    fn scalar_params_no_decompose() {
-        // fn(Nat) -> Nat
-        let ty = Type::Arrow(Box::new(Type::Nat), Box::new(Type::Nat));
-        assert!(matches!(
-            classify_with("f", ty),
-            DecomposeHint::NoStructParams
-        ));
-    }
-
-    #[test]
-    fn string_param_is_eligible() {
-        // fn(String) -> Nat
-        let ty = Type::Arrow(Box::new(Type::String), Box::new(Type::Nat));
-        assert!(matches!(classify_with("f", ty), DecomposeHint::Eligible(1)));
-    }
-
-    #[test]
-    fn product_param_is_eligible() {
-        // fn(Product) -> Nat
-        let ty = Type::Arrow(
-            Box::new(Type::Product(Box::new(Type::Nat), Box::new(Type::Nat))),
-            Box::new(Type::Nat),
-        );
-        assert!(matches!(classify_with("f", ty), DecomposeHint::Eligible(1)));
-    }
-
-    #[test]
-    fn sum_param_is_ineligible() {
-        // fn(Sum) -> Nat — Sum lowers to struct+tag, not flattenable
-        let ty = Type::Arrow(
-            Box::new(Type::Sum(Box::new(Type::Nat), Box::new(Type::Bool))),
-            Box::new(Type::Nat),
-        );
-        assert!(matches!(
-            classify_with("f", ty),
-            DecomposeHint::Ineligible(_)
-        ));
-    }
-
-    #[test]
-    fn arrow_param_is_ineligible() {
-        // fn(fn(Nat)->Nat) -> Nat — Arrow lowers to closure struct
-        let inner = Type::Arrow(Box::new(Type::Nat), Box::new(Type::Nat));
-        let ty = Type::Arrow(Box::new(inner), Box::new(Type::Nat));
-        assert!(matches!(
-            classify_with("f", ty),
-            DecomposeHint::Ineligible(_)
-        ));
-    }
-
-    #[test]
-    fn mixed_string_and_nat() {
-        // fn(String, Nat, String) -> Nat — 2 struct params
-        let ty = Type::Arrow(
-            Box::new(Type::String),
-            Box::new(Type::Arrow(
-                Box::new(Type::Nat),
-                Box::new(Type::Arrow(Box::new(Type::String), Box::new(Type::Nat))),
-            )),
-        );
-        assert!(matches!(classify_with("f", ty), DecomposeHint::Eligible(2)));
-    }
-
-    #[test]
-    fn unknown_function_returns_no_struct() {
-        let map: HashMap<String, Type> = HashMap::new();
-        let ref_map: HashMap<String, &Type> = map.iter().map(|(k, v)| (k.clone(), v)).collect();
-        assert!(matches!(
-            classify_decompose_hint("nonexistent", &ref_map),
-            DecomposeHint::NoStructParams
-        ));
-    }
 }

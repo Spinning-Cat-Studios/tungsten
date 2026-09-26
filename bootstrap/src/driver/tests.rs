@@ -399,4 +399,60 @@ pub fn bar_broken() -> Bool {
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].defs[0].name, "main");
     }
+
+    /// The IR cache's hit path, and its clean-collection guard (ADR 14.8.26g
+    /// D2a): a second identical elaboration is served from cache, and a
+    /// source whose collection pass deferred an error never is — a stale hit
+    /// there would mask the failure entirely.
+    #[test]
+    fn an_ir_cache_hit_requires_a_clean_collection() {
+        use crate::driver::modules::{ModuleInfo, SourceMap};
+        use crate::driver::output::TraceOptions;
+        use std::sync::Mutex;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("m.tg");
+        let source = "fn forty_two() -> Nat { 42 }";
+        fs::write(&path, source).unwrap();
+        let (ast, parse_errors) = crate::parse(source);
+        assert!(parse_errors.is_empty());
+
+        let cache = Mutex::new(crate::cache::BuildCache::new(dir.path(), false).unwrap());
+        // Seed the AST-manifest entry: `put_ir` refuses a file the AST cache
+        // has never seen, and without it the "hit" leg would silently test a
+        // permanent miss.
+        cache.lock().unwrap().put(&path, source, &ast).unwrap();
+        let build = crate::driver::pipeline::BuildCtx {
+            cache: Some(&cache),
+            module_info: ModuleInfo::default(),
+            source_map: SourceMap::single(path.clone(), source.to_string()),
+        };
+        let trace = TraceOptions::default();
+
+        let first = crate::driver::pipeline::ir_cached_elab::elaborate_with_ir_cache(
+            &ast, &path, false, &build, &trace,
+        )
+        .expect("clean source must elaborate");
+        let second = crate::driver::pipeline::ir_cached_elab::elaborate_with_ir_cache(
+            &ast, &path, false, &build, &trace,
+        )
+        .expect("the cache hit must serve the same defs");
+        assert_eq!(second.defs.len(), first.defs.len());
+
+        // A deferred collection error must fail even when a matching cache
+        // entry EXISTS: the broken source shares the clean run's path and (no
+        // type definitions) its types hash, so without the clean-collection
+        // guard the stale hit would return the clean run's defs and mask the
+        // failure entirely.
+        let bad_source = "fn f() -> NoSuchType { 0 }";
+        fs::write(&path, bad_source).unwrap();
+        let (bad_ast, _) = crate::parse(bad_source);
+        let result = crate::driver::pipeline::ir_cached_elab::elaborate_with_ir_cache(
+            &bad_ast, &path, false, &build, &trace,
+        );
+        assert!(
+            result.is_err(),
+            "a broken source must fail, not be served the clean run's cache entry"
+        );
+    }
 }

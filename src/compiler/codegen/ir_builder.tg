@@ -1,4 +1,7 @@
 // src/compiler/codegen/ir_builder.tg
+// The driver never reaches this module: `run_compile` delegates codegen to the
+// bootstrap binary, so it is compiled and type-checked but executed only by
+// `test_codegen*.tg` / `test_cir_captures.tg`. See codegen/mod.tg (ADR 3.9.26a).
 // SSA name generation and IR state threading.
 //
 // Since Tungsten doesn't have mutation, the emitter threads IRState through

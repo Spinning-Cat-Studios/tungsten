@@ -143,3 +143,103 @@ fn expected_context_file_path() {
     let ctx_no_file = ExpectedContext::return_type(Span::new(10, 20));
     assert!(ctx_no_file.file_path.is_none());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The Other(String) / InternalError split (ADR 15.8.26b)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn internal_error_carries_its_own_code_and_framing() {
+    let err = ElabError::internal(Span::new(0, 5), "the invariant that broke");
+    assert_eq!(err.kind.code(), "E9998");
+    assert!(err.message.contains("internal compiler error"));
+    assert!(err.message.contains("the invariant that broke"));
+    assert!(
+        err.message.contains("please report it"),
+        "the framing, not the site, asks for the bug report: {}",
+        err.message
+    );
+}
+
+/// The triage's residue is a CLOSED population: defensive branches behind
+/// earlier passes, plus test-harness verdicts (`forms/builtins.rs`). A new
+/// `Other` site should instead be a real kind (user-reachable condition) or
+/// `ElabError::internal` (broken compiler invariant) — see ADR 15.8.26b.
+#[test]
+fn other_string_population_does_not_regrow() {
+    let sites = other_construction_sites();
+    assert!(
+        sites.len() >= 10,
+        "the census parsed only {} site(s) — the scan shape changed",
+        sites.len()
+    );
+    assert!(
+        sites.len() <= 18,
+        "{} `Other(String)` construction sites, expected at most 18. A new \
+         condition deserves a kind of its own, or `ElabError::internal` if no \
+         user input can cause it (ADR 15.8.26b). Sites:\n{:#?}",
+        sites.len(),
+        sites.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+}
+
+/// AC (ADR 15.8.26b): no site announces `internal error:` through the
+/// uncoded catch-all — that class has its own kind now.
+#[test]
+fn no_other_site_says_internal_error() {
+    for (path, snippet) in other_construction_sites() {
+        assert!(
+            !snippet.contains("internal error"),
+            "`{path}` routes an internal-error message through Other(String) — \
+             use ElabError::internal (E9998) instead:\n{snippet}"
+        );
+    }
+}
+
+/// `(file, snippet-after-the-call)` for every `Other` construction in
+/// production elaborate/ code. Skips `tests` modules and `error/` itself
+/// (where `Other` appears as pattern arms and the helper's own definition).
+fn other_construction_sites() -> Vec<(String, String)> {
+    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("read elaborate/ source dir") {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if path.is_dir() {
+                if name != "tests" && name != "error" {
+                    walk(&path, out);
+                }
+            } else if name.ends_with(".rs") && name != "tests.rs" {
+                let src = std::fs::read_to_string(&path).expect("read source file");
+                for needle in ["ElabErrorKind::Other(", "ElabError::other("] {
+                    for (at, _) in src.match_indices(needle) {
+                        let end = (at + 250).min(src.len());
+                        out.push((path.display().to_string(), src[at..end].to_string()));
+                    }
+                }
+            }
+        }
+    }
+    let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src/elaborate"));
+    let mut sites = Vec::new();
+    walk(&root, &mut sites);
+    sites
+}
+
+/// Pins the census walker's snippet contract: each snippet is the text AT the
+/// construction site (so the internal-error scan reads the right message) and
+/// the window is bounded (so it cannot swallow unrelated later sites).
+#[test]
+fn census_snippets_are_bounded_windows_anchored_at_the_site() {
+    for (path, snippet) in other_construction_sites() {
+        assert!(
+            snippet.starts_with("ElabErrorKind::Other(")
+                || snippet.starts_with("ElabError::other("),
+            "`{path}` snippet does not start at the construction site: {snippet:?}"
+        );
+        assert!(
+            snippet.len() <= 250,
+            "`{path}` snippet exceeds the 250-byte window ({} bytes)",
+            snippet.len()
+        );
+    }
+}

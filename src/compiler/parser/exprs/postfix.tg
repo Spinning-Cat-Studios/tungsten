@@ -182,6 +182,10 @@ fn is_type_like_name(name: String) -> Bool {
 }
 
 /// Check if any character from index i to len-1 is lowercase.
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 fn has_lowercase_char(name: String, i: Nat, len: Nat) -> Bool {
     if i >= len {
         false

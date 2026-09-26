@@ -7,7 +7,8 @@
 //! 4. Constructor names are unique within the ADT
 //! 5. Every constructor entry references the expected parent type
 //!
-//! Used by both `info constructors` and `doctor check-constructor-counts`.
+//! Used by both `info type members constructors` and
+//! `doctor check type integrity constructor-counts`.
 
 use std::collections::HashMap;
 

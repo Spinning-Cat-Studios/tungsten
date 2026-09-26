@@ -1,0 +1,11 @@
+// ADR 7.8.26e: the accepted side of the gate.
+//   - `Ok` mentions itself only in an arrow CODOMAIN.
+//   - `Tree` nests through `List`, whose parameter computes `strict`.
+//   - `E`/`F` are mutually recursive with no arrow at all.
+type Ok = MkOk(Nat -> Ok)
+type List<T> = Nil | Cons(T, List<T>)
+type Tree = Node(List<Tree>)
+type E = MkE(F)
+type F = MkF(E)
+
+fn main() -> Nat { 0 }

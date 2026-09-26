@@ -1,0 +1,40 @@
+// ADR 29.6.26f P4 — list path correctness (run via the evaluator, cost-3-ish).
+// The tail-recursive list spine attributes element differences to `[i]` (Index)
+// and length mismatches to `.len` (Len) — the §2.3 source-level list grammar.
+// Expected: 15 (all four path checks pass). Run: tungsten run tests/comparator_p4_paths_run.tg
+type List<T> = | Nil | Cons(T, List<T>)
+type PathSeg = | Field(String) | Pos(Nat) | Index(Nat) | Tag | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult = | Equal | NotEqual(CompareDiff)
+
+fn b2n(b: Bool) -> Nat { if b { 1 } else { 0 } }
+fn first_is_index(r: CompareResult, want: Nat) -> Bool {
+    match r {
+        Equal() => false,
+        NotEqual(d) => match d.path {
+            Nil() => false,
+            Cons(seg, _) => match seg { Index(n) => n == want, _ => false }
+        }
+    }
+}
+fn first_is_len(r: CompareResult) -> Bool {
+    match r {
+        Equal() => false,
+        NotEqual(d) => match d.path {
+            Nil() => false,
+            Cons(seg, _) => match seg { Len() => true, _ => false }
+        }
+    }
+}
+fn main() -> Nat {
+    let a: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
+    let b: List<Nat> = Cons(1, Cons(9, Cons(3, Nil)));   // element diff at index 1
+    let c: List<Nat> = Cons(1, Cons(2, Nil));             // shorter
+    let d: List<Nat> = Cons(9, Cons(2, Cons(3, Nil)));   // element diff at index 0
+    // expect: index-1 diff, len diff (a longer than c), len diff (c shorter than a), index-0 diff
+    b2n(first_is_index(compare(a, b), 1))
+    + 2 * b2n(first_is_len(compare(a, c)))
+    + 4 * b2n(first_is_len(compare(c, a)))
+    + 8 * b2n(first_is_index(compare(d, a), 0))
+}

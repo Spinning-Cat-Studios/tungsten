@@ -1,25 +1,33 @@
 // src/compiler/driver/pipeline/test/mod.tg
-// Test pipeline: discover test_* functions, generate harness, compile and run.
+// Test pipeline: discover test_* functions, plan a harness, compile and run.
 //
-// Uses compile-and-run execution model:
+// Uses a compile-and-run execution model:
 // 1. Parse + elaborate to discover test_* functions
-// 2. Generate source-text harness (synthetic main)
-// 3. Compile via bootstrap
-// 4. Execute binary and report results
+// 2. Choose a harness mode for the file, or refuse it with ONE error [mode/]
+// 3. Generate source-text harness (synthetic main)                   [harness/]
+// 4. Compile via bootstrap, execute, report, clean up               [execute.tg]
+//
+// Step 2 is ADR 7.8.26b's addition. The generator used to assume a standalone
+// file with an empty root namespace and splice itself into a file that imports
+// the entire compiler; because both compilers' value environments are flat and
+// name-keyed, its root `fn assert_eq_nat` and `driver::ffi::test`'s were one
+// key, and E0016 fired at every call site — 77 of them for
+// `src/compiler/test_ctor_store.tg`. See `mode/mod.tg` for the invariant that
+// replaces the assumption.
 
+pub mod artifact;
+pub mod discovery;
+pub mod execute;
 pub mod harness;
+pub mod mode;
 
 use driver::ffi::{
     eprintln, println, stderr_is_tty,
-    List, Nil, Cons,
-    exec_process, read_file, write_file,
-    string_len, FfiResult, FfiOk, FfiErr
+    List, Nil, Cons
 };
 use driver::util::{
     Result, Ok, Err, Option, Some, None,
-    string_eq, string_is_empty, string_contains,
-    starts_with, nat_to_string, not,
-    list_len
+    nat_to_string, not, list_len
 };
 use driver::cli::{TestOpts};
 use driver::modules::{
@@ -38,12 +46,17 @@ use elab::error::{
     SourceInfo, source_info_new,
     render_diagnostics_limited
 };
-use elab::error::render::colors::{colorize_bold, ColorRed, ColorGreen, ColorCyan};
+use elab::error::render::colors::{colorize_bold, ColorRed, ColorCyan};
 use driver::pipeline::{PipelineResult, PipelineOk, PipelineErr};
-use driver::pipeline::errors::{render_lex_parse_errors, get_module_source};
-use driver::pipeline::compile::find_bootstrap_binary;
-use driver::modules::build::strip_tg_extension;
-use driver::pipeline::test::harness::generate_harness_source;
+use driver::pipeline::errors::{render_module_tree_errors, get_module_source};
+use driver::pipeline::test::execute::{compile_and_run_tests};
+use driver::pipeline::test::mode::{plan_harness, unsupported_reason};
+use driver::pipeline::test::mode::types::{HarnessPlan};
+use driver::pipeline::test::discovery::{
+    TestDiscovery, TestSkip,
+    EmptySuiteAction, FailRequireTests, ReportNoTests, Proceed,
+    find_test_defs, classify_empty_suite
+};
 
 // ===========================================================================
 // TEST PIPELINE
@@ -69,12 +82,10 @@ pub fn run_test(opts: TestOpts) -> PipelineResult {
 /// Check for lex/parse errors, then elaborate and discover tests.
 fn test_parsed_module(module: ParsedModule, opts: TestOpts,
                       use_color: Bool, max_errors: Nat) -> PipelineResult {
-    let lex_errs = parsed_module_lex_errors(module);
-    let parse_errs = parsed_module_parse_errors(module);
+    // Whole-tree walk (ADR 12.8.26b P1/AC6) — see `render_module_tree_errors`.
+    let total_errs = render_module_tree_errors(module, max_errors, use_color);
 
-    if has_errors(lex_errs) || parse_has_errors(parse_errs) {
-        let total_errs = error_count(lex_errs) + parse_error_count(parse_errs);
-        render_lex_parse_errors(module, max_errors, use_color);
+    if total_errs > 0 {
         PipelineErr(total_errs)
     } else {
         elaborate_and_test(module, opts, use_color, max_errors)
@@ -96,16 +107,67 @@ fn elaborate_and_test(module: ParsedModule, opts: TestOpts,
         eprintln(rendered);
         PipelineErr(elab_result_error_count(elab_result))
     } else {
-        let test_defs = find_test_defs(elab_result.defs, opts.filter);
-        let test_count = list_len(test_defs);
-        if test_count == 0 {
-            eprintln(colorize_bold("warning", ColorCyan, use_color) ++
-                    ": no test functions found (functions must be named test_*)");
+        let found: TestDiscovery = find_test_defs(elab_result.defs, opts.filter);
+        report_skips(found.skips, use_color);
+        // The plan is built HERE and not at the top of this function: it reads
+        // `elab_result.defs` for D5's visibility half, and those are only
+        // meaningful once `elab_result_ok` holds.
+        let plan = plan_harness(module, module_info, elab_result.defs,
+                                extract_test_names(found.tests));
+        act_on_suite(opts, found, plan, use_color)
+    }
+}
+
+/// Dispatch on the empty-suite classification, mirroring the bootstrap's
+/// `cmd_test` (`test_runner/mod.rs:262-272`).
+///
+/// The one deliberate divergence is the `Proceed` arm at `test_count == 0`
+/// (everything skipped, `--require-tests` off). The bootstrap is an evaluator,
+/// so running an empty list costs nothing; the self-host would fall through to
+/// `compile_and_run_tests`, which writes a harness and shells out to the
+/// bootstrap compiler on a compiler-sized file — minutes of work to run zero
+/// tests, plus a generated artifact left behind. So it short-circuits. The
+/// observable behaviour (skip warnings, zero tests, exit 0) is identical; only
+/// the wasted work is not.
+fn act_on_suite(opts: TestOpts, found: TestDiscovery, plan: HarnessPlan,
+                use_color: Bool) -> PipelineResult {
+    let test_count = list_len(found.tests);
+    let skip_count = list_len(found.skips);
+    match classify_empty_suite(test_count, skip_count, opts.require_tests) {
+        FailRequireTests() => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++
+                    ": zero runnable tests discovered (--require-tests); " ++
+                    nat_to_string(skip_count) ++ " function(s) skipped");
+            PipelineErr(1)
+        },
+        ReportNoTests() => {
+            // stdout, and the bootstrap's exact string (`test_runner/mod.rs:358`).
+            println("no tests found");
             PipelineOk(0)
-        } else {
-            let test_names = extract_test_names(test_defs);
-            compile_and_run_tests(opts, test_names, test_count, use_color)
-        }
+        },
+        Proceed() =>
+            if test_count == 0 {
+                PipelineOk(0)
+            } else {
+                run_servable_suite(opts, plan, use_color)
+            }
+    }
+}
+
+/// Refuse an unservable layout with ONE error, or run the suite.
+///
+/// This is where the ADR's user-visible value lands: the status quo for a
+/// `mod`-declaring file whose ffi surface has moved was 77 E0016s at the call
+/// sites, none of which named the cause. Detection fails closed, so the
+/// alternative to this message is a harness that will not elaborate.
+fn run_servable_suite(opts: TestOpts, plan: HarnessPlan, use_color: Bool) -> PipelineResult {
+    match unsupported_reason(plan.mode) {
+        Some(reason) => {
+            eprintln(colorize_bold("error", ColorRed, use_color) ++
+                    ": cannot generate a test harness for " ++ opts.file ++ ": " ++ reason);
+            PipelineErr(1)
+        },
+        None() => compile_and_run_tests(opts, plan, use_color)
     }
 }
 
@@ -113,24 +175,20 @@ fn elaborate_and_test(module: ParsedModule, opts: TestOpts,
 // TEST DISCOVERY
 // ===========================================================================
 
-/// Find all test_* definitions, optionally filtered by substring.
-fn find_test_defs(defs: List<ElabDef>, filter: String) -> List<ElabDef> {
-    match defs {
-        Nil() => Nil,
-        Cons(def, rest) =>
-            if starts_with(def.name, "test_") {
-                if string_is_empty(filter) {
-                    Cons(def, find_test_defs(rest, filter))
-                } else {
-                    if string_contains(def.name, filter) {
-                        Cons(def, find_test_defs(rest, filter))
-                    } else {
-                        find_test_defs(rest, filter)
-                    }
-                }
-            } else {
-                find_test_defs(rest, filter)
-            }
+/// Print one warning per rejected candidate, so the narrowing from candidates
+/// to runnable tests is observable rather than silent.
+///
+/// Wording matches the bootstrap's `warning: skipping {name}: {reason}`
+/// (`test_runner/mod.rs:346`); `colorize_bold` emits the bare word when stderr
+/// is not a tty, which is the case any captured comparison sees.
+fn report_skips(skips: List<TestSkip>, use_color: Bool) -> Unit {
+    match skips {
+        Nil() => (),
+        Cons(skip, rest) => {
+            eprintln(colorize_bold("warning", ColorCyan, use_color) ++
+                    ": skipping " ++ skip.name ++ ": " ++ skip.reason);
+            report_skips(rest, use_color)
+        }
     }
 }
 
@@ -139,62 +197,5 @@ fn extract_test_names(defs: List<ElabDef>) -> List<String> {
     match defs {
         Nil() => Nil,
         Cons(def, rest) => Cons(def.name, extract_test_names(rest))
-    }
-}
-
-// ===========================================================================
-// COMPILE + RUN
-// ===========================================================================
-
-/// Generate harness source, compile, execute, and report.
-fn compile_and_run_tests(opts: TestOpts, test_names: List<String>,
-                         test_count: Nat, use_color: Bool) -> PipelineResult {
-    match read_file(opts.file) {
-        FfiErr(err) => {
-            eprintln(colorize_bold("error", ColorRed, use_color) ++
-                    ": could not read test file: " ++ err);
-            PipelineErr(1)
-        },
-        FfiOk(source) => {
-            let harness_source = generate_harness_source(source, test_names, test_count);
-            let base = strip_tg_extension(opts.file);
-            let harness_file = base ++ ".tungsten_test.tg";
-            let harness_binary = base ++ ".tungsten_test";
-
-            match write_file(harness_file, harness_source) {
-                FfiErr(err) => {
-                    eprintln(colorize_bold("error", ColorRed, use_color) ++
-                            ": could not write harness file: " ++ err);
-                    PipelineErr(1)
-                },
-                FfiOk(_) => {
-                    let bootstrap = find_bootstrap_binary();
-                    let compile_args = Cons("compile", Cons(harness_file, Cons("-o", Cons(harness_binary, Nil))));
-
-                    if opts.verbose {
-                        eprintln(colorize_bold("info", ColorCyan, use_color) ++
-                                ": compiling test harness (" ++ nat_to_string(test_count) ++ " tests)")
-                    };
-
-                    let compile_exit = exec_process(bootstrap, compile_args);
-                    if compile_exit != 0 {
-                        eprintln(colorize_bold("error", ColorRed, use_color) ++
-                                ": test compilation failed");
-                        PipelineErr(1)
-                    } else {
-                        if opts.verbose {
-                            eprintln(colorize_bold("info", ColorCyan, use_color) ++
-                                    ": running tests...")
-                        };
-                        let run_exit = exec_process(harness_binary, Nil);
-                        if run_exit == 0 {
-                            PipelineOk(test_count)
-                        } else {
-                            PipelineErr(1)
-                        }
-                    }
-                }
-            }
-        }
     }
 }

@@ -1,7 +1,7 @@
 //! Per-module elaboration cache (ADR 10.5.26l, 10.5.26n, 12.5.26a).
 //!
-//! Caches Phase B signature data (types, exports, metadata) for individual
-//! modules so unchanged modules can skip re-elaboration. Phases A and A.5
+//! Caches Body Elaboration signature data (types, exports, metadata) for individual
+//! modules so unchanged modules can skip re-elaboration. Stub Registration and Signature Collection
 //! always run (they are cheap).
 //!
 //! Full-output caching (ADR 12.5.26a): When `TUNGSTEN_ELAB_CACHE_FULL=1` is
@@ -14,7 +14,10 @@ pub mod compress;
 
 pub mod writer;
 
+mod delta;
 mod full_output;
+
+use delta::compute_delta_exports;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,7 +33,12 @@ use super::build::BuildCache;
 
 /// Schema version for full-output cache entries (ADR 12.5.26a).
 /// Bump when the serialization format of `CachedModuleFullOutput` changes.
-pub const FULL_OUTPUT_SCHEMA_VERSION: u32 = 1;
+/// v2: added `value_import_targets` (ADR 12.7.26a D7).
+/// v3: added `termination_meta` (ADR 29.6.26e) — a cache hit that dropped the
+/// annotations would termination-check a `#[partial]` definition.
+/// v4: `Type::Int` and five `Int` `Term` variants (ADR 14.9.26c) — bincode
+/// is positional, so a v3 entry would decode to the wrong variants.
+pub const FULL_OUTPUT_SCHEMA_VERSION: u32 = 4;
 
 /// Full-output cache entry for a single module (ADR 12.5.26a).
 ///
@@ -52,6 +60,14 @@ pub struct CachedModuleFullOutput {
     pub delta_exports: ModuleExports,
     /// Interface-level warnings to replay on cache hit.
     pub warnings: Vec<ElabError>,
+    /// This module's value import targets (ADR 12.7.26a §2.1) — needed so a
+    /// full-output cache hit still feeds codegen's colliding-import resolution.
+    pub value_import_targets: crate::elaborate::ValueImportTargets,
+    /// Termination annotations and proof-relevance (ADR 29.6.26e). Cached with
+    /// the defs they describe: reconstructed definitions traverse the same
+    /// admission state machine as freshly elaborated ones, and cannot do so
+    /// without knowing which of them opted out.
+    pub termination_meta: std::collections::HashMap<String, crate::elaborate::DefTerminationMeta>,
 }
 
 /// Signature-only cache entry for a single module (ADR 10.5.26n §2.1).
@@ -69,6 +85,11 @@ pub struct CachedModuleSignature {
     pub warnings: Vec<ElabError>,
     /// Number of definitions elaborated (for reporting on cache hit).
     pub def_count: usize,
+    /// This module's termination facts (ADR 29.6.26e). Replayed on a hit: the
+    /// entry carries no `CoreDef`s, so without this the module's definitions
+    /// would vanish from the admission environment and its rejections would be
+    /// silently dropped on every run after the first.
+    pub termination: crate::elaborate::termination::CachedTermination,
 }
 
 impl CachedModuleSignature {
@@ -87,63 +108,31 @@ impl CachedModuleSignature {
             delta_exports: compute_delta_exports(full_exports, prior_exports),
             warnings: output.warnings.clone(),
             def_count: output.defs.len(),
+            termination: crate::elaborate::termination::CachedTermination::from_module(
+                &output.defs,
+                &output.termination_meta,
+            ),
         }
     }
 
     /// Reconstruct a minimal ElabOutput for accumulation (empty defs + type maps).
     pub fn into_elab_output(self) -> ElabOutput {
         ElabOutput {
-            defs: Vec::new(),
             warnings: self.warnings,
-            record_types: HashMap::new(),
-            adt_types: HashMap::new(),
-            type_aliases: HashMap::new(),
-            type_provenance: TypeProvenance::default(),
-            encoded_types: HashMap::new(),
-            mutual_recursion_groups: HashMap::new(),
-            type_visibilities: HashMap::new(),
-            record_field_visibilities: HashMap::new(),
+            carried_termination: self.termination,
+            ..ElabOutput::default()
         }
     }
 }
 
-/// Compute delta exports: entries in `full` that are NOT in `prior`.
-fn compute_delta_exports(full: &ModuleExports, prior: &ModuleExports) -> ModuleExports {
-    use std::collections::HashSet;
-    let prior_types: HashSet<&str> = prior.types.iter().map(|(n, _)| n.as_str()).collect();
-    let prior_values: HashSet<&str> = prior.values.iter().map(|(n, _)| n.as_str()).collect();
-    let prior_ctors: HashSet<&str> = prior.constructors.iter().map(|(n, _)| n.as_str()).collect();
-
-    ModuleExports {
-        types: full
-            .types
-            .iter()
-            .filter(|(n, _)| !prior_types.contains(n.as_str()))
-            .cloned()
-            .collect(),
-        values: full
-            .values
-            .iter()
-            .filter(|(n, _)| !prior_values.contains(n.as_str()))
-            .cloned()
-            .collect(),
-        constructors: full
-            .constructors
-            .iter()
-            .filter(|(n, _)| !prior_ctors.contains(n.as_str()))
-            .cloned()
-            .collect(),
-    }
-}
-
-/// Compute a cache key for a single module's Phase B elaboration.
+/// Compute a cache key for a single module's Body Elaboration elaboration.
 ///
 /// The key incorporates:
 /// - Compiler version (via `COMPILER_VERSION`)
 /// - File content hash (SHA-256)
-/// - Phase A.5 exports hash (captures transitive dependency state)
+/// - Signature Collection exports hash (captures transitive dependency state)
 ///
-/// Using the Phase A.5 exports hash as a proxy for transitive imports
+/// Using the Signature Collection exports hash as a proxy for transitive imports
 /// is conservative: any change in any module's types/values/constructors
 /// will change the exports hash and invalidate all downstream caches.
 /// This is simpler than per-file transitive import hashing and correct
@@ -154,7 +143,7 @@ pub fn compute_module_cache_key(
     exports_hash: &[u8; 32],
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"tungsten-elab-cache-v1:");
+    hasher.update(b"tungsten-elab-cache-v2:");
     hasher.update(compiler_version.as_bytes());
     hasher.update(b":");
     hasher.update(file_content_hash);
@@ -170,7 +159,7 @@ pub fn hash_file_content(content: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Compute a hash of the current Phase A.5 exports state.
+/// Compute a hash of the current Signature Collection exports state.
 ///
 /// This captures the structural fingerprint of the type/value/constructor
 /// environment that a module elaborates against. Uses names, kinds, arities,
@@ -244,10 +233,15 @@ impl CachedModuleFullOutput {
             mutual_recursion_groups: output.mutual_recursion_groups.clone(),
             delta_exports: compute_delta_exports(full_exports, prior_exports),
             warnings: output.warnings.clone(),
+            value_import_targets: output.value_import_targets.clone(),
+            termination_meta: output.termination_meta.clone(),
         }
     }
 
     /// Reconstruct a full ElabOutput from the cached entry.
+    ///
+    /// Visibility maps are intentionally not cached (`Default`-empty here);
+    /// every other field is restored from the entry.
     pub fn into_elab_output(self) -> ElabOutput {
         ElabOutput {
             defs: self.defs,
@@ -258,8 +252,9 @@ impl CachedModuleFullOutput {
             type_provenance: self.type_provenance,
             encoded_types: self.encoded_types,
             mutual_recursion_groups: self.mutual_recursion_groups,
-            type_visibilities: HashMap::new(),
-            record_field_visibilities: HashMap::new(),
+            value_import_targets: self.value_import_targets,
+            termination_meta: self.termination_meta,
+            ..ElabOutput::default()
         }
     }
 }
@@ -399,3 +394,6 @@ mod tests;
 
 #[cfg(test)]
 mod full_output_tests;
+
+#[cfg(test)]
+mod import_targets_tests;

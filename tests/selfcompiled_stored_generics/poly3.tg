@@ -1,0 +1,46 @@
+// tests/selfcompiled_stored_generics/poly3.tg
+// ADR 21.7.26k (D3): tungsten1-run regression battery, L1-matrix mirror.
+// This file: the two Poly3 cells — a THREE-constructor generic, covering the
+// ADR 2.2.26 sum policy boundary (2 ctors → Sum, 3+ → Adt) in both stored
+// positions. On L1, normalize's copy built right-nested Sum chains for 3+
+// ctors (the third divergence); these cells guard the L2 side.
+
+pub type Poly3<V> =
+    | PolyEmpty
+    | PolyOne(V)
+    | PolyPair(V, V)
+
+pub fn touch_poly<X>(p: Poly3<X>) -> Poly3<X> { p }
+
+type Rec = { count: Nat, label: String }
+
+// Cell: field × Poly3 × record
+type FieldPoly = { stored: Poly3<Rec> }
+
+fn project_field_poly(s: FieldPoly) -> Poly3<Rec> { s.stored }
+
+fn roundtrip_field_poly(s: FieldPoly) -> FieldPoly {
+    { stored: touch_poly(s.stored) }
+}
+
+// Cell: payload × Poly3 × record
+type HolderPoly =
+    | EmptyPoly
+    | HoldPoly(Poly3<Rec>)
+
+fn project_holder_poly(h: HolderPoly) -> Poly3<Rec> {
+    match h {
+        EmptyPoly() => PolyEmpty,
+        HoldPoly(p) => touch_poly(p)
+    }
+}
+
+pub fn main() -> Nat {
+    // Record literal bound with an explicit annotation first: L2 cannot infer
+    // a record literal's type inside a generic constructor application.
+    let one: Rec = { count: 1, label: "a" };
+    let field_cell: FieldPoly = { stored: PolyOne(one) };
+    let _f = project_field_poly(roundtrip_field_poly(field_cell));
+    let _h = project_holder_poly(HoldPoly(PolyEmpty));
+    0
+}

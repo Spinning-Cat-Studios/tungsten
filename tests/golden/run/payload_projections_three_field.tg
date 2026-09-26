@@ -1,0 +1,28 @@
+// ADR 21.8.26a AC2/AC3: three fields is the arity at which the payload's
+// nesting stops being guessable.
+//
+// Below three, left- and right-nested projections coincide, so a two-field
+// fixture cannot tell a correct convention from a wrong one (ADR 1.8.26b D1
+// found exactly that miscompile). Here field 1 is `fst(snd(p))` and field 2 is
+// `snd(snd(p))`; the left-nested spelling retrieves the wrong value or goes
+// Stuck, and the digits below say which.
+
+pub type Triple = Zero3 | MkT3(Nat, Nat, Nat)
+
+pub fn digits(t: Triple) -> Nat {
+    match t {
+        Zero3() => 0,
+        MkT3(a, b, c) => a * 100 + b * 10 + c
+    }
+}
+
+pub fn last_of(t: Triple) -> Nat {
+    match t {
+        Zero3() => 0,
+        MkT3(_, _, c) => c
+    }
+}
+
+pub fn main() -> Nat {
+    digits(MkT3(1, 2, 3)) + last_of(MkT3(4, 5, 6))
+}

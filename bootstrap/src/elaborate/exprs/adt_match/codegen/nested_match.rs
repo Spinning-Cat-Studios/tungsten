@@ -46,12 +46,14 @@ impl<'a> Elaborator<'a> {
             if arms.len() > 1 && Self::arms_have_nested_constructors(arms) {
                 return Err(ElabError::new(
                     arms[0].pattern.span(),
-                    ElabErrorKind::Other(format!(
-                        "nested constructor patterns in multi-field constructor `{}` are not supported; \
-                         rewrite as an explicit inner match on the nested field",
-                        outer_ctor.name,
-                    )),
-                ));
+                    ElabErrorKind::UnsupportedPattern(
+                        "nested constructor patterns in a multi-field constructor".to_string(),
+                    ),
+                )
+                .with_help(format!(
+                    "rewrite as an explicit inner match on the nested field of `{}`",
+                    outer_ctor.name,
+                )));
             }
             // Single arm or no nested constructors — safe to use first arm
             return self.elab_ctor_arm_or_catch_all(
@@ -120,8 +122,8 @@ impl<'a> Elaborator<'a> {
                 if sub_patterns.len() != 1 {
                     return Err(ElabError::new(
                         arm.pattern.span(),
-                        ElabErrorKind::Other(
-                            "nested patterns with multiple fields not yet supported".to_string(),
+                        ElabErrorKind::UnsupportedPattern(
+                            "nested patterns with multiple fields".to_string(),
                         ),
                     ));
                 }
@@ -135,7 +137,11 @@ impl<'a> Elaborator<'a> {
             }
             _ => Err(ElabError::new(
                 arm.pattern.span(),
-                ElabErrorKind::Other("expected constructor pattern for nested match".to_string()),
+                // Dispatch invariant: nested-match construction only sees the
+                // constructor arms its caller grouped.
+                ElabErrorKind::InternalError(
+                    "expected constructor pattern for nested match".to_string(),
+                ),
             )),
         }
     }
@@ -201,9 +207,9 @@ impl<'a> Elaborator<'a> {
                 let (term, _ty) = self.infer(&first_arm.body)?;
                 Ok(term)
             } else {
-                Err(ElabError::new(
+                Err(ElabError::internal(
                     Span::new(0, 0),
-                    ElabErrorKind::Other("no arms for nested match".to_string()),
+                    "no arms for nested match",
                 ))
             }
         }
@@ -222,6 +228,11 @@ impl<'a> Elaborator<'a> {
             }
             Type::Mu(_, body) => self.try_resolve_adt_from_type(body),
             Type::Sum(_, _) => true, // Binary sum is also matchable
+            // A poisoned payload (ADR 15.8.26d) is "matchable" so the inner
+            // patterns route to `elab_adt_match`, which transits — rather
+            // than to the E0021 arm, which would re-diagnose the type's
+            // fault at the pattern.
+            Type::Error => true,
             _ => false,
         }
     }

@@ -1,0 +1,19 @@
+// src/compiler/elab/env/module/mod.tg
+// Module path, imports, module contents, and the module map.
+//
+// Split out of the former single `env/module.tg` when the import index
+// (ADR 5.8.26b) pushed it past the 300-line `.tg` file threshold. The four
+// parts are layered, not merely partitioned — `path` depends on nothing here,
+// `imports` on `path`, `contents` on both, and `map` on `contents`. That
+// ordering is what keeps `ImportStore` in the same crate-internal module as
+// `Import` and `ElabModulePath` without closing an import cycle.
+
+pub mod path;
+pub mod imports;
+pub mod contents;
+pub mod map;
+
+pub use elab::env::module::path::*;
+pub use elab::env::module::imports::*;
+pub use elab::env::module::contents::*;
+pub use elab::env::module::map::*;

@@ -1,0 +1,13 @@
+// The other direction of the cross-directory cycle.
+use front::{Ticket, open_ticket};
+
+pub type Receipt = { paid: Nat }
+
+pub fn settle(t: Ticket) -> Receipt {
+    { paid: t.amount }
+}
+
+// A value edge back into `front`, so the cycle is not type-only.
+pub fn reissue(amount: Nat) -> Ticket {
+    open_ticket(amount)
+}

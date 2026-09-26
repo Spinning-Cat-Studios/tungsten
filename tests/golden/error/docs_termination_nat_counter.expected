@@ -1,0 +1,13 @@
+[E0062] Error: cannot prove termination of `count`
+   ╭─[tests/golden/error/docs_termination_nat_counter.tg:4:1]
+   │
+ 4 │ fn count(n: Nat) -> Nat { if n == 0 { 0 } else { 1 + count(n - 1) } }
+   │ ──────────────────────────────────┬──────────────────────────────────  
+   │                                   ╰──────────────────────────────────── 
+   │ 
+   │ Help: rewrite the recursion structurally, or mark the definition `#[partial]` (partial definitions cannot be used in proofs)
+   │ 
+   │ Note: no parameter has an inductive type to descend on: `n: Nat` (a primitive — it has no subterms, so a loop over it is a measure, not a descent)
+───╯
+
+error: aborting due to 1 error

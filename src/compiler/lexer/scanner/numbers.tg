@@ -58,6 +58,10 @@ fn scan_hex_number(lex: LexerState, start: Nat) -> ScanResult {
     }
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn scan_hex_digits(lex: LexerState) -> LexerState {
     if lex_at_end(lex) { lex }
     else if is_hex_digit(lex_peek(lex)) { scan_hex_digits(lex_advance(lex)) }
@@ -69,6 +73,10 @@ fn parse_hex(s: String) -> Nat {
     parse_hex_acc(s, 0, 0)
 }
 
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 fn parse_hex_acc(s: String, idx: Nat, acc: Nat) -> Nat {
     if idx >= string_len(s) { acc }
     else {
@@ -103,6 +111,10 @@ fn scan_octal_number(lex: LexerState, start: Nat) -> ScanResult {
     }
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn scan_octal_digits(lex: LexerState) -> LexerState {
     if lex_at_end(lex) { lex }
     else if is_octal_digit(lex_peek(lex)) { scan_octal_digits(lex_advance(lex)) }
@@ -114,6 +126,10 @@ fn parse_octal(s: String) -> Nat {
     parse_octal_acc(s, 0, 0)
 }
 
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 fn parse_octal_acc(s: String, idx: Nat, acc: Nat) -> Nat {
     if idx >= string_len(s) { acc }
     else {
@@ -142,6 +158,10 @@ fn scan_binary_number(lex: LexerState, start: Nat) -> ScanResult {
     }
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn scan_binary_digits(lex: LexerState) -> LexerState {
     if lex_at_end(lex) { lex }
     else if is_binary_digit(lex_peek(lex)) { scan_binary_digits(lex_advance(lex)) }
@@ -153,6 +173,10 @@ fn parse_binary(s: String) -> Nat {
     parse_binary_acc(s, 0, 0)
 }
 
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 fn parse_binary_acc(s: String, idx: Nat, acc: Nat) -> Nat {
     if idx >= string_len(s) { acc }
     else {
@@ -165,6 +189,10 @@ fn parse_binary_acc(s: String, idx: Nat, acc: Nat) -> Nat {
     }
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 pub fn scan_digits(lex: LexerState) -> LexerState {
     if lex_at_end(lex) { lex }
     else if scanner_is_digit(lex_peek(lex)) { scan_digits(lex_advance(lex)) }
@@ -175,6 +203,10 @@ pub fn scanner_parse_nat(s: String) -> Nat {
     scanner_parse_nat_acc(s, 0, 0)
 }
 
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 fn scanner_parse_nat_acc(s: String, idx: Nat, acc: Nat) -> Nat {
     if idx >= string_len(s) { acc }
     else {

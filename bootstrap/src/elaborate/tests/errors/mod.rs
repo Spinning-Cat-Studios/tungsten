@@ -4,6 +4,7 @@ mod basic;
 mod if_let;
 mod imports;
 mod let_else;
+mod minted_codes;
 mod quality;
 mod try_block;
 mod try_block_gate;

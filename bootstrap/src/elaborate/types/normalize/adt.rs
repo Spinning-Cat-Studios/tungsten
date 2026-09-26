@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::elaborate::env::Constructor;
+use crate::elaborate::types::encoding::ctor_fields_product;
 use crate::elaborate::Elaborator;
 use tungsten_core::Type;
 
@@ -67,8 +68,16 @@ impl<'a> Elaborator<'a> {
             })
             .collect();
 
-        // Build sum type from constructors
-        let body = self.build_sum_from_constructors(constructor_types);
+        // Build the sum body via the SAME policy helper as the canonical
+        // encoder (ADR 2.2.26: 2 ctors → Sum, 3+ → Adt). A parallel
+        // right-nested Sum-chain builder here diverged from stored encodings
+        // for every 3+-ctor generic ADT (ADR 21.7.26e wall 1).
+        let body = crate::elaborate::types::encoding::build_adt_sum_body(
+            constructor_types,
+            constructors,
+            name,
+            &normalized_args,
+        );
 
         // Wrap in μ-type if recursive
         if is_recursive {
@@ -79,15 +88,16 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Encode a single constructor's payload for normalization.
+    ///
+    /// Field products use the canonical left-nested builder shared with the
+    /// stored-encoding path — a right-nested copy here made every ≥3-field
+    /// constructor of a generic ADT fail `types_equal` against its own
+    /// stored encoding (ADR 21.7.26e wall 1).
     pub(super) fn encode_constructor_for_normalization(
         &self,
         ctor: &Constructor,
         ctx: &mut NormFieldCtx,
     ) -> Type {
-        if ctor.fields.is_empty() {
-            return Type::Unit;
-        }
-
         // Process each field, substituting type parameters and handling recursion
         let field_types: Vec<Type> = ctor
             .fields
@@ -95,44 +105,6 @@ impl<'a> Elaborator<'a> {
             .map(|field_ty| self.normalize_field_for_adt(field_ty, ctx))
             .collect();
 
-        self.build_product_from_fields(field_types)
-    }
-
-    /// Build a sum type from constructor encodings.
-    ///
-    /// Returns Void for empty constructors, the single type for one constructor,
-    /// or a right-nested sum (A + (B + C)) for multiple constructors.
-    fn build_sum_from_constructors(&self, constructor_types: Vec<Type>) -> Type {
-        if constructor_types.is_empty() {
-            Type::Void
-        } else if constructor_types.len() == 1 {
-            constructor_types.into_iter().next().unwrap()
-        } else {
-            // Multiple constructors: build right-nested sum A + (B + C)
-            let mut iter = constructor_types.into_iter().rev();
-            let mut sum = iter.next().unwrap();
-            for ty in iter {
-                sum = Type::sum(ty, sum);
-            }
-            sum
-        }
-    }
-
-    /// Build a product type from field types.
-    ///
-    /// Returns the single type for one field, or a right-nested product
-    /// (T1 × (T2 × T3)) for multiple fields.
-    fn build_product_from_fields(&self, field_types: Vec<Type>) -> Type {
-        if field_types.len() == 1 {
-            field_types.into_iter().next().unwrap()
-        } else {
-            // Multiple fields: build right-nested product T1 × (T2 × T3)
-            let mut iter = field_types.into_iter().rev();
-            let mut prod = iter.next().unwrap();
-            for ty in iter {
-                prod = Type::product(ty, prod);
-            }
-            prod
-        }
+        ctor_fields_product(field_types)
     }
 }

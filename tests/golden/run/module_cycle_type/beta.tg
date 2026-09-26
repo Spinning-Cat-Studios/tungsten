@@ -1,0 +1,12 @@
+// The other half of the cycle: `beta` imports a type from `alpha`.
+use alpha::Alpha;
+
+pub type Beta = { count: Nat }
+
+pub fn make_beta(count: Nat) -> Beta {
+    { count: count }
+}
+
+pub fn beta_reads_alpha(a: Alpha) -> Nat {
+    a.tag
+}

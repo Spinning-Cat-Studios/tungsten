@@ -1,0 +1,14 @@
+// ADR 7.8.26e D2: `Phantom` DISCARDS its parameter, so it computes `unused` and
+// its argument must not be walked at any mode.
+//   - `X` passes under any of the three readings of `unused`.
+//   - `Y` is the load-bearing fixture: it is rejected by BOTH wrong readings
+//     (walking a discarded argument at `strict`, or at `forbidden`), because
+//     `Y -> Nat` is discarded and `Y` therefore does not occur at all.
+// `PhantomAlias` is the same rule written as an alias (D9), which must agree.
+type Phantom<T> = P(Nat)
+type PhantomAlias<T> = Nat
+type X = MkX(Phantom<X>)
+type Y = MkY(Phantom<Y -> Nat>)
+type Z = MkZ(PhantomAlias<Z -> Nat>)
+
+fn main() -> Nat { 0 }

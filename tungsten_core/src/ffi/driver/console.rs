@@ -5,11 +5,11 @@
 //! Process control: exit, TTY detection, subprocess execution, environment
 
 use std::ffi::{c_char, CStr, CString};
-use std::io::{self, Write};
 use std::process::Command;
 use std::ptr;
 use std::sync::OnceLock;
 
+use super::console_capture::{self, write_stderr, write_stdout};
 use super::{clear_driver_error, set_driver_error};
 
 // ============================================================================
@@ -17,6 +17,10 @@ use super::{clear_driver_error, set_driver_error};
 // ============================================================================
 
 /// Print to stdout (no newline).
+///
+/// Routed through [`super::console_capture`], so the bytes land in an installed
+/// capture sink instead of the process stream. With no sink installed — the
+/// default, and every native invocation — this is the original stream write.
 ///
 /// # Safety
 /// - `s` must be a valid pointer to `len` bytes
@@ -27,44 +31,43 @@ pub extern "C" fn tg_print(s: *const c_char, len: u64) {
     }
 
     let slice = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len as usize) };
-    let _ = io::stdout().write_all(slice);
-    let _ = io::stdout().flush();
+    write_stdout(&[slice]);
 }
 
 /// Print to stdout with newline.
+///
+/// Capture-aware; see [`tg_print`].
 ///
 /// # Safety
 /// - `s` must be a valid pointer to `len` bytes
 #[no_mangle]
 pub extern "C" fn tg_println(s: *const c_char, len: u64) {
     if s.is_null() {
-        let _ = io::stdout().write_all(b"\n");
-        let _ = io::stdout().flush();
+        write_stdout(&[b"\n"]);
         return;
     }
 
     let slice = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len as usize) };
-    let _ = io::stdout().write_all(slice);
-    let _ = io::stdout().write_all(b"\n");
-    let _ = io::stdout().flush();
+    write_stdout(&[slice, b"\n"]);
 }
 
 /// Print to stderr with newline.
+///
+/// Capture-aware; see [`tg_print`]. Captured stderr is kept in its own buffer —
+/// merging the two streams at the source would destroy a distinction a consumer
+/// cannot recover afterwards.
 ///
 /// # Safety
 /// - `s` must be a valid pointer to `len` bytes
 #[no_mangle]
 pub extern "C" fn tg_eprintln(s: *const c_char, len: u64) {
     if s.is_null() {
-        let _ = io::stderr().write_all(b"\n");
-        let _ = io::stderr().flush();
+        write_stderr(&[b"\n"]);
         return;
     }
 
     let slice = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len as usize) };
-    let _ = io::stderr().write_all(slice);
-    let _ = io::stderr().write_all(b"\n");
-    let _ = io::stderr().flush();
+    write_stderr(&[slice, b"\n"]);
 }
 
 /// Debug print a u8 value to stderr.
@@ -167,6 +170,7 @@ pub extern "C" fn tg_argv(index: i64) -> *mut c_char {
 // Process Control
 // ============================================================================
 
+#[cfg(unix)]
 extern "C" {
     /// C library's _Exit function - immediate termination without cleanup
     fn _Exit(status: i32) -> !;
@@ -177,29 +181,97 @@ extern "C" {
 /// This function does not return.
 /// Uses C's _`Exit()` for immediate termination without running cleanup handlers,
 /// avoiding issues with Rust's atexit handlers or other cleanup code.
+#[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn tg_exit(code: i32) -> ! {
     unsafe { _Exit(code) }
+}
+
+/// Abort on an `Int` trap (ADR 14.9.26c §2.3): overflow, a zero divisor, or a
+/// bridge out of range. `kind` is [`IntTrapKind::code`]; the line printed is
+/// [`IntTrapKind::message`], byte-identical to what the evaluator renders for
+/// the same stop, which is the `diff exec` parity contract (AC 3).
+///
+/// An FFI call rather than a bare `llvm.trap` so both paths share one table.
+/// `abort()` rather than `_Exit`: the language has no unwinding, and a trap is
+/// a program error, not a status.
+///
+/// [`IntTrapKind::code`]: crate::eval::IntTrapKind::code
+/// [`IntTrapKind::message`]: crate::eval::IntTrapKind::message
+#[no_mangle]
+pub extern "C" fn tg_int_trap(kind: u32) -> ! {
+    let line = int_trap_line(kind);
+    write_stderr(&[line.as_bytes(), b"\n"]);
+    std::process::abort()
+}
+
+/// The stderr line for a trap code — the pure half of [`tg_int_trap`].
+///
+/// Carries the `error: ` prefix `tungsten run` puts in front of every
+/// `EvalStopped`, so the two stderr lines are byte-identical (AC 3).
+#[must_use]
+pub fn int_trap_line(kind: u32) -> String {
+    match crate::eval::IntTrapKind::from_code(kind) {
+        Some(kind) => format!("error: {}", kind.message()),
+        None => format!("error: integer trap (unknown kind {kind})"),
+    }
+}
+
+/// Terminate immediately on a target with no `_Exit` (ADR 28.7.26a Phase 4).
+///
+/// The `extern "C" { fn _Exit }` above is a *declaration*, so on
+/// `wasm32-unknown-unknown` it compiles cleanly and then leaves an unresolved
+/// `env::_Exit` import — a module the browser refuses to instantiate. A green
+/// `cargo build` therefore does not prove a loadable artifact, which is why
+/// this arm exists and why the build is smoke-run.
+///
+/// `abort` is the honest equivalent: wasm has no exit status to deliver, and
+/// aborting the instance is what the embedder observes. The `code` is dropped
+/// because there is nowhere to put it.
+#[cfg(not(unix))]
+#[no_mangle]
+pub extern "C" fn tg_exit(_code: i32) -> ! {
+    std::process::abort()
 }
 
 // ============================================================================
 // TTY Detection (for colored output)
 // ============================================================================
 
+/// Whether to report a stream as a terminal, given whether it actually is one.
+///
+/// Always 0 while a capture sink is installed, whatever the real stream is: the
+/// captured bytes are handed to a consumer that renders them itself, and colour
+/// escapes in a buffer would show up literally (ADR 28.7.26a §2.2).
+///
+/// Separated from the two FFI entry points because it is the part with a
+/// decision in it. Whether the process's stdout is a terminal cannot be
+/// controlled from an in-process test — it is never one under a test harness —
+/// so folding this rule into the entry points would make it permanently
+/// unassertable.
+pub(super) fn reported_tty(stream_is_tty: bool) -> i32 {
+    if console_capture::is_active() {
+        return 0;
+    }
+    i32::from(stream_is_tty)
+}
+
 /// Check if stdout supports color output (is a TTY).
 ///
-/// Returns 1 if TTY, 0 if not.
+/// Returns 1 if TTY, 0 if not — and always 0 under capture, per
+/// [`reported_tty`].
 #[no_mangle]
 pub extern "C" fn tg_stdout_is_tty() -> i32 {
-    i32::from(atty::is(atty::Stream::Stdout))
+    reported_tty(atty::is(atty::Stream::Stdout))
 }
 
 /// Check if stderr supports color output (is a TTY).
 ///
-/// Returns 1 if TTY, 0 if not.
+/// Returns 1 if TTY, 0 if not — and always 0 under capture, per
+/// [`reported_tty`].
 #[no_mangle]
 pub extern "C" fn tg_stderr_is_tty() -> i32 {
-    i32::from(atty::is(atty::Stream::Stderr))
+    reported_tty(atty::is(atty::Stream::Stderr))
 }
 
 // ============================================================================

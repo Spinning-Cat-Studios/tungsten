@@ -4,6 +4,25 @@
 // Emits LLVM IR as text (.ll format) from CodegenIR/CodegenType.
 // This is the .tg parallel to the Rust bootstrap's tungsten_codegen crate.
 //
+// ## THE DRIVER NEVER REACHES THIS SUBSYSTEM (ADR 3.9.26a)
+//
+// `driver/pipeline/compile.tg`'s `run_compile` type-checks with the self-hosted
+// elaborator for diagnostics ONLY, then `exec_process`es the BOOTSTRAP binary
+// to produce the executable. Nothing on a driver path imports these files:
+// `main.tg` declares `mod codegen;` — which compiles and type-checks them on
+// every build, and is why they read as live machinery — but the only
+// `use codegen::…` in the repository sits in three entry files,
+// `test_codegen.tg`, `test_codegen_closures.tg` and `test_cir_captures.tg`.
+//
+// This is the self-host's FUTURE codegen, not debt and not dead code. What
+// does follow from being unexercised: drift here is not a bug today and is not
+// evidence of one either. `ir_expr.tg` emits
+// `call ptr @tg_string_concat(ptr, ptr)` where `tungsten_core`'s real
+// `tg_string_concat` takes and returns a two-field `TgString` struct, and the
+// mismatch belongs to whoever wires this subsystem into the driver.
+//
+// Census: `tungsten doctor audit-driver-reach src/compiler/main.tg`.
+//
 // ## Module Layout
 //
 // - ir_builder.tg    — SSA name generation, IR state threading

@@ -1,0 +1,14 @@
+// Shape 4 of ADR 4.9.26f: a cycle between two UNRELATED directories.
+//
+// `front/mod.tg` and `back/mod.tg` share no ancestor below the root, so the
+// cycle crosses a directory boundary rather than living inside one. Both a type
+// edge and a value edge run each way.
+
+mod front;
+mod back;
+
+use front::{Ticket, open_ticket, close_ticket};
+
+fn main() -> Nat {
+    close_ticket(open_ticket(5))
+}

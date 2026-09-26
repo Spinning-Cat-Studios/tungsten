@@ -137,3 +137,101 @@ fn test_lower_adt_option_string_size() {
         "W5: Option<String> data field should be [16 x i8]"
     );
 }
+
+/// A nullary 2-constructor ADT must lower IDENTICALLY via its name
+/// (`TyVar("Verdict")`) and via its structural `Sum` encoding — the
+/// elaborator encodes n=2 ADTs as `Sum` and constructs them with inl/inr,
+/// so a named-vs-structural layout split makes a call result disagree with
+/// a locally-constructed merge arm (the ADR 2.7.26b T2 hard error; found
+/// via the list-comparator spine, where the named route still used the
+/// W4 typed payload while inl/inr used the W5 blob).
+#[test]
+fn nullary_two_ctor_adt_named_and_structural_lowerings_agree() {
+    let context = Context::create();
+    let mut lowering = TypeLowering::new(&context);
+
+    // Verdict = Pass | Fail(String) — payload sizes differ, so a typed
+    // (W4) layout would be visibly different from the [N x i8] blob.
+    let mut adts = HashMap::new();
+    adts.insert(
+        "Verdict".to_string(),
+        (
+            vec![],
+            vec![
+                CodegenConstructor {
+                    name: "Pass".to_string(),
+                    fields: vec![],
+                    index: 0,
+                },
+                CodegenConstructor {
+                    name: "Fail".to_string(),
+                    fields: vec![Type::String],
+                    index: 1,
+                },
+            ],
+        ),
+    );
+    lowering.register_adt_types(adts);
+
+    let named = lowering.lower_type(&Type::TyVar("Verdict".to_string()));
+    let structural = lowering.lower_type(&Type::sum(Type::Unit, Type::String));
+    assert_eq!(
+        named, structural,
+        "named ADT reference and structural Sum encoding lowered differently"
+    );
+
+    // And the agreed form is the W5 blob: { i32, [16 x i8] }.
+    let data_field = named.into_struct_type().get_field_type_at_index(1).unwrap();
+    assert!(
+        data_field.is_array_type(),
+        "W5: 2-ctor ADT data field should be [N x i8], got {data_field:?}"
+    );
+}
+
+/// Every spelling of a 3+-constructor ADT must lower identically too:
+/// the nullary named reference (`TyVar`) and the `Type::App` route go through
+/// the shared `tagged_union_blob_type` authority — `lower_app`'s n≥3 branch
+/// was the last W4 (typed-payload) island after 16d2f4f1, and a typed layout
+/// here would disagree with any blob-lowered spelling in a merge.
+#[test]
+fn three_ctor_adt_named_and_app_lowerings_agree_as_blob() {
+    let context = Context::create();
+    let mut lowering = TypeLowering::new(&context);
+
+    // Shape = Dot | Seg(Nat) | Label(String) — three variants, mixed sizes.
+    let shape_ctors = vec![
+        CodegenConstructor {
+            name: "Dot".to_string(),
+            fields: vec![],
+            index: 0,
+        },
+        CodegenConstructor {
+            name: "Seg".to_string(),
+            fields: vec![Type::Nat],
+            index: 1,
+        },
+        CodegenConstructor {
+            name: "Label".to_string(),
+            fields: vec![Type::String],
+            index: 2,
+        },
+    ];
+    let mut adts = HashMap::new();
+    adts.insert("Shape".to_string(), (vec![], shape_ctors));
+    lowering.register_adt_types(adts);
+
+    let named = lowering.lower_type(&Type::TyVar("Shape".to_string()));
+    let via_app = lowering.lower_type(&Type::App("Shape".to_string(), vec![]));
+    assert_eq!(
+        named, via_app,
+        "named reference and Type::App route lowered differently"
+    );
+
+    // The agreed form is the W5 blob { i32, [16 x i8] } (largest = String).
+    let data_field = named.into_struct_type().get_field_type_at_index(1).unwrap();
+    assert!(
+        data_field.is_array_type(),
+        "W5: 3-ctor ADT data field should be [N x i8], got {data_field:?}"
+    );
+    assert_eq!(data_field.into_array_type().len(), 16);
+}

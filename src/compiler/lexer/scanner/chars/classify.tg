@@ -1,0 +1,45 @@
+// src/compiler/lexer/scanner/chars/classify.tg
+// The classification predicates — the only consumers of the character-code
+// modules, and the reason they are grouped by lexical role. Each predicate
+// reads one or more of those groups; none of the groups reads another.
+
+use lexer::scanner::chars::whitespace::{
+    char_space, char_tab, char_newline, char_carriage_return
+};
+use lexer::scanner::chars::alphanumeric::{
+    char_0, char_9, char_A, char_Z, char_a, char_z, char_underscore
+};
+use lexer::scanner::chars::literal_markers::{char_f, char_F};
+
+pub fn is_whitespace(ch: Nat) -> Bool {
+    ch == char_space() || ch == char_tab() ||
+    ch == char_newline() || ch == char_carriage_return()
+}
+
+pub fn scanner_is_digit(ch: Nat) -> Bool {
+    ch >= char_0() && ch <= char_9()
+}
+
+pub fn is_ident_start(ch: Nat) -> Bool {
+    (ch >= char_A() && ch <= char_Z()) ||
+    (ch >= char_a() && ch <= char_z()) ||
+    ch == char_underscore()
+}
+
+pub fn is_ident_continue(ch: Nat) -> Bool {
+    is_ident_start(ch) || scanner_is_digit(ch)
+}
+
+pub fn is_hex_digit(ch: Nat) -> Bool {
+    scanner_is_digit(ch) ||
+    (ch >= char_A() && ch <= char_F()) ||
+    (ch >= char_a() && ch <= char_f())
+}
+
+pub fn is_octal_digit(ch: Nat) -> Bool {
+    ch >= char_0() && ch <= char_0() + 7
+}
+
+pub fn is_binary_digit(ch: Nat) -> Bool {
+    ch == char_0() || ch == char_0() + 1
+}

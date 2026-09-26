@@ -1,0 +1,14 @@
+[E0062] Warning: cannot prove termination of `spin`
+   ╭─[tests/golden/check/termination_reported_not_gated.tg:4:26]
+   │
+ 4 │ fn spin(l: Lst) -> Nat { spin(l) }
+   │                          ───┬───  
+   │                             ╰───── 
+   │ 
+   │ Help: rewrite the recursion structurally, or mark the definition `#[partial]` (partial definitions cannot be used in proofs)
+   │ 
+   │ Note: with `l` decreasing, the call to `spin` supplies `l`, which is not a known strict subterm of `l`
+───╯
+
+warning: 1 warning emitted
+✓ tests/golden/check/termination_reported_not_gated.tg: 2 definition(s), all OK

@@ -1,9 +1,36 @@
 //! Module path type for representing locations in the module hierarchy.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::ast::Path;
+
+/// Resolve a module path to its canonical form via the file mapping.
+///
+/// When the same logical module is registered under different path prefixes
+/// (e.g. `main::parser::items` vs `parser::items` for a workspace sibling),
+/// this returns the canonical path: the module path first registered for the
+/// source file behind `path`. Returns `path` unchanged when no file mapping
+/// exists.
+///
+/// The single source of truth shared by `Env::canonicalize_path` and
+/// `ModuleInfo::canonicalize_path` (which hold the same two maps in different
+/// layers) so their results cannot silently diverge — an invariant the
+/// ADR 12.7.26a module-path-space matching depends on.
+#[allow(clippy::implicit_hasher)] // Reason: callers all use the default hasher
+pub fn canonicalize_module_path(
+    path: &ModulePath,
+    module_files: &HashMap<ModulePath, PathBuf>,
+    file_to_module: &HashMap<PathBuf, ModulePath>,
+) -> ModulePath {
+    module_files
+        .get(path)
+        .and_then(|file| file_to_module.get(file))
+        .cloned()
+        .unwrap_or_else(|| path.clone())
+}
 
 /// A module path representing a location in the module hierarchy.
 ///
@@ -169,6 +196,38 @@ mod tests {
         assert_eq!(
             child,
             ModulePath::new(vec!["parser".into(), "exprs".into(), "result".into()])
+        );
+    }
+
+    /// The shared canonicalizer maps a non-canonical prefix (`main::parser`)
+    /// back to the first-registered path (`parser`) for the same file, and
+    /// leaves an unmapped path unchanged (ADR 12.7.26a §2.1).
+    #[test]
+    fn canonicalize_module_path_maps_alias_prefix_to_first_registration() {
+        let file = PathBuf::from("/ws/parser.tg");
+        let canonical = ModulePath::from_name("parser");
+        let alias = ModulePath::new(vec!["main".into(), "parser".into()]);
+
+        let mut module_files = HashMap::new();
+        module_files.insert(canonical.clone(), file.clone());
+        module_files.insert(alias.clone(), file.clone());
+        let mut file_to_module = HashMap::new();
+        file_to_module.insert(file, canonical.clone());
+
+        // Both prefixes resolve to the first-registered path...
+        assert_eq!(
+            canonicalize_module_path(&alias, &module_files, &file_to_module),
+            canonical
+        );
+        assert_eq!(
+            canonicalize_module_path(&canonical, &module_files, &file_to_module),
+            canonical
+        );
+        // ...and an unmapped path passes through untouched.
+        let unmapped = ModulePath::from_name("other");
+        assert_eq!(
+            canonicalize_module_path(&unmapped, &module_files, &file_to_module),
+            unmapped
         );
     }
 }

@@ -15,6 +15,7 @@ use super::env::{
     self, Constructor, ConstructorInfo, ModuleContents, ModulePath, TypeDef, TypeDefKind, ValueDef,
 };
 use super::error::ElabError;
+use super::termination::CachedTermination;
 use super::{Elaborator, ExpectedContext};
 
 mod entry;
@@ -40,7 +41,7 @@ pub struct CoreDef {
 impl CoreDef {
     /// Strip `@`-prefixed TyVars from this definition's type and term (ADR 10.5.26d P7).
     ///
-    /// `@`-prefixed TyVars are an elaboration-internal convention (Phase 1c cross-references,
+    /// `@`-prefixed TyVars are an elaboration-internal convention (Type-Body Collection cross-references,
     /// ADR 13.4.26c §2). They must not leak past the elaboration→codegen boundary. This
     /// method strips them in both the type signature and all type annotations in the term body.
     #[must_use]
@@ -66,6 +67,22 @@ impl CoreDef {
 
         self
     }
+}
+
+/// What the termination gate needs to know about a definition beyond its term
+/// (ADR 29.6.26e).
+///
+/// Carried alongside `CoreDef` rather than on it, so the many stub and
+/// cache-reconstruction sites that build a `CoreDef` are untouched, and so an
+/// imported definition arrives with its annotations by the same route as a
+/// freshly elaborated one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefTerminationMeta {
+    /// `#[partial]` / `#[decreasing(arg)]`, as written.
+    pub attrs: crate::ast::TerminationAttrs,
+    /// Whether the definition is a theorem, lemma or axiom — the proof-relevant
+    /// side of the taint boundary.
+    pub is_proof: bool,
 }
 
 /// Origin information for a μ-binder created during ADT encoding (ADR 13.4.26c §3).
@@ -94,7 +111,13 @@ pub struct TypeProvenance {
 }
 
 /// Result of elaboration including warnings.
-#[derive(Debug, Serialize, Deserialize)]
+///
+/// `Default` yields the all-empty output. Prefer `ElabOutput { field, ..Default::default() }`
+/// at stub/reconstruction sites (cache reconstruction, cache-miss returns) so
+/// adding a field there costs nothing; the genuine elaboration builders spell
+/// out every field on purpose, so a new field is a compile error that forces a
+/// deliberate value (ADR 12.7.26a retrospective — struct-field blast radius).
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct ElabOutput {
     /// The elaborated definitions (empty if there were errors)
     pub defs: Vec<CoreDef>,
@@ -111,19 +134,30 @@ pub struct ElabOutput {
     pub type_aliases: std::collections::HashMap<String, (Vec<String>, Type)>,
     /// Type provenance: μ-binder → ADT origin (ADR 13.4.26c §3).
     pub type_provenance: TypeProvenance,
-    /// Cached type encodings from Phase 1e (ADR 20.4.26c).
+    /// Cached type encodings from Encoding Finalization (ADR 20.4.26c).
     /// Maps type name → encoded Type for non-parameterized types.
     pub encoded_types: std::collections::HashMap<String, Type>,
-    /// Mutual recursion groups from Phase 1c.5 SCC (ADR 20.4.26c).
+    /// Mutual recursion groups from Recursion Grouping SCC (ADR 20.4.26c).
     /// Maps type name → full SCC group members. Only for SCCs of size > 1.
     pub mutual_recursion_groups: std::collections::HashMap<String, Vec<String>>,
     /// Parent type visibilities (ADR 14.5.26c).
-    /// Maps type name → declared visibility. Used by `info type visibility`.
+    /// Maps type name → declared visibility. Used by `info type members visibility`.
     pub type_visibilities: std::collections::HashMap<String, crate::ast::Visibility>,
     /// Per-field visibility overrides for record types (ADR 14.5.26c).
     /// Maps record name → per-field visibility (None = inherit parent).
     pub record_field_visibilities:
         std::collections::HashMap<String, Vec<Option<crate::ast::Visibility>>>,
+    /// Per-definition termination metadata (ADR 29.6.26e): definition name →
+    /// its annotations and proof-relevance. Read by the admission gate.
+    pub termination_meta: std::collections::HashMap<String, DefTerminationMeta>,
+    /// Termination facts replayed from an elaboration-cache hit (ADR 29.6.26e).
+    /// Empty on the fresh path, where the gate has the terms and recomputes them.
+    pub carried_termination: super::termination::CachedTermination,
+    /// This module's value import targets (ADR 12.7.26a §2.1): original name →
+    /// canonical defining module. Populated by `elaborate_with_exports`
+    /// (per-module Body Elaboration, where the flat import map is exactly this module's
+    /// imports); empty for combined-AST entry points.
+    pub value_import_targets: env::ValueImportTargets,
 }
 
 #[cfg(test)]
@@ -168,11 +202,46 @@ impl<'a> CollectedElaborator<'a> {
     /// Apply all trace and mode options from a `TraceOptions` bundle.
     pub fn apply_trace_options(&mut self, trace: &crate::driver::output::TraceOptions) {
         self.set_trace_target(trace.trace_types.clone());
-        self.set_trace_encoding(trace.trace_encoding.clone());
+        // Only override the env-seeded default (ADR 22.7.26d) when the CLI flag
+        // is actually present; an absent `--trace-encoding` must not wipe a
+        // `TUNGSTEN_TRACE_ENCODING` target.
+        if let Some(target) = &trace.trace_encoding {
+            self.set_trace_encoding(Some(target.clone()));
+        }
         self.set_trace_normalization(trace.trace_normalization.clone());
         self.set_elab_mode(trace.elab_mode);
         self.elaborator.trace_ctor_registration = trace.trace_ctor_registration;
         self.elaborator.env.trace_ctor_registration = trace.trace_ctor_registration;
+    }
+
+    /// Whether the collection pass recorded (and deferred) any errors
+    /// (ADR 14.8.26g D2).
+    ///
+    /// The pass no longer short-circuits, so `collect_definitions*` returning
+    /// `Ok` is not evidence of a clean collection. A caller that never runs
+    /// Pass 2 — and therefore never reaches the drain in `elaborate` /
+    /// `elaborate_with_exports` — must consult this before trusting the
+    /// collected environment (the D2a audit).
+    pub fn has_collection_errors(&self) -> bool {
+        !self.elaborator.errors.is_empty()
+    }
+
+    /// Drain the deferred collection-pass errors (ADR 14.8.26g D2, D4).
+    ///
+    /// For callers that report on the collection pass itself rather than
+    /// continuing to Pass 2. Draining here means the same errors cannot also
+    /// flow out of a later `elaborate*` call — each error is consumed exactly
+    /// once (D2a).
+    pub fn take_collection_errors(&mut self) -> Vec<ElabError> {
+        std::mem::take(&mut self.elaborator.errors)
+    }
+
+    /// The Phase-1e type encodings this collection pass produced
+    /// (`name → encoded Type`, non-parameterized types only). Used by the
+    /// per-module normalization oracle (ADR 22.7.26b) to harvest a
+    /// source-fresh comparand without running body elaboration.
+    pub fn phase1e_encodings(&self) -> std::collections::HashMap<String, Type> {
+        self.elaborator.get_encoded_types()
     }
 
     /// Get the collected types for computing a types hash.
@@ -187,9 +256,12 @@ impl<'a> CollectedElaborator<'a> {
 
     /// Extract value exports from the collection pass without running Phase 2.
     ///
-    /// Used by Phase A.5 (ADR 5.5.26c) to collect global function signatures
+    /// Used by Signature Collection (ADR 5.5.26c) to collect global function signatures
     /// before per-module body elaboration. Only extracts values — types and
-    /// constructors come from Phase A.
+    /// constructors come from Stub Registration — except a stub the pass
+    /// POISONED (ADR 15.8.26d): that one must replace the Stub Registration
+    /// placeholder, or every dependent module keeps building against the
+    /// placeholder's unresolved field types and re-diagnoses the fault.
     pub fn extract_value_exports(self) -> ModuleExports {
         ModuleExports {
             types: self
@@ -197,7 +269,7 @@ impl<'a> CollectedElaborator<'a> {
                 .env
                 .types
                 .iter()
-                .filter(|(_, def)| !matches!(def.kind, TypeDefKind::Stub))
+                .filter(|(_, def)| def.is_signature_collection_export())
                 .map(|(name, def)| (name.clone(), def.clone()))
                 .collect(),
             values: self
@@ -222,14 +294,7 @@ impl<'a> CollectedElaborator<'a> {
     /// This consumes the CollectedElaborator and produces the final CoreDefs.
     pub fn elaborate(mut self) -> Result<ElabOutput, Vec<ElabError>> {
         // Pass 2: Elaborate each definition
-        let mut defs = Vec::new();
-        for item in &self.file.items {
-            match self.elaborator.elaborate_item(item) {
-                Ok(Some(def)) => defs.push(def),
-                Ok(None) => {} // Type definitions don't produce CoreDefs
-                Err(e) => self.elaborator.record_error(e), // Use record_error to attach file path
-            }
-        }
+        let defs = self.elaborator.run_body_pass(&self.file.items);
 
         if self.elaborator.errors.is_empty() {
             Ok(ElabOutput {
@@ -243,6 +308,11 @@ impl<'a> CollectedElaborator<'a> {
                 mutual_recursion_groups: self.elaborator.get_mutual_recursion_groups(),
                 type_visibilities: self.elaborator.get_type_visibilities(),
                 record_field_visibilities: self.elaborator.get_record_field_visibilities(),
+                termination_meta: std::mem::take(&mut self.elaborator.termination_meta),
+                carried_termination: CachedTermination::default(),
+                // Combined-AST entry point: the flat import map mixes every
+                // module's imports, so no per-module table exists here.
+                value_import_targets: env::ValueImportTargets::new(),
             })
         } else {
             Err(std::mem::take(&mut self.elaborator.errors))
@@ -255,14 +325,7 @@ impl<'a> CollectedElaborator<'a> {
     /// from the elaborator's environment for injection into subsequent modules.
     pub fn elaborate_with_exports(mut self) -> Result<(ElabOutput, ModuleExports), Vec<ElabError>> {
         // Pass 2: Elaborate each definition
-        let mut defs = Vec::new();
-        for item in &self.file.items {
-            match self.elaborator.elaborate_item(item) {
-                Ok(Some(def)) => defs.push(def),
-                Ok(None) => {}
-                Err(e) => self.elaborator.record_error(e),
-            }
-        }
+        let defs = self.elaborator.run_body_pass(&self.file.items);
 
         if self.elaborator.errors.is_empty() {
             // Extract exports from env (non-stub types, all values, all constructors)
@@ -303,6 +366,11 @@ impl<'a> CollectedElaborator<'a> {
                     mutual_recursion_groups: self.elaborator.get_mutual_recursion_groups(),
                     type_visibilities: self.elaborator.get_type_visibilities(),
                     record_field_visibilities: self.elaborator.get_record_field_visibilities(),
+                    termination_meta: std::mem::take(&mut self.elaborator.termination_meta),
+                    carried_termination: CachedTermination::default(),
+                    // Per-module Body Elaboration: the flat import map is exactly this
+                    // module's processed `use` items (ADR 12.7.26a §2.1).
+                    value_import_targets: self.elaborator.env.extract_value_import_targets(),
                 },
                 exports,
             ))
@@ -312,8 +380,12 @@ impl<'a> CollectedElaborator<'a> {
     }
 }
 
+mod body_pass;
 mod exports;
+mod poison;
 mod tests;
 pub use exports::{
-    collect_definitions_with_exports, elaborate_with_phase_checks, CollectionResult, ModuleExports,
+    collect_definitions_for_signature_collection, collect_definitions_with_exports,
+    elaborate_with_phase_checks, CollectionResult, ModuleExports,
 };
+pub use poison::first_poisoned_export;

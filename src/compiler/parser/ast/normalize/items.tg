@@ -1,0 +1,274 @@
+// src/compiler/parser/ast/normalize/items.tg
+// The driver never reaches this module: span normalization is a test affordance,
+// imported only by the AST-comparison entry files. See normalize/mod.tg
+// (ADR 3.9.26a).
+// Span normalization for items and the definition records they wrap.
+//
+// `Visibility`, `MaybeString` and the extern ABI string carry no span and are
+// passed through untouched. Item definition bodies reach back into expressions
+// and type expressions, completing the mutually recursive normalizer cluster.
+
+use parser::ast::nodes::items::{
+    Item, ItemFn, ItemType, ItemTypeAlias, ItemTheorem, ItemLemma, ItemAxiom,
+    ItemExtern, ItemMod, ItemUse, ItemError,
+    FunctionDef, TypeDef, TypeAliasDef, TheoremDef, AxiomDef, ExternFnDef,
+    ModDecl, UseDecl, SourceFile,
+    TypeParam, Param, ExternParam, Variant, RecordField,
+    TypeBody, TypeBodySum, TypeBodyRecord,
+    TypeDefBody, TypeDefAlias, TypeDefAdt, TypeDefRecord,
+    UseTree, UseTreePath, UseTreeSimple, UseTreeAlias, UseTreeRename,
+    UseTreeGroup, UseTreeNested, UseTreeGlob
+};
+use parser::ast::normalize::common::{canonical_span, strip_spans_ident, strip_spans_path,
+    strip_spans_attribute_list};
+use parser::ast::normalize::patterns::{strip_spans_pattern};
+use parser::ast::normalize::types::{
+    strip_spans_type_expr, strip_spans_type_expr_list, strip_spans_maybe_type_expr
+};
+use parser::ast::normalize::exprs::{strip_spans_expr};
+use driver::ffi::{List, Nil, Cons};
+
+// ---------------------------------------------------------------------------
+// Definition fragments
+// ---------------------------------------------------------------------------
+
+pub fn strip_spans_type_param(p: TypeParam) -> TypeParam {
+    let n: TypeParam = {
+        name: strip_spans_ident(p.name),
+        bounds: strip_spans_type_expr_list(p.bounds),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_type_param_list(ps: List<TypeParam>) -> List<TypeParam> {
+    match ps {
+        Nil() => Nil(),
+        Cons(p, rest) => Cons(strip_spans_type_param(p), strip_spans_type_param_list(rest))
+    }
+}
+
+pub fn strip_spans_param(p: Param) -> Param {
+    let n: Param = {
+        pattern: strip_spans_pattern(p.pattern),
+        ty: strip_spans_type_expr(p.ty),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_param_list(ps: List<Param>) -> List<Param> {
+    match ps {
+        Nil() => Nil(),
+        Cons(p, rest) => Cons(strip_spans_param(p), strip_spans_param_list(rest))
+    }
+}
+
+pub fn strip_spans_extern_param(p: ExternParam) -> ExternParam {
+    let n: ExternParam = {
+        name: strip_spans_ident(p.name),
+        ty: strip_spans_type_expr(p.ty),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_extern_param_list(ps: List<ExternParam>) -> List<ExternParam> {
+    match ps {
+        Nil() => Nil(),
+        Cons(p, rest) => Cons(strip_spans_extern_param(p), strip_spans_extern_param_list(rest))
+    }
+}
+
+pub fn strip_spans_variant(v: Variant) -> Variant {
+    let n: Variant = {
+        name: strip_spans_ident(v.name),
+        fields: strip_spans_type_expr_list(v.fields),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_variant_list(vs: List<Variant>) -> List<Variant> {
+    match vs {
+        Nil() => Nil(),
+        Cons(v, rest) => Cons(strip_spans_variant(v), strip_spans_variant_list(rest))
+    }
+}
+
+pub fn strip_spans_record_field(f: RecordField) -> RecordField {
+    let n: RecordField = {
+        name: strip_spans_ident(f.name),
+        ty: strip_spans_type_expr(f.ty),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_record_field_list(fs: List<RecordField>) -> List<RecordField> {
+    match fs {
+        Nil() => Nil(),
+        Cons(f, rest) => Cons(strip_spans_record_field(f), strip_spans_record_field_list(rest))
+    }
+}
+
+pub fn strip_spans_type_body(b: TypeBody) -> TypeBody {
+    match b {
+        TypeBodySum(variants) => TypeBodySum(strip_spans_variant_list(variants)),
+        TypeBodyRecord(fields) => TypeBodyRecord(strip_spans_record_field_list(fields))
+    }
+}
+
+pub fn strip_spans_type_def_body(b: TypeDefBody) -> TypeDefBody {
+    match b {
+        TypeDefAlias(ty) => TypeDefAlias(strip_spans_type_expr(ty)),
+        TypeDefAdt(variants) => TypeDefAdt(strip_spans_variant_list(variants)),
+        TypeDefRecord(fields) => TypeDefRecord(strip_spans_record_field_list(fields))
+    }
+}
+
+pub fn strip_spans_use_tree(t: UseTree) -> UseTree {
+    match t {
+        UseTreePath(p) => UseTreePath(strip_spans_path(p)),
+        UseTreeSimple(p) => UseTreeSimple(strip_spans_path(p)),
+        UseTreeAlias(p, alias) => UseTreeAlias(strip_spans_path(p), strip_spans_ident(alias)),
+        UseTreeRename(p, alias, _) =>
+            UseTreeRename(strip_spans_path(p), strip_spans_ident(alias), canonical_span()),
+        UseTreeGroup(p, children, _) =>
+            UseTreeGroup(strip_spans_path(p), strip_spans_use_tree_list(children), canonical_span()),
+        UseTreeNested(p, children, _) =>
+            UseTreeNested(strip_spans_path(p), strip_spans_use_tree_list(children), canonical_span()),
+        UseTreeGlob(p, _) => UseTreeGlob(strip_spans_path(p), canonical_span())
+    }
+}
+
+pub fn strip_spans_use_tree_list(ts: List<UseTree>) -> List<UseTree> {
+    match ts {
+        Nil() => Nil(),
+        Cons(t, rest) => Cons(strip_spans_use_tree(t), strip_spans_use_tree_list(rest))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Definition records
+// ---------------------------------------------------------------------------
+
+pub fn strip_spans_function_def(d: FunctionDef) -> FunctionDef {
+    let n: FunctionDef = {
+        vis: d.vis,
+        name: strip_spans_ident(d.name),
+        type_params: strip_spans_type_param_list(d.type_params),
+        params: strip_spans_param_list(d.params),
+        return_type: strip_spans_maybe_type_expr(d.return_type),
+        body: strip_spans_expr(d.body),
+        // Attributes carry a span but no nested AST, and normalization exists to
+        // make two parses comparable — so the list travels as-is and only its
+        // spans would differ. Stripping them is `strip_spans_attribute_list`.
+        attrs: strip_spans_attribute_list(d.attrs),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_type_def(d: TypeDef) -> TypeDef {
+    let n: TypeDef = {
+        vis: d.vis,
+        name: strip_spans_ident(d.name),
+        type_params: strip_spans_type_param_list(d.type_params),
+        body: strip_spans_type_def_body(d.body),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_type_alias_def(d: TypeAliasDef) -> TypeAliasDef {
+    let n: TypeAliasDef = {
+        vis: d.vis,
+        name: strip_spans_ident(d.name),
+        type_params: strip_spans_type_param_list(d.type_params),
+        ty: strip_spans_type_expr(d.ty),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_theorem_def(d: TheoremDef) -> TheoremDef {
+    let n: TheoremDef = {
+        vis: d.vis,
+        name: strip_spans_ident(d.name),
+        type_params: strip_spans_type_param_list(d.type_params),
+        params: strip_spans_param_list(d.params),
+        prop: strip_spans_type_expr(d.prop),
+        body: strip_spans_expr(d.body),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_axiom_def(d: AxiomDef) -> AxiomDef {
+    let n: AxiomDef = {
+        vis: d.vis,
+        name: strip_spans_ident(d.name),
+        type_params: strip_spans_type_param_list(d.type_params),
+        params: strip_spans_param_list(d.params),
+        prop: strip_spans_type_expr(d.prop),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_extern_fn_def(d: ExternFnDef) -> ExternFnDef {
+    let n: ExternFnDef = {
+        vis: d.vis,
+        name: strip_spans_ident(d.name),
+        symbol: d.symbol,
+        abi: d.abi,
+        params: strip_spans_extern_param_list(d.params),
+        return_type: strip_spans_maybe_type_expr(d.return_type),
+        span: canonical_span()
+    };
+    n
+}
+
+pub fn strip_spans_mod_decl(d: ModDecl) -> ModDecl {
+    let n: ModDecl = { vis: d.vis, name: strip_spans_ident(d.name), span: canonical_span() };
+    n
+}
+
+pub fn strip_spans_use_decl(d: UseDecl) -> UseDecl {
+    let n: UseDecl = { vis: d.vis, tree: strip_spans_use_tree(d.tree), span: canonical_span() };
+    n
+}
+
+// ---------------------------------------------------------------------------
+// Items and source files
+// ---------------------------------------------------------------------------
+
+/// Normalize every span reachable from an item.
+pub fn strip_spans_item(item: Item) -> Item {
+    match item {
+        ItemFn(d) => ItemFn(strip_spans_function_def(d)),
+        ItemType(d) => ItemType(strip_spans_type_def(d)),
+        ItemTypeAlias(d) => ItemTypeAlias(strip_spans_type_alias_def(d)),
+        ItemTheorem(d) => ItemTheorem(strip_spans_theorem_def(d)),
+        ItemLemma(d) => ItemLemma(strip_spans_theorem_def(d)),
+        ItemAxiom(d) => ItemAxiom(strip_spans_axiom_def(d)),
+        ItemExtern(d) => ItemExtern(strip_spans_extern_fn_def(d)),
+        ItemMod(d) => ItemMod(strip_spans_mod_decl(d)),
+        ItemUse(d) => ItemUse(strip_spans_use_decl(d)),
+        ItemError(_) => ItemError(canonical_span())
+    }
+}
+
+pub fn strip_spans_item_list(items: List<Item>) -> List<Item> {
+    match items {
+        Nil() => Nil(),
+        Cons(i, rest) => Cons(strip_spans_item(i), strip_spans_item_list(rest))
+    }
+}
+
+/// Normalize a whole parsed file — the entry point for comparing two parses.
+pub fn strip_spans_source_file(f: SourceFile) -> SourceFile {
+    let n: SourceFile = { items: strip_spans_item_list(f.items), span: canonical_span() };
+    n
+}

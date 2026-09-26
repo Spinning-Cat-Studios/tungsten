@@ -1,0 +1,144 @@
+// Structural comparison result types (ADR 29.6.26f, design doc §T11.1).
+//
+// This is the authored ADT layer for the structural `assert_eq` comparator.
+// Per the bootstrap authoring/synthesis split (design doc §T11.8), these result types
+// are *authored* here — the bootstrap cannot register an ADT TypeDef programmatically —
+// while the per-type `compare_T` functions are *synthesized* as CoreDefs during
+// compilation. `CompareResult` is an ordinary Tungsten ADT so it composes,
+// monomorphizes, and is testable like any other code.
+
+use driver::ffi::types::{List, Nil, Cons};
+use driver::ffi::test::{assert_eq_bool};
+use driver::ffi::process::{process_exit};
+use parser::option::{Option, Some, None};
+
+// ===========================================================================
+// PATH GRAMMAR (design doc §T11.1, ADR §2.3)
+// ===========================================================================
+
+/// A single segment of a structural failure path. Rendered to the §2.3
+/// grammar (`.field`, `.N`, `[i]`, `.tag`, `.len`) only at materialisation.
+pub type PathSeg =
+    | Field(String)
+    | Pos(Nat)
+    | Index(Nat)
+    | Tag
+    | Len
+
+/// Root-to-mismatch path, outermost segment first.
+pub type ComparePath = List<PathSeg>
+
+// ===========================================================================
+// COMPARE RESULT
+// ===========================================================================
+
+/// Failure detail. Constructed once, only at the first mismatch — a successful
+/// comparison allocates nothing for diagnostics (design doc §T11.3).
+pub type CompareDiff = {
+    path: ComparePath,
+    left_display: String,
+    right_display: String
+}
+
+/// Result of a structural comparison. `Equal` carries no data (zero
+/// success-path allocation); `NotEqual` holds the first-difference diff.
+pub type CompareResult =
+    | Equal
+    | NotEqual(CompareDiff)
+
+// ===========================================================================
+// ASSERTION WRAPPERS (ADR 29.6.26f §2.4 / P6)
+// ===========================================================================
+//
+// Thin wrappers over the `compare` intrinsic (the comparator for `T` is
+// synthesised at instantiation — ADR §T11.2a) plus the existing failure FFI.
+// `assert_eq`/`assert_ne`/`assert_contains` are generic over `compare`, so they
+// work at any concrete instantiation. Failure is signalled through the test
+// harness's `assert_eq_bool` shim.
+
+/// Whether a comparison result is `Equal`.
+fn compare_is_equal(r: CompareResult) -> Bool {
+    match r {
+        Equal() => true,
+        NotEqual(_) => false
+    }
+}
+
+/// Fail the current test unless `cond` holds.
+pub fn assert(cond: Bool) -> Unit {
+    assert_eq_bool(cond, true)
+}
+
+/// Fail unless `cond` is `true`.
+pub fn assert_true(cond: Bool) -> Unit {
+    assert_eq_bool(cond, true)
+}
+
+/// Fail unless `cond` is `false`.
+pub fn assert_false(cond: Bool) -> Unit {
+    assert_eq_bool(cond, false)
+}
+
+/// Unconditional failure.
+pub fn fail() -> Unit {
+    assert_eq_bool(false, true)
+}
+
+/// Assert that `a` and `b` are structurally equal.
+pub fn assert_eq<T>(a: T, b: T) -> Unit {
+    assert(compare_is_equal(compare(a, b)))
+}
+
+/// Assert that `a` and `b` are structurally unequal.
+pub fn assert_ne<T>(a: T, b: T) -> Unit {
+    assert_false(compare_is_equal(compare(a, b)))
+}
+
+/// Assert that `opt` is `Some`, returning the unwrapped value so tests can chain
+/// on it (ADR 29.6.26f §2.4). On `None` there is no value to return, so the test
+/// binary aborts via `abort_missing` (nonzero exit → the runner records failure);
+/// `T` is inferred from the witness, and `process_exit` diverges before the
+/// recursion is reached (Tungsten has no bottom type to coerce here).
+pub fn assert_some<T>(opt: Option<T>) -> T {
+    match opt {
+        Some(v) => v,
+        None() => abort_missing(opt)
+    }
+}
+
+/// Diverge while yielding any `T`: abort the process, but stay well-typed as `-> T`.
+/// `process_exit(1)` is a statement (its `Never` result discarded); the recursive
+/// tail exists only so the body has type `T`, and is never actually reached.
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
+fn abort_missing<T>(witness: Option<T>) -> T {
+    process_exit(1);
+    abort_missing(witness)
+}
+
+/// Assert that `opt` is `None`; fail if it is `Some` (ADR 29.6.26f §2.4).
+pub fn assert_none<T>(opt: Option<T>) -> Unit {
+    match opt {
+        None() => (),
+        Some(_) => fail()
+    }
+}
+
+/// Linear membership: fail unless some element of `xs` equals `x`.
+pub fn assert_contains<T>(xs: List<T>, x: T) -> Unit {
+    assert(list_contains_via_compare(xs, x))
+}
+
+fn list_contains_via_compare<T>(xs: List<T>, x: T) -> Bool {
+    match xs {
+        Nil() => false,
+        Cons(h, rest) =>
+            if compare_is_equal(compare(h, x)) {
+                true
+            } else {
+                list_contains_via_compare(rest, x)
+            }
+    }
+}

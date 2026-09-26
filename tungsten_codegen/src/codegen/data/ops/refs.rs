@@ -23,20 +23,14 @@ impl<'ctx> CodeGen<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
         let val_ty = val_compiled.get_type();
 
-        // Get malloc (uses profiling wrapper when --alloc-profile is enabled)
-        let malloc = self.get_malloc();
-
-        // Allocate heap memory for the ref
+        // Allocate heap memory for the ref (uses class-tagged profiling
+        // wrapper when --alloc-profile is enabled)
         let size = self.type_size_bytes(val_ty);
         let size_val = self.context.i64_type().const_int(size, false);
 
-        let ptr = self
-            .builder
-            .build_call(malloc, &[size_val.into()], "ref_alloc")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CodeGenError::LlvmError("malloc returned void".to_string()))?;
+        let ptr: BasicValueEnum<'ctx> = self
+            .build_malloc_call(size_val, crate::codegen::AllocClass::Ref, "ref_alloc")?
+            .into();
 
         // Store initial value with 16-byte alignment for ARM64 ABI
         let store = self

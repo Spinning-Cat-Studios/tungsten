@@ -1,0 +1,14 @@
+[E0062] Error: cannot prove termination of `pong`
+   ╭─[tests/golden/error/termination_mutual_no_progress.tg:6:26]
+   │
+ 6 │ fn pong(m: Lst) -> Nat { ping(m) }
+   │                          ───┬───  
+   │                             ╰───── 
+   │ 
+   │ Help: rewrite the recursion structurally, or mark the definition `#[partial]` (partial definitions cannot be used in proofs)
+   │ 
+   │ Note: mutually recursive group: ping, pong
+with `m` decreasing, the call to `ping` supplies `m`, which is not a known strict subterm of `m`
+───╯
+
+error: aborting due to 1 error

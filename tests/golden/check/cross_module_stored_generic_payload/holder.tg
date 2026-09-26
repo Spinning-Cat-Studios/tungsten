@@ -1,0 +1,24 @@
+// Holder module: stores the generic instantiation in a constructor payload
+// (2-ctor sum wrapper) with the wrapper and its consumers in the SAME module
+// and only the generic ADT imported — the `MkCtorIndex(StrMap<CtorBucket>)`
+// shape that failed at construction with an identically-rendered E0010
+// before ADR 21.7.26e.
+
+use tree::{Tree, TreeLeaf, TreeNode, touch_tree};
+
+pub type Bucket = { count: Nat, label: String }
+
+pub type Holder =
+    | HolderEmpty
+    | HolderFull(Tree<Bucket>)
+
+pub fn project_held(h: Holder, fallback: Tree<Bucket>) -> Tree<Bucket> {
+    match h {
+        HolderFull(g) => g,
+        HolderEmpty() => fallback
+    }
+}
+
+pub fn hold_through_generic(h: Holder, fallback: Tree<Bucket>) -> Holder {
+    HolderFull(touch_tree(project_held(h, fallback)))
+}

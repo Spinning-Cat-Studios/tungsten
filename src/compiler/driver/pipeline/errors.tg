@@ -6,9 +6,11 @@ use driver::ffi::{
     FfiResult, FfiOk, FfiErr
 };
 use driver::util::nat_to_string;
+use driver::ffi::{List, Nil, Cons};
 use driver::modules::{
     ParsedModule,
-    parsed_module_path, parsed_module_lex_errors, parsed_module_parse_errors
+    parsed_module_path, parsed_module_lex_errors, parsed_module_parse_errors,
+    parsed_module_submodules
 };
 use parser::error::{
     ParseErrors, NoParseErrors, ConsParseError,
@@ -24,29 +26,81 @@ use elab::error::render::colors::{colorize_bold, ColorRed};
 
 /// Render lex and parse errors for a parsed module.
 pub fn render_lex_parse_errors(module: ParsedModule, max_errors: Nat, use_color: Bool) -> Unit {
+    let total = render_module_errors_only(module, use_color);
+    render_abort_summary(total, use_color)
+}
+
+/// Render lex and parse errors for EVERY module in the tree, returning the
+/// total count.
+///
+/// **This walk is the deliverable, not a refactor** (ADR 12.8.26b P1/AC6). Each
+/// `ParsedModule` records its own lex/parse errors, but the pipelines read only
+/// the ROOT's — so a parse error in any imported module was stored and never
+/// looked at, and `check` reported "all OK" over a file it had failed to parse.
+/// That is what made `#[partial]` invisible: the annotations live in imported
+/// modules, where the error went unread, while the same annotation in an ENTRY
+/// file has always been reported. A silent accept in the import path is the
+/// worst direction for the error to be lost in, because the import path is
+/// where all 115 of the corpus's annotations are.
+pub fn render_module_tree_errors(module: ParsedModule, max_errors: Nat, use_color: Bool) -> Nat {
+    let total = render_module_tree_acc(module, use_color, 0);
+    if total > 0 {
+        render_abort_summary(total, use_color)
+    } else {
+        {}
+    };
+    total
+}
+
+// Partial (ADR 11.8.26b): descends into a list of submodules, so the recursive
+// call passes a list element rather than a strict subterm of `module`.
+// Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn render_module_tree_acc(module: ParsedModule, use_color: Bool, acc: Nat) -> Nat {
+    let here = render_module_errors_only(module, use_color);
+    render_submodule_list(parsed_module_submodules(module), use_color, acc + here)
+}
+
+#[partial]
+fn render_submodule_list(mods: List<ParsedModule>, use_color: Bool, acc: Nat) -> Nat {
+    match mods {
+        Nil() => acc,
+        Cons(m, rest) => render_submodule_list(rest, use_color, render_module_tree_acc(m, use_color, acc))
+    }
+}
+
+/// Render one module's own lex/parse errors, with no summary line, returning
+/// how many it reported.
+fn render_module_errors_only(module: ParsedModule, use_color: Bool) -> Nat {
     let lex_errs = parsed_module_lex_errors(module);
     let parse_errs = parsed_module_parse_errors(module);
     let lex_count = error_count(lex_errs);
     let parse_count = parse_error_count(parse_errs);
-    
+
     // Get source for line/col computation
     let path = parsed_module_path(module);
     let source = get_module_source(module);
     let src_info = source_info_new(path, source);
-    
+
     if lex_count > 0 {
-        eprintln(colorize_bold("error", ColorRed, use_color) ++ 
-                ": " ++ nat_to_string(lex_count) ++ " lexer error(s)")
+        eprintln(colorize_bold("error", ColorRed, use_color) ++
+                ": " ++ path ++ ": " ++ nat_to_string(lex_count) ++ " lexer error(s)")
+    } else {
+        {}
     };
-    
+
     // Print individual parse errors with details
     if parse_count > 0 {
         print_parse_errors_detail(parse_errs, src_info, use_color)
+    } else {
+        {}
     };
-    
-    // Summary
-    let total = lex_count + parse_count;
-    eprintln(colorize_bold("error", ColorRed, use_color) ++ 
+
+    lex_count + parse_count
+}
+
+fn render_abort_summary(total: Nat, use_color: Bool) -> Unit {
+    eprintln(colorize_bold("error", ColorRed, use_color) ++
             ": aborting due to " ++ nat_to_string(total) ++ " previous error(s)")
 }
 

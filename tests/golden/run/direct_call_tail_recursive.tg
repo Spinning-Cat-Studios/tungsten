@@ -6,6 +6,9 @@
 pub type List<T> = Nil | Cons(T, List<T>)
 
 // Build a list of n elements (counting down)
+// Partial (ADR 11.8.26b): a `Nat` countdown, not a structural subterm — this
+// fixture tests musttail on direct calls, not termination.
+#[partial]
 pub fn build_list(n: Nat, acc: List<Nat>) -> List<Nat> {
     if n == 0 {
         acc

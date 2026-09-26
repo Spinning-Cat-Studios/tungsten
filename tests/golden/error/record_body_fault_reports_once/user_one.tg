@@ -1,0 +1,3 @@
+use shapes::{Box};
+
+pub fn make_box(b: Box) -> Box { b }

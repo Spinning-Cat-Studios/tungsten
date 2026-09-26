@@ -1,0 +1,6 @@
+// A first recursive function over a `Nat` counter. `n - 1` is a number
+// computed from `n`, not a piece of it, so the compiler cannot see the
+// recursion stop and refuses it (E0062).
+fn count(n: Nat) -> Nat { if n == 0 { 0 } else { 1 + count(n - 1) } }
+
+fn main() -> Nat { count(3) }

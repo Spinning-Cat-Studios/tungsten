@@ -1,0 +1,24 @@
+// ADR 21.8.26a AC2/AC3: the two shapes that emit no `Case` at all.
+//
+// A single-constructor destructure (`MkPair(a, b)`) and a block-level tuple
+// `let` both replace the match with the arm body, so there is no arm binder for
+// the projections to hang off — each needs a `let` of its own. Both leaked
+// their variables into the term as free before ADR 21.8.26a; between them they
+// accounted for the last 31 open definitions in `src/compiler/main.tg`.
+
+pub type Pair = MkPair(Nat, Nat)
+
+pub fn swapped(p: Pair) -> Nat {
+    match p {
+        MkPair(a, b) => b * 10 + a
+    }
+}
+
+fn split_digits(n: Nat) -> (Nat, Nat) {
+    (n / 10, n % 10)
+}
+
+pub fn main() -> Nat {
+    let (hi, lo) = split_digits(72);
+    swapped(MkPair(hi, lo))
+}

@@ -121,7 +121,9 @@
 //!     | sorry                                  -- unsafe axiom
 //! ```
 
+pub mod builtins;
 pub mod context;
+pub mod diagnostics;
 pub mod eval;
 pub mod ffi;
 pub mod terms;

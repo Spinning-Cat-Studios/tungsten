@@ -32,3 +32,25 @@
 **Iteration:** 500 iterations (default), read from argv.
 **Observable output:** Sum of `to_nat(factorial(mk_7()))` across all iterations. Default: 2520000.
 **Known differences:** Rust uses `&Nat` references; Tungsten passes by value.
+
+## fibonacci_int (Tier 1, ADR 14.9.26c)
+
+**Algorithm:** Naive recursive Fibonacci on the signed `Int` primitive — no Peano, no allocation.
+**Recursion:** O(2^n) calls for fib(n), non-tail double recursion.
+**Allocation:** None. `Int` is an `i64` in a register, the word `Nat` already is.
+**Branch structure:** One signed compare (`n < 2`); every `+`/`-` is `llvm.sadd/ssub.with.overflow` plus a branch into the trap block, so the workload measures the overflow check on the hottest arithmetic shape.
+**Input size:** fib(30) = 832040.
+**Iteration:** 8 iterations (default), read from argv.
+**Observable output:** Sum of `fib(30)` across all iterations. Default: 6656320.
+**Known differences:** No Rust twin yet; **no speed-up over `Nat` is claimed** — the comparison is checked `Int` against the unchecked `Nat` word, never against Peano.
+
+## collatz_int (Tier 1, ADR 14.9.26c)
+
+**Algorithm:** Collatz sequence length on the signed `Int` primitive, tail-style with an accumulator.
+**Recursion:** Depth = sequence length (111 for 27).
+**Allocation:** None.
+**Branch structure:** `n <= 1`, `n % 2 == 0`; each `/` and `%` carries the zero-divisor and `MIN / -1` guards, each `*` and `+` the overflow branch — four guards per step next to a `Nat` loop with none.
+**Input size:** collatz(27) = 111 steps.
+**Iteration:** 100000 iterations (default), read from argv.
+**Observable output:** Sum of `collatz_length(27, 0)` across all iterations. Default: 11100000.
+**Known differences:** No Rust twin yet; no speed-up over `Nat` claimed. Verified at 1000 iterations = 111000 on the host at close-out; wall-clock numbers are a manual run under `benchmarks/MANIFEST.md`, not recorded here.

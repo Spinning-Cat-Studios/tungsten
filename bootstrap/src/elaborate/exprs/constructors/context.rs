@@ -15,9 +15,21 @@ pub(crate) struct ConstructorContext {
     pub is_recursive: bool,
 }
 
+/// What a constructor's parent type resolved to.
+pub(crate) enum ConstructorParent {
+    /// A healthy ADT, with everything a constructor site needs.
+    Adt(ConstructorContext),
+    /// The parent's own body failed to elaborate (ADR 15.8.26d D2). Its
+    /// stub carries no constructor list and the fault is already reported
+    /// at the type's span, so the site passes poison through: arguments
+    /// check against `Type::Error` and the value is a hole.
+    Poisoned,
+}
+
 impl<'a> Elaborator<'a> {
     /// Look up the type definition and constructors for a constructor.
-    /// Returns the constructor context with all needed info.
+    /// Returns the constructor context with all needed info, or the
+    /// poison verdict when the parent type failed.
     ///
     /// Uses canonical lookup (ADR 31) to handle cross-module generic types.
     /// This ensures that re-exported types like `Option<T>` resolve to their
@@ -26,18 +38,19 @@ impl<'a> Elaborator<'a> {
         &self,
         info: &env::ConstructorInfo,
         span: Span,
-    ) -> ElabResult<ConstructorContext> {
+    ) -> ElabResult<ConstructorParent> {
         // ADR 31: Use canonical lookup to handle cross-module generics
         let type_def = self.env.lookup_type_canonical(&info.type_name).cloned();
         let Some(type_def) = type_def else {
-            return Err(ElabError::new(
+            return Err(ElabError::internal(
                 span,
-                ElabErrorKind::Other(format!(
-                    "internal error: constructor's type `{}` not found",
-                    info.type_name
-                )),
+                format!("constructor's type `{}` not found", info.type_name),
             ));
         };
+
+        if type_def.is_poison() {
+            return Ok(ConstructorParent::Poisoned);
+        }
 
         let env::TypeDefKind::ADT(ref constructors) = type_def.kind else {
             // ADR 31: Improved error message for stub types
@@ -47,21 +60,18 @@ impl<'a> Elaborator<'a> {
                 env::TypeDefKind::Record(_) => "a record type",
                 env::TypeDefKind::ADT(_) => unreachable!(),
             };
-            return Err(ElabError::new(
+            return Err(ElabError::internal(
                 span,
-                ElabErrorKind::Other(format!(
-                    "internal error: `{}` is {}, not an ADT",
-                    info.type_name, kind_desc
-                )),
+                format!("`{}` is {}, not an ADT", info.type_name, kind_desc),
             ));
         };
 
         let is_recursive = self.adt_is_recursive(&info.type_name, constructors);
 
-        Ok(ConstructorContext {
+        Ok(ConstructorParent::Adt(ConstructorContext {
             constructors: constructors.clone(),
             type_params: type_def.params.clone(),
             is_recursive,
-        })
+        }))
     }
 }

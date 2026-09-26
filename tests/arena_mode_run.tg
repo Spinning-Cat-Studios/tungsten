@@ -1,0 +1,145 @@
+// tests/arena_mode_run.tg — ADR 14.9.26b AC 4 / AC 5 / AC 7 parity fixture
+//
+// One program that reaches every allocation class the runtime symbol carries
+// that a surface program can reach:
+//   Mu  — a recursive List built and folded (fold_to_heap / mu_alloc)
+//   Env — capturing closures that ESCAPE into a list (env_alloc). Stored, not
+//         applied at the call site: a saturated `adder(n)(acc)` compiles to a
+//         direct call with no closure at all, and a closure that never escapes
+//         is stack-folded by escape analysis (ADR 8.5.26d) — only an escaping
+//         one reaches the heap.
+//   Ref — NOT reached: `ref` is a reserved keyword in the bootstrap lexer
+//         (`tungsten explain keywords ref`), so no surface program can build
+//         a cell; that site (`data/ops/refs.rs`) is covered by the codegen
+//         unit tests only
+//   Str — string concatenation through the C-allocator shim, including the
+//         owned-left `realloc` path that must never hand an arena pointer to
+//         libc, and a StringBuilder whose buffer regrows through the same shim
+//
+// `tungsten diff exec` runs it on the evaluator AND natively and compares
+// stdout. The native side is run twice by `bootstrap/tests/diff_exec_e2e.rs`:
+// with `TUNGSTEN_ARENA` unset (mode `off`, byte-identical to the pre-ADR
+// `malloc` path) and with `TUNGSTEN_ARENA=bump:1` (1 MiB chunks, which the
+// oversized builder capacity below forces the arena to roll over). The
+// evaluator has no arena, so a bump-mode divergence here is the arena's — a
+// block handed out unaligned, a `grow_last` that copied the wrong extent, a
+// chunk rollover that lost the cursor. Standalone on purpose, like
+// `console_println_run.tg`: it declares its own externs so the fixture costs
+// a handful of symbols, not the compiler.
+//
+// AC 7 reads the IR the bootstrap emits for this file: every allocation is a
+// `call ptr @__tungsten_alloc(i64 …, i32 …)` and no bare `@malloc` remains.
+//
+// Sizes are bounded by the EVALUATOR, not the native side: it folds a list
+// of `n` nodes in time quadratic in `n` (300 nodes ≈ 10 s host-side).
+
+extern "C" fn tg_println(s: Nat, len: Nat) -> Unit
+extern "C" fn tg_string_to_cstring(s: String) -> Nat
+extern "C" fn tg_string_len_internal(s: String) -> Nat
+extern "C" fn tg_free_string(s: Nat) -> Unit
+
+extern "C" fn tg_string_builder_new() -> Nat
+extern "C" fn tg_string_builder_with_capacity(capacity: Nat) -> Nat
+extern "C" fn tg_string_builder_push_str(sb: Nat, s: String) -> Nat
+extern "C" fn tg_string_builder_to_string(sb: Nat) -> String
+
+pub fn println(s: String) -> Unit {
+    let c = tg_string_to_cstring(s);
+    let len = tg_string_len_internal(s);
+    tg_println(c, len);
+    tg_free_string(c)
+}
+
+/// Render a Nat in decimal, so a count can be printed and compared.
+#[partial]
+fn nat_to_string(n: Nat) -> String {
+    if n < 10 {
+        digit(n)
+    } else {
+        nat_to_string(n / 10) ++ digit(n % 10)
+    }
+}
+
+fn digit(d: Nat) -> String {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" }
+    else if d == 3 { "3" } else if d == 4 { "4" } else if d == 5 { "5" }
+    else if d == 6 { "6" } else if d == 7 { "7" } else if d == 8 { "8" }
+    else { "9" }
+}
+
+// --- Mu: a recursive list, built and folded ---------------------------------
+
+type NatList = LNil | LCons(Nat, NatList)
+
+/// `count` nodes, descending.
+#[partial]
+fn build(count: Nat) -> NatList {
+    if count == 0 { LNil } else { LCons(count, build(count - 1)) }
+}
+
+fn sum(xs: NatList) -> Nat {
+    match xs {
+        LNil => 0,
+        LCons(x, rest) => x + sum(rest)
+    }
+}
+
+// --- Env: capturing closures that escape into a list -------------------------
+
+fn adder(k: Nat) -> Nat -> Nat {
+    |x: Nat| x + k
+}
+
+type FnList = FNil | FCons(Nat -> Nat, FnList)
+
+/// `count` capturing closures, each stored in a list node so its environment
+/// escapes and is heap-allocated.
+#[partial]
+fn build_adders(count: Nat) -> FnList {
+    if count == 0 { FNil } else { FCons(adder(count), build_adders(count - 1)) }
+}
+
+fn apply_all(fs: FnList, acc: Nat) -> Nat {
+    match fs {
+        FNil => acc,
+        FCons(f, rest) => apply_all(rest, f(acc))
+    }
+}
+
+// --- Str: concatenation, the owned-left realloc path, and a builder ---------
+
+/// Left-associated appends — after the first, the left operand is a fresh
+/// temporary and codegen takes `tg_string_concat_owned`, the `realloc` path.
+#[partial]
+fn repeat_append(piece: String, n: Nat, acc: String) -> String {
+    if n == 0 { acc } else { repeat_append(piece, n - 1, acc ++ piece) }
+}
+
+#[partial]
+fn push_repeated(sb: Nat, piece: String, n: Nat) -> Nat {
+    if n == 0 { sb } else { push_repeated(tg_string_builder_push_str(sb, piece), piece, n - 1) }
+}
+
+// Emits exactly:
+//   stdout: "45150\n"       — sum 1..300
+//           "20100\n"       — 200 stored closures applied in turn, adding 1..200
+//           "8\n"           — a 3,000,000-byte capacity, then 8 bytes pushed
+//           "abcabcabcabc\n"— owned-left appends
+//           "4400\n"        — 100 builder pushes of 44 bytes
+fn emit() -> Unit {
+    println(nat_to_string(sum(build(300))));
+    println(nat_to_string(apply_all(build_adders(200), 0)));
+    // A request larger than a 1 MiB chunk takes a chunk of its own size, and
+    // the small requests that follow must roll over to a fresh chunk — the
+    // two arena paths a program this small would otherwise never reach.
+    let sized = tg_string_builder_push_str(tg_string_builder_with_capacity(3000000), "12345678");
+    println(nat_to_string(tg_string_len_internal(tg_string_builder_to_string(sized))));
+    println(repeat_append("abc", 4, ""));
+    let grown = push_repeated(tg_string_builder_new(), "the quick brown fox jumps over the lazy dog!", 100);
+    println(nat_to_string(tg_string_len_internal(tg_string_builder_to_string(grown))))
+}
+
+fn main() -> Nat {
+    emit();
+    0
+}

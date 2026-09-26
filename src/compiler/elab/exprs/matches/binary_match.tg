@@ -1,0 +1,176 @@
+// Binary sum match elaboration (exactly 2 arms).
+//
+// Split out of adt_match.tg (ADR 21.8.26a): wrapping each arm body in its
+// payload projections took that file past the .tg size threshold, and the two
+// binary-match functions are the seam that means something — everything here
+// is the "one `Case`, two arms" shape, and adt_match.tg keeps the dispatch
+// that decides which shape a match is.
+//
+// The synth and check paths differ only in how they elaborate the FIRST arm.
+// Both share `binary_arm_bind_types` before it and `elab_binary_second_arm`
+// after, which is also what keeps each of them at match-depth 1 — the two
+// allowlist entries this file inherited were for the nesting that continuation
+// removes.
+
+use parser::ast::MatchArm;
+use lexer::span::Span;
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_case,
+    tg_type_is_mu, tg_type_get_mu_var,
+    tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_substitute,
+    tg_string_to_cstr
+};
+use elab::cir::{CodegenIR, build_cir_case_from_handles};
+use elab::env::{Env, env_push_scope, env_pop_scope};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr};
+use elab::exprs::forms::result::add_expected_because;
+use elab::error::ExpMatchBranch;
+use elab::exprs::{check, synth};
+use elab::exprs::matches::patterns::{
+    bind_pattern_in_scope, get_arm_binding_type, wrap_arm_payload_projections
+};
+use elab::exprs::matches::adt_match::{AdtMatchScrutInfo, MatchCheckTarget};
+
+// ===========================================================================
+// INTERNAL RECORD TYPES
+// ===========================================================================
+
+/// The two arms' binding types, after μ-substitution.
+type ArmBindTypes = {
+    left: TypeHandle,
+    right: TypeHandle
+}
+
+/// What the second arm needs from the first arm's completed elaboration.
+///
+/// `body1` is already wrapped in its projections — the second arm only ever
+/// places it into the `Case`, so wrapping it any later would mean carrying the
+/// first arm's pattern and binding type here too.
+type BinaryArmCtx = {
+    ms: AdtMatchScrutInfo,
+    arm1_span: Span,
+    var1: String,
+    body1: TermHandle,
+    body1_cir: CodegenIR
+}
+
+// ===========================================================================
+// SHARED STAGES
+// ===========================================================================
+
+/// Resolve both arms' binding types from the scrutinee's sum.
+fn binary_arm_bind_types(
+    env: Env,
+    ms: AdtMatchScrutInfo,
+    arm1: MatchArm,
+    arm2: MatchArm
+) -> ArmBindTypes {
+    let left_ty = tg_type_get_sum_left(ms.sum_ty);
+    let right_ty = tg_type_get_sum_right(ms.sum_ty);
+
+    let (left_ty, right_ty) = if tg_type_is_mu(ms.orig_ty) {
+        let mu_var = tg_type_get_mu_var(ms.orig_ty);
+        (tg_type_substitute(left_ty, mu_var, ms.orig_ty),
+         tg_type_substitute(right_ty, mu_var, ms.orig_ty))
+    } else {
+        (left_ty, right_ty)
+    };
+
+    {
+        left: get_arm_binding_type(env, arm1, left_ty, ms.sum_ty, ms.orig_ty),
+        right: get_arm_binding_type(env, arm2, right_ty, ms.sum_ty, ms.orig_ty)
+    } : ArmBindTypes
+}
+
+/// Elaborate the second arm and assemble the `Case`.
+///
+/// `env` must already be a fresh scope: this binds the arm's pattern into it
+/// and pops it on the way out.
+fn elab_binary_second_arm(
+    env: Env,
+    arm2: MatchArm,
+    arm2_bind_ty: TypeHandle,
+    result_ty: TypeHandle,
+    ctx: BinaryArmCtx
+) -> ElabExprResult {
+    let (env1, var2) = bind_pattern_in_scope(env, arm2.pattern, arm2_bind_ty);
+    match check(env1, arm2.body, result_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(ctx.arm1_span))),
+        ElabExprOk(env2, body2, _, body2_cir) =>
+            let term = tg_term_case(
+                ctx.ms.term,
+                tg_string_to_cstr(ctx.var1), ctx.body1,
+                tg_string_to_cstr(var2),
+                wrap_arm_payload_projections(arm2.pattern, arm2_bind_ty, var2, body2)
+            );
+            let cir = build_cir_case_from_handles(
+                ctx.ms.cir, ctx.ms.sum_ty, ctx.var1, ctx.body1_cir, var2, body2_cir, result_ty
+            );
+            ElabExprOk(env_pop_scope(env2), term, result_ty, cir)
+    }
+}
+
+/// Package the first arm's result for the second.
+fn binary_arm_ctx(
+    ms: AdtMatchScrutInfo,
+    arm1: MatchArm,
+    arm1_bind_ty: TypeHandle,
+    var1: String,
+    first: (TermHandle, CodegenIR)
+) -> BinaryArmCtx {
+    let (body1, body1_cir) = first;
+    {
+        ms: ms,
+        arm1_span: arm1.span,
+        var1: var1,
+        body1: wrap_arm_payload_projections(arm1.pattern, arm1_bind_ty, var1, body1),
+        body1_cir: body1_cir
+    } : BinaryArmCtx
+}
+
+// ===========================================================================
+// ENTRY POINTS
+// ===========================================================================
+
+/// Elaborate a binary sum match (exactly 2 arms), synthesizing the result type
+/// from the first arm.
+pub fn elab_binary_match(
+    env: Env,
+    ms: AdtMatchScrutInfo,
+    arm1: MatchArm,
+    arm2: MatchArm,
+    span: Span
+) -> ElabExprResult {
+    let arm_types = binary_arm_bind_types(env, ms, arm1, arm2);
+    let env1 = env_push_scope(env);
+    let (env1, var1) = bind_pattern_in_scope(env1, arm1.pattern, arm_types.left);
+    match synth(env1, arm1.body) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body1, result_ty, body1_cir) =>
+            let ctx = binary_arm_ctx(ms, arm1, arm_types.left, var1, (body1, body1_cir));
+            let env3 = env_push_scope(env_pop_scope(env2));
+            elab_binary_second_arm(env3, arm2, arm_types.right, result_ty, ctx)
+    }
+}
+
+/// Elaborate a binary sum match against an expected result type.
+pub fn elab_binary_match_checked(
+    env: Env,
+    ms: AdtMatchScrutInfo,
+    arm1: MatchArm,
+    arm2: MatchArm,
+    target: MatchCheckTarget
+) -> ElabExprResult {
+    let arm_types = binary_arm_bind_types(env, ms, arm1, arm2);
+    let env1 = env_push_scope(env);
+    let (env1, var1) = bind_pattern_in_scope(env1, arm1.pattern, arm_types.left);
+    match check(env1, arm1.body, target.expected) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body1, _, body1_cir) =>
+            let ctx = binary_arm_ctx(ms, arm1, arm_types.left, var1, (body1, body1_cir));
+            let env3 = env_push_scope(env_pop_scope(env2));
+            elab_binary_second_arm(env3, arm2, arm_types.right, target.expected, ctx)
+    }
+}

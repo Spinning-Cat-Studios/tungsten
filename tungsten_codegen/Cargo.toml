@@ -11,6 +11,9 @@ description = "LLVM code generation for the Tungsten proof language"
 tungsten_core = { path = "../tungsten_core" }
 inkwell = { version = "0.5", features = ["llvm18-0"] }
 
+[dev-dependencies]
+tungsten_runtime = { path = "../tungsten_runtime" }
+
 [lints.rust]
 # Allow unsafe in codegen - LLVM bindings require it
 unsafe_code = "allow"

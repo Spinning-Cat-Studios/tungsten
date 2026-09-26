@@ -1,0 +1,38 @@
+// `StringBuilder` is not a builtin: it is six runtime functions every
+// natively compiled program links, declared with `extern "C"` and wrapped.
+
+pub type StringBuilder = MkStringBuilder(Nat)
+
+extern "C" fn tg_string_builder_new() -> Nat
+extern "C" fn tg_string_builder_with_capacity(capacity: Nat) -> Nat
+extern "C" fn tg_string_builder_push_str(sb: Nat, s: String) -> Nat
+extern "C" fn tg_string_builder_push_char(sb: Nat, code: Nat) -> Nat
+extern "C" fn tg_string_builder_len(sb: Nat) -> Nat
+extern "C" fn tg_string_builder_to_string(sb: Nat) -> String
+
+pub fn string_builder_new() -> StringBuilder {
+    MkStringBuilder(tg_string_builder_new())
+}
+
+pub fn push_str(sb: StringBuilder, s: String) -> StringBuilder {
+    match sb { MkStringBuilder(h) => MkStringBuilder(tg_string_builder_push_str(h, s)) }
+}
+
+// Consumes the builder: any later use of it aborts.
+pub fn to_string(sb: StringBuilder) -> String {
+    match sb { MkStringBuilder(h) => tg_string_builder_to_string(h) }
+}
+
+type Words = NoWords | Word(String, Words)
+
+fn push_all(sb: StringBuilder, ws: Words) -> StringBuilder {
+    match ws {
+        NoWords => sb,
+        Word(w, rest) => push_all(push_str(sb, w), rest),
+    }
+}
+
+fn main() -> String {
+    let words = Word("build ", Word("once, ", Word("copy never", NoWords)));
+    to_string(push_all(string_builder_new(), words))
+}

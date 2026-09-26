@@ -1,4 +1,4 @@
-//! `tungsten doctor check reexport-completeness` — detect broken pub use re-exports.
+//! `tungsten doctor check module reexport-completeness` — detect broken pub use re-exports.
 //!
 //! Walks the module tree after re-export processing and checks that every
 //! `pub use` declaration actually copied items. Reports declarations that
@@ -45,7 +45,7 @@ pub(crate) enum ReexportIssue {
     },
 }
 
-/// Entry point for `tungsten doctor check reexport-completeness <file>`.
+/// Entry point for `tungsten doctor check module reexport-completeness <file>`.
 pub fn cmd_check_reexport_completeness(file: &PathBuf, verbose: bool) -> ExitCode {
     let mut visited = HashSet::new();
     let mut chain = Vec::new();

@@ -1,0 +1,16 @@
+// Rejected: `type Bad = Mk(Bad -> Bad)` puts `Bad` left of an arrow.
+// Accepted: store the result of the function, not the function.
+type Good = Mk(Nat -> Good) | Done(Nat)
+
+fn value(g: Good) -> Nat {
+    match g { Mk(f) => 0, Done(n) => n }
+}
+
+fn step(g: Good, input: Nat) -> Good {
+    match g { Mk(f) => f(input), Done(n) => Done(n) }
+}
+
+fn main() -> Nat {
+    let g = Mk(fn(n: Nat) => Done(n + 1));
+    value(step(g, 41))
+}

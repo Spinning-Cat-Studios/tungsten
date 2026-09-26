@@ -8,13 +8,13 @@ use driver::ffi::{List, Nil, Cons};
 use elab::env::{
     Env, env_add_import, env_current_module_contents,
     ElabModulePath, elab_module_path_to_string,
-    Import, import_new, import_list_lookup, MaybeImport, NoImport, SomeImport
+    Import, import_new, module_contents_lookup_import, MaybeImport, NoImport, SomeImport
 };
 use elab::items::result::{
     ElabContext, elab_context_with_env, elab_context_add_error
 };
 use elab::error::{
-    ElabError, elab_error_duplicate_import
+    ElabError, DuplicateImportSites, elab_error_duplicate_import
 };
 use elab::items::imports::{UseScope, ImportNames};
 
@@ -39,7 +39,7 @@ pub fn check_duplicate_and_add(
     scope: UseScope
 ) -> ElabContext {
     let contents = env_current_module_contents(ctx.env);
-    match import_list_lookup(contents.imports, names.local) {
+    match module_contents_lookup_import(contents, names.local) {
         SomeImport(existing) =>
             if existing.source_name == names.source {
                 // Same item imported again (possibly from a different path) — skip
@@ -47,10 +47,15 @@ pub fn check_duplicate_and_add(
             } else {
                 let first_module = elab_module_path_to_string(existing.source_path);
                 let second_module = elab_module_path_to_string(full_path);
-                let err = elab_error_duplicate_import(
-                    names.local, names.source, existing.import_span, scope.span,
-                    first_module, second_module
-                );
+                let sites: DuplicateImportSites = {
+                    name: names.local,
+                    source_name: names.source,
+                    first_span: existing.import_span,
+                    second_span: scope.span,
+                    first_module: first_module,
+                    second_module: second_module
+                };
+                let err = elab_error_duplicate_import(sites);
                 elab_context_add_error(ctx, err)
             },
         NoImport() =>
@@ -96,7 +101,7 @@ fn try_add_glob_import(
     span: Span
 ) -> ElabContext {
     let contents = env_current_module_contents(ctx.env);
-    match import_list_lookup(contents.imports, name) {
+    match module_contents_lookup_import(contents, name) {
         SomeImport(existing) =>
             // Name already imported — skip silently.
             // In the bootstrap, glob imports skip if the name is already

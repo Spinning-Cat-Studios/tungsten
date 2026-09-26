@@ -37,6 +37,26 @@ pub fn record_field_lookup(fields: List<RecordFieldInfo>, name: String) -> Maybe
     }
 }
 
+/// Look up a field by its canonical `index` in a record field list.
+///
+/// **The list is not in index order, and a consumer that counts places in it
+/// gets the mirror-image field** (ADR 7.9.26b D1). `elaborate_record_body`
+/// returns `field_info` newest-first — its own header says so — so position `i`
+/// holds field `n-1-i`. Every consumer that wants field `i` therefore asks for
+/// it by index, exactly as `project_from_type_info` already does; that is the
+/// one ordering, and list position is not a second one.
+pub fn record_field_at_index(fields: List<RecordFieldInfo>, index: Nat) -> MaybeRecordField {
+    match fields {
+        Nil() => NoRecordField,
+        Cons(field, rest) =>
+            if field.index == index {
+                SomeRecordField(field)
+            } else {
+                record_field_at_index(rest, index)
+            }
+    }
+}
+
 /// Optional single record field result.
 pub type MaybeRecordField =
     | NoRecordField
@@ -93,7 +113,7 @@ pub fn type_def_info_param_at(info: TypeDefInfo, index: Nat) -> String {
 
 /// Check if a type definition is a stub (created by populate_module_info).
 /// Stubs use kind=0 (from populate_type_stubs) or kind=INVALID_HANDLE
-/// (from register_type_stub in Phase 1a). Both indicate the type body
+/// (from register_type_stub in Type-Name Registration). Both indicate the type body
 /// has not been elaborated yet.
 pub fn type_def_is_stub(info: TypeDefInfo) -> Bool {
     if info.kind == STUB_KIND_UNSET() {
@@ -154,6 +174,32 @@ pub type MaybeValueDef =
     | SomeValueDef(ValueDefInfo)
 
 /// Look up a value definition by name.
+///
+/// **This scan stays linear on purpose — do not index it (ADR 5.8.26c).**
+/// It profiles as the #1 symbol of the self-compiled check (23.93%, ≈ 0.80 s
+/// of 3.34 s on 2026-08-05), which makes it look exactly like the two scans
+/// ADRs 21.7.26c and 5.8.26b indexed for 5.2× and 2.0×. It is not the same
+/// case, and the difference is the **insert:lookup ratio**: one check of
+/// `src/compiler/main.tg` performs **1,884,858** `module_contents_add_value`
+/// calls against **44,643** lookup *operations* — **42 inserts per lookup**,
+/// where imports are lookup-dominated.
+///
+/// **If you re-measure that ratio, do not count entries to THIS function.**
+/// It is self-recursive, so an entry counter reports cons cells *walked*, not
+/// lookups — on a ~2,100-entry list that is ~10⁷–10⁸, which reads
+/// lookup-heavy and inverts the conclusion below. Count at the four call sites
+/// instead (`env/resolve.tg`, `env/resolve_path.tg`,
+/// `items/imports/lookup.tg`). The `44,643` was measured on a
+/// `module_contents_lookup_value` wrapper that existed only in the reverted
+/// indexed build and is not in this tree (ADR 5.8.26c §6.3).
+///
+/// Swapping this list for a `StrMap` index was implemented and measured. The
+/// scan vanished from the profile and the run got **1.47× SLOWER** (3.94 s →
+/// 5.80 s wall, RSS 2.58 → 5.23 GiB): each insert stopped costing one `Cons`
+/// and started costing an O(log n) *persistent* AVL rebuild (~11 fresh nodes),
+/// so 0.80 s of scanning became 1.62 s of index maintenance to serve lookups
+/// worth 0.014 s. The change was reverted. See ADR 5.8.26c §6.3 — and note
+/// the lever it identifies is the 1.88 M inserts, not the data structure.
 pub fn value_def_list_lookup(list: List<ValueDefInfo>, name: String) -> MaybeValueDef {
     
     match list {

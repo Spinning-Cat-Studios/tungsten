@@ -12,7 +12,8 @@ mod strings;
 
 pub(super) use adt::{type_of_adt_construct, type_of_adt_match};
 pub(super) use arithmetic::{
-    type_of_bool_binop, type_of_bool_not, type_of_nat_binop, type_of_nat_cmp,
+    type_of_bool_binop, type_of_bool_not, type_of_int_bin, type_of_int_neg, type_of_int_to_nat,
+    type_of_nat_binop, type_of_nat_cmp, type_of_nat_to_int,
 };
 pub(super) use control_flow::type_of_return;
 pub(super) use recursion::{type_of_fix, type_of_fold, type_of_subst, type_of_unfold};

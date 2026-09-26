@@ -1,0 +1,86 @@
+// src/compiler/elab/ffi/termination.tg
+// Bindings for the termination mirror (ADR 19.8.26d §2.2).
+//
+// The soundness RULE is not reimplemented here. Both compilers call one
+// `termination::analyze_with_carried` in `tungsten_core` — the *carried* form,
+// never the `analyze` wrapper, which drops the channel this seam is built on.
+// What crosses is the definition environment the rule runs over.
+//
+// ## The protocol, as a grammar
+//
+//   reset ( note_item )* ( declare )* ( add_def )* plan ( add_def )* check
+//
+// The definition stream is walked TWICE, and that is the design rather than an
+// accident. `DefView` borrows a whole `Term`, so marshalling every definition
+// at once and holding it live measured +587 MiB on `src/compiler/main.tg`
+// (ADR 19.8.26d P0) — of which 91.6% was terms, held for an analysis that
+// needs a real term only inside a recursive component. So the first pass
+// reduces each definition to the name sets the occurrence graph and taint need
+// and DROPS it, `plan` finds the recursive components, and the second pass
+// retains only those.
+//
+// `declare` must come before any `add_def`: mention sets are filtered against
+// the declared names, so a definition reduced before its callees were declared
+// would record no edge to them.
+//
+// Every departure from the grammar RETURNS FALSE and records a message for
+// `tg_get_last_error` — none is silently ignored, because a dropped definition
+// is a program that passes the termination gate only because the offending
+// recursion never arrived.
+
+use elab::ffi::{TermHandle, TypeHandle};
+
+// ===========================================================================
+// REGISTRATION (five externs)
+// ===========================================================================
+
+// Start a fresh environment, discarding the previous program's definitions,
+// its plan and its rejections.
+pub extern "C" fn tg_termination_reset() -> Unit
+
+// Note one item's attributes and role. `name` and `decreasing` are C-string
+// pointers; `decreasing` is 0 (a NULL pointer) when the item carries no
+// `#[decreasing(arg)]`. Unlike an arena handle, address 0 is never a valid
+// string, so NULL is the honest spelling of "absent" here.
+pub extern "C" fn tg_termination_note_item(
+    name: Nat, partial: Bool, decreasing: Nat, proof: Bool
+) -> Bool
+
+// Declare one definition name, fixing the node set.
+pub extern "C" fn tg_termination_declare(name: Nat) -> Bool
+
+// Offer one definition's payload: reduced and dropped before `plan`, retained
+// if the plan wants it after.
+pub extern "C" fn tg_termination_add_def(
+    name: Nat, ty: TypeHandle, term: TermHandle
+) -> Bool
+
+// Close the reduction stream; returns how many definitions the plan retains,
+// which is 0 when `with_descent` is false and only the taint half is wanted.
+pub extern "C" fn tg_termination_plan(with_descent: Bool) -> Nat
+
+// ===========================================================================
+// READERS (three)
+// ===========================================================================
+
+// Run the analysis; returns the rejection count.
+pub extern "C" fn tg_termination_check() -> Nat
+
+// How many rejections the last check found.
+pub extern "C" fn tg_termination_failure_count() -> Nat
+
+// The i-th rejection, as a C string holding "<kind>\n<function>\n<message>".
+//
+// Indexed rather than handle-returning because one program can fail in several
+// places: a single-handle return would render the first and drop the rest.
+pub extern "C" fn tg_termination_failure_render(index: Nat) -> Nat
+
+// ===========================================================================
+// WIRE KINDS
+// ===========================================================================
+
+// The `<kind>` field of a rendered rejection. The split is the bootstrap's:
+// "this recursion does not descend" and "this proof reaches a partial
+// constant" are different repairs, so they are different diagnostics.
+pub fn TERMINATION_KIND_NO_DESCENT() -> String { "0" }
+pub fn TERMINATION_KIND_PARTIAL_IN_PROOF() -> String { "1" }

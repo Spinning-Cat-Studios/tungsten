@@ -1,0 +1,58 @@
+// Unit tests for driver/util/strings/slice.tg (ADR 19.8.26c AC7).
+//
+// Type-annotation tests: cost 3 (check-only, no LLVM). `assert_eq_string` is
+// deliberately ABSENT: `tg_string_slice` is not in the evaluator's executable
+// set (ADR 19.8.26c D4), so a runtime assertion on any of these would go
+// silently Stuck and the runner would report `ASSERTED NOTHING`. The typed
+// let-bindings below discharge at elaboration; the boundary VALUES (clamping,
+// separator-absent) are enumerated against the runtime contract in the ADR's
+// R1 mitigation, because no cheap tier can execute them until the evaluator
+// registers the string family (D4's successor).
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::util::strings::{string_slice, string_split_once};
+
+// ---------------------------------------------------------------------------
+// string_slice — [start, end), both ends clamped by the runtime
+// ---------------------------------------------------------------------------
+
+pub fn test_string_slice_type() -> Unit {
+    let s: String = string_slice("hello", 1, 3);
+    let _ = s;
+}
+
+pub fn test_string_slice_clamped_end_type() -> Unit {
+    // end > len: the runtime clamps rather than trapping, so this is a value
+    // question, not a type one — the binding still elaborates at String.
+    let s: String = string_slice("hi", 0, 99);
+    let _ = s;
+}
+
+pub fn test_string_slice_start_past_end_type() -> Unit {
+    // start > end: clamped to the empty slice.
+    let s: String = string_slice("hi", 5, 2);
+    let _ = s;
+}
+
+// ---------------------------------------------------------------------------
+// string_split_once — tuple return, separator-absent contract (D6)
+// ---------------------------------------------------------------------------
+
+pub fn test_string_split_once_tuple_type() -> Unit {
+    let parts: (String, String) = string_split_once("name\nmessage", 10);
+    let _ = parts;
+}
+
+pub fn test_string_split_once_absent_type() -> Unit {
+    // Separator absent: (whole, "") per D6 — same type either way.
+    let parts: (String, String) = string_split_once("no-newline-here", 10);
+    let (whole, rest) = parts;
+    let w: String = whole;
+    let r: String = rest;
+    let _ = w;
+    let _ = r;
+}

@@ -1,6 +1,13 @@
 // src/compiler/elab/exprs/apply/app/mod.tg
 // Function application elaboration.
 // Produces both Core terms (TermHandle) and CodegenIR in lockstep.
+//
+// The CodegenIR half is built and then DISCARDED by the driver:
+// `driver/pipeline/compile.tg`'s `run_compile` type-checks with the self-hosted
+// elaborator for diagnostics only and delegates codegen to the bootstrap
+// binary, so nothing built here reaches a produced binary. See
+// `elab/cir/types.tg`'s header for what does consume these constructors
+// (ADR 3.9.26a).
 
 pub mod type_app;
 pub mod type_inference;
@@ -33,6 +40,9 @@ use elab::cir::{
 use elab::exprs::apply::forall_inference::{apply_forall_arg, ApplyCtx};
 use elab::exprs::apply::expect_type::{is_simple_path_named, handle_expect_type};
 use elab::exprs::apply::expect_error::{handle_expect_error};
+use elab::exprs::apply::compare::{handle_compare};
+use elab::exprs::apply::substring::{handle_substring};
+use elab::exprs::apply::operators::int_literals::{handle_to_int, handle_from_int};
 
 // Import synth/check from parent module for mutual recursion
 use elab::exprs::{synth, check};
@@ -42,12 +52,36 @@ use elab::exprs::{synth, check};
 // ===========================================================================
 
 /// Synthesize a function application.
+///
+/// **This interception list is SHORTER than the bootstrap's, and the gap is a
+/// class of defect rather than a cosmetic difference** (ADR 20.8.26c).
+/// `try_elab_special_application` (`bootstrap/src/elaborate/exprs/application.rs`)
+/// also intercepts `ref`, `get`, `set`, `char_at` and `string_len`; here those
+/// resolve by ordinary bare-name lookup instead. Where a `.tg` definition
+/// carries one of those names, the two compilers elaborate the same call to
+/// different things, with no diagnostic on either side — which is exactly what
+/// happened to `substring`, intercepted below since 20.8.26c precisely because
+/// its `.tg` fallback read the third argument as an end index where the builtin
+/// reads a length.
+///
+/// **Adding a name to either table without the other re-opens that class**, and
+/// `selfhost-conformance --interception-tables` fails when one does: the
+/// remaining asymmetries are declared, with the condition that keeps each one
+/// safe, in `tungsten_core::builtins::DECLARED_ASYMMETRIES`.
 pub fn synth_app(env: Env, func: Expr, args: List<Expr>, span: Span) -> ElabExprResult {
     // Check for expect_type / expect_error builtins before normal elaboration
     if is_simple_path_named(func, "expect_type") {
         handle_expect_type(env, args, span)
     } else if is_simple_path_named(func, "expect_error") {
         handle_expect_error(env, args, span)
+    } else if is_simple_path_named(func, "compare") {
+        handle_compare(env, args, span)
+    } else if is_simple_path_named(func, "substring") {
+        handle_substring(env, args, span)
+    } else if is_simple_path_named(func, "to_int") {
+        handle_to_int(env, args, span)
+    } else if is_simple_path_named(func, "from_int") {
+        handle_from_int(env, args, span)
     } else {
         // Synthesize function type
         match synth(env, func) {
@@ -61,6 +95,10 @@ pub fn synth_app(env: Env, func: Expr, args: List<Expr>, span: Span) -> ElabExpr
 }
 
 /// Apply a list of arguments to a function term.
+// Partial (ADR 11.8.26b): this 202-member SCC exceeds the descent assignment-
+// search ceiling; resolving it needs size-change analysis, which Non-Goals
+// defers to v2.1. Executable compiler code, reached by no proof.
+#[partial]
 fn apply_args(
     env: Env,
     func: TermInfo,

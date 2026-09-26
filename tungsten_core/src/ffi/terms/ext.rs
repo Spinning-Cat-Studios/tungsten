@@ -1,12 +1,13 @@
 //! Extended term constructors for FFI (case, fold/unfold, polymorphism, refs, etc.)
+//!
+//! All constructors are O(1) node pushes (ADR 2.7.26a §4).
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
-use crate::terms::Term;
-
-use super::core::tg_term_lambda;
-use crate::ffi::{with_arena, TermHandle, TypeHandle, INVALID_HANDLE};
+use super::nodes::{materialize_term, TermNode};
+use super::{valid_terms, valid_types};
+use crate::ffi::{with_arena, with_arena_ref, TermHandle, TypeHandle, INVALID_HANDLE};
 
 // ============================================================================
 // Sum Type and Pattern Matching (Phase 3C-5)
@@ -37,24 +38,15 @@ pub unsafe extern "C" fn tg_term_case(
     };
 
     with_arena!(|arena| {
-        let scrutinee = match arena.get_term(scrutinee) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let left_body = match arena.get_term(left_body) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let right_body = match arena.get_term(right_body) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::Case(
-            Box::new(scrutinee),
+        if !valid_terms(arena, &[scrutinee, left_body, right_body]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Case(
+            scrutinee,
             left_var_str.to_owned(),
-            Box::new(left_body),
+            left_body,
             right_var_str.to_owned(),
-            Box::new(right_body),
+            right_body,
         ))
     })
 }
@@ -71,15 +63,10 @@ pub unsafe extern "C" fn tg_term_case(
 #[no_mangle]
 pub extern "C" fn tg_term_fold(mu_ty: TypeHandle, t: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let ty = match arena.get_type(mu_ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t = match arena.get_term(t) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::Fold(ty, Box::new(t)))
+        if !valid_types(arena, &[mu_ty]) || !valid_terms(arena, &[t]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Fold(mu_ty, t))
     })
 }
 
@@ -91,15 +78,10 @@ pub extern "C" fn tg_term_fold(mu_ty: TypeHandle, t: TermHandle) -> TermHandle {
 #[no_mangle]
 pub extern "C" fn tg_term_unfold(mu_ty: TypeHandle, t: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let ty = match arena.get_type(mu_ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t = match arena.get_term(t) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::Unfold(ty, Box::new(t)))
+        if !valid_types(arena, &[mu_ty]) || !valid_terms(arena, &[t]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Unfold(mu_ty, t))
     })
 }
 
@@ -122,11 +104,10 @@ pub unsafe extern "C" fn tg_term_type_abs(ty_var: *const c_char, body: TermHandl
     };
 
     with_arena!(|arena| {
-        let body = match arena.get_term(body) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::TyAbs(ty_var_str.to_owned(), Box::new(body)))
+        if !valid_terms(arena, &[body]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::TyAbs(ty_var_str.to_owned(), body))
     })
 }
 
@@ -134,15 +115,10 @@ pub unsafe extern "C" fn tg_term_type_abs(ty_var: *const c_char, body: TermHandl
 #[no_mangle]
 pub extern "C" fn tg_term_type_app(t: TermHandle, ty: TypeHandle) -> TermHandle {
     with_arena!(|arena| {
-        let t = match arena.get_term(t) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::TyApp(Box::new(t), ty))
+        if !valid_terms(arena, &[t]) || !valid_types(arena, &[ty]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::TyApp(t, ty))
     })
 }
 
@@ -154,11 +130,10 @@ pub extern "C" fn tg_term_type_app(t: TermHandle, ty: TypeHandle) -> TermHandle 
 #[no_mangle]
 pub extern "C" fn tg_term_ref_new(v: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let v = match arena.get_term(v) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::RefNew(Box::new(v)))
+        if !valid_terms(arena, &[v]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::RefNew(v))
     })
 }
 
@@ -166,11 +141,10 @@ pub extern "C" fn tg_term_ref_new(v: TermHandle) -> TermHandle {
 #[no_mangle]
 pub extern "C" fn tg_term_ref_get(r: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let r = match arena.get_term(r) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::RefGet(Box::new(r)))
+        if !valid_terms(arena, &[r]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::RefGet(r))
     })
 }
 
@@ -178,15 +152,10 @@ pub extern "C" fn tg_term_ref_get(r: TermHandle) -> TermHandle {
 #[no_mangle]
 pub extern "C" fn tg_term_ref_set(r: TermHandle, v: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let r = match arena.get_term(r) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let v = match arena.get_term(v) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::RefSet(Box::new(r), Box::new(v)))
+        if !valid_terms(arena, &[r, v]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::RefSet(r, v))
     })
 }
 
@@ -195,18 +164,16 @@ pub extern "C" fn tg_term_ref_set(r: TermHandle, v: TermHandle) -> TermHandle {
 // ============================================================================
 
 /// Check if two terms are equal (structurally/α-equivalent)
+///
+/// Materializes both sides — term equality is a cold path (Eq-type proofs),
+/// unlike `tg_types_equal` which runs on the node DAG.
 #[no_mangle]
 pub extern "C" fn tg_terms_equal(t1: TermHandle, t2: TermHandle) -> bool {
-    with_arena!(|arena| {
-        let t1 = match arena.get_term(t1) {
-            Some(t) => t,
-            None => return false,
-        };
-        let t2 = match arena.get_term(t2) {
-            Some(t) => t,
-            None => return false,
-        };
-        t1 == t2
+    with_arena_ref!(|arena| {
+        match (materialize_term(arena, t1), materialize_term(arena, t2)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
     })
 }
 
@@ -222,7 +189,7 @@ pub unsafe extern "C" fn tg_term_abs(
     ty: TypeHandle,
     body: TermHandle,
 ) -> TermHandle {
-    tg_term_lambda(var_name, ty, body)
+    super::core::tg_term_lambda(var_name, ty, body)
 }
 
 /// Construct a sorry term (placeholder for incomplete proofs).
@@ -231,7 +198,7 @@ pub unsafe extern "C" fn tg_term_abs(
 #[no_mangle]
 pub extern "C" fn tg_term_sorry(_ty: TypeHandle) -> TermHandle {
     // Note: The type argument is ignored - Term::Sorry doesn't carry a type
-    with_arena!(|arena| arena.alloc_term(Term::Sorry))
+    with_arena!(|arena| arena.alloc_term_node(TermNode::Sorry))
 }
 
 /// Construct an early return term (ADR 13.5.26d).
@@ -240,10 +207,9 @@ pub extern "C" fn tg_term_sorry(_ty: TypeHandle) -> TermHandle {
 #[no_mangle]
 pub extern "C" fn tg_term_return(inner: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let inner_term = match arena.get_term(inner) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::early_return(inner_term))
+        if !valid_terms(arena, &[inner]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Return(inner))
     })
 }

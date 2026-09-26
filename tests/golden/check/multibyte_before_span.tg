@@ -1,0 +1,14 @@
+// Golden test (ADR 24.9.26b): spans are byte offsets — this em-dash is three
+// bytes and one character, so a character-indexed renderer shifts every later
+// label right. Both W0001 labels below must sit under their duplicate literal.
+fn earlier_line(n: Int) -> Nat {
+    match n {
+        3 => 1,
+        1 | 3 => 2,
+        _ => 3
+    }
+}
+
+fn same_line(n: Int) -> String {
+    match n { 1 => "é—", 1 => "x", _ => "y" }
+}

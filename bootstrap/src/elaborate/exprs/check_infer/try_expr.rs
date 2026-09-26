@@ -173,6 +173,9 @@ impl<'a> Elaborator<'a> {
             }
         }
 
+        // Defensive: the `?` paths reject non-Result/Option operands with
+        // E0040 (by name and shape) before asking for the success type —
+        // uncoded by design (ADR 15.8.26b).
         Err(ElabError::new(
             Span::new(0, 0),
             ElabErrorKind::Other(format!("cannot extract success type from `{}`", type_name)),

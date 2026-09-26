@@ -1,0 +1,18 @@
+// Rejected: `type Rose = Node(Wrap<Rose>)` hides the recursion under a
+// generic parameter, and every `match` on it is refused.
+// Accepted: a non-generic intermediate type gives the recursion a
+// concrete constructor to stop at.
+type Rose = Node(Nat, RoseKids)
+type RoseKids = NoKids | Kid(Rose, RoseKids)
+
+fn size(r: Rose) -> Nat {
+    match r { Node(v, kids) => 1 + size_kids(kids) }
+}
+
+fn size_kids(ks: RoseKids) -> Nat {
+    match ks { NoKids => 0, Kid(r, rest) => size(r) + size_kids(rest) }
+}
+
+fn main() -> Nat {
+    size(Node(1, Kid(Node(2, NoKids), Kid(Node(3, NoKids), NoKids))))
+}

@@ -1,0 +1,68 @@
+// tests/selfcompiled_stored_generics/field_tree.tg
+// ADR 21.7.26k (D3): tungsten1-run regression battery, L1-matrix mirror.
+// This file: Tree (fresh k=2 generic — the StrMap shape) stored in record
+// FIELD position, across all four argument categories. Every one of these
+// cells failed pre-fix on L1 (ADR 21.7.26e: 10/16 planned cells failing,
+// all Tree cells among them).
+
+pub type List<T> = Nil | Cons(T, List<T>)
+
+pub type Tree<V> =
+    | TreeLeaf
+    | TreeNode(Tree<V>, String, V, Tree<V>, Nat)
+
+pub fn touch_tree<X>(t: Tree<X>) -> Tree<X> { t }
+
+type Rec = { count: Nat, label: String }
+
+type Choice =
+    | ChoiceNat(Nat)
+    | ChoiceStr(String)
+
+// Cell: field × Tree × builtin (Nat)
+type FieldTreeNat = { stored: Tree<Nat> }
+
+fn project_tree_nat(s: FieldTreeNat) -> Tree<Nat> { s.stored }
+
+fn roundtrip_tree_nat(s: FieldTreeNat) -> FieldTreeNat {
+    { stored: touch_tree(s.stored) }
+}
+
+// Cell: field × Tree × record (the exact StrMap<CtorBucket> shape)
+type FieldTreeRec = { stored: Tree<Rec> }
+
+fn project_tree_rec(s: FieldTreeRec) -> Tree<Rec> { s.stored }
+
+fn roundtrip_tree_rec(s: FieldTreeRec) -> FieldTreeRec {
+    { stored: touch_tree(s.stored) }
+}
+
+// Cell: field × Tree × 2-ctor sum
+type FieldTreeChoice = { stored: Tree<Choice> }
+
+fn project_tree_choice(s: FieldTreeChoice) -> Tree<Choice> { s.stored }
+
+fn roundtrip_tree_choice(s: FieldTreeChoice) -> FieldTreeChoice {
+    { stored: touch_tree(s.stored) }
+}
+
+// Cell: field × Tree × nested (List<Rec> argument)
+type FieldTreeNested = { stored: Tree<List<Rec>> }
+
+fn project_tree_nested(s: FieldTreeNested) -> Tree<List<Rec>> { s.stored }
+
+fn roundtrip_tree_nested(s: FieldTreeNested) -> FieldTreeNested {
+    { stored: touch_tree(s.stored) }
+}
+
+pub fn main() -> Nat {
+    let nat_cell: FieldTreeNat = { stored: TreeLeaf };
+    let rec_cell: FieldTreeRec = { stored: TreeLeaf };
+    let choice_cell: FieldTreeChoice = { stored: TreeLeaf };
+    let nested_cell: FieldTreeNested = { stored: TreeLeaf };
+    let _n = project_tree_nat(roundtrip_tree_nat(nat_cell));
+    let _r = project_tree_rec(roundtrip_tree_rec(rec_cell));
+    let _c = project_tree_choice(roundtrip_tree_choice(choice_cell));
+    let _x = project_tree_nested(roundtrip_tree_nested(nested_cell));
+    0
+}

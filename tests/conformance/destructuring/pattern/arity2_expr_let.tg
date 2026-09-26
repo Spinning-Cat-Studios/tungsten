@@ -1,0 +1,13 @@
+// SUBJECT — arity 2, expression position (ADR 4.9.26c; the shape of ADR
+// 3.9.26g §1.4).
+//
+// A tuple-pattern `let` in EXPRESSION position parses to `ExprLet` and takes
+// `synth_let_tuple`; the same destructuring as a block statement takes a
+// different path entirely. Arity 2 is where "project every field as
+// `fst (snd^i)`" first asks for `fst` of a scalar: `snd p` is already `Nat`.
+
+pub fn main() -> Nat {
+    let p = (3, 4);
+    let r = let (a, b) = p; a * 10 + b;
+    r
+}

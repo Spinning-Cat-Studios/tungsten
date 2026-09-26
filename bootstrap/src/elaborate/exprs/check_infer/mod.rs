@@ -7,7 +7,7 @@ use tungsten_core::{Term, TermSpan, Type};
 use super::blocks::LetCont;
 
 use crate::elaborate::env::{ModulePath, PathResolutionError, ResolvedValue};
-use crate::elaborate::error::{ElabError, ElabErrorKind, ExpectedContext};
+use crate::elaborate::error::{ElabError, ElabErrorKind};
 use crate::elaborate::{ElabResult, Elaborator};
 
 impl<'a> Elaborator<'a> {
@@ -122,8 +122,13 @@ impl<'a> Elaborator<'a> {
                 span,
             } => self.elab_record_literal(spread.as_deref(), fields, expected, *span),
 
-            // Sorry: accepts any expected type (axiom-like hole)
-            Expr::Sorry(_) => Ok(Term::Sorry),
+            // Sorry: accepts any expected type (axiom-like hole). Wrapped in
+            // its span so the term itself says the author wrote it — the
+            // lowering's own holes are bare (ADR 18.9.26g).
+            Expr::Sorry(sorry) => Ok(Term::spanned(
+                Term::Sorry,
+                TermSpan::new(sorry.span.start, sorry.span.end),
+            )),
 
             // Refl: check against equality type (ADR 21.5.26d)
             Expr::Refl(span) => self.check_refl(*span, expected),
@@ -159,6 +164,15 @@ impl<'a> Elaborator<'a> {
                 let (term, _) = self.elab_try_block(body, Some(expected), *span)?;
                 Ok(term)
             }
+
+            // Numerics against `Int`/`Nat` are expected-type-driven (ADR
+            // 14.9.26c): a literal, a negated literal, an arithmetic expression.
+            Expr::IntLiteral(..) | Expr::Unary(..) | Expr::Binary(..) => {
+                self.check_numeric(expr, expected)
+            }
+            // Parentheses are transparent to checking as they are to inference,
+            // so `(3 - 5)` against `Int` reaches the numeric arms above.
+            Expr::Paren(inner, _) => self.check(inner, expected),
 
             // Default: infer type, check it matches expected
             _ => {
@@ -319,6 +333,8 @@ impl<'a> Elaborator<'a> {
             Expr::Try(inner, span) => self.elab_try(inner, *span),
             Expr::TryBlock(body, span) => self.elab_try_block(body, None, *span),
             Expr::Paren(inner, _span) => self.infer(inner),
+            // Defensive: the parser aborts before elaboration when it emitted
+            // an `Error` placeholder — uncoded by design (ADR 15.8.26b).
             Expr::Error(span) => Err(ElabError::new(
                 *span,
                 ElabErrorKind::Other("syntax error".to_string()),
@@ -326,78 +342,11 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    /// Infer the type of an if-then-else expression.
-    fn infer_if(
-        &mut self,
-        cond: &Expr,
-        then_branch: &Expr,
-        else_branch: &Expr,
-    ) -> ElabResult<(Term, Type)> {
-        let cond_term = self.check(cond, &Type::Bool)?;
-        let (then_term, then_ty) = self.infer(then_branch)?;
-        // Push context so errors in else branch reference the then branch
-        self.push_context(ExpectedContext::branch_unification(then_branch.span()));
-        let else_term = self.check(else_branch, &then_ty)?;
-        self.pop_context();
-        Ok((Term::if_then_else(cond_term, then_term, else_term), then_ty))
-    }
-
-    /// Check an if-then-else against an expected type.
-    fn check_if(
-        &mut self,
-        cond: &Expr,
-        then_branch: &Expr,
-        else_branch: &Expr,
-        expected: &Type,
-    ) -> ElabResult<Term> {
-        let cond_term = self.check(cond, &Type::Bool)?;
-        let then_term = self.check(then_branch, expected)?;
-        let else_term = self.check(else_branch, expected)?;
-        Ok(Term::if_then_else(cond_term, then_term, else_term))
-    }
-
-    /// Infer the type of an annotated expression.
-    fn infer_annot(&mut self, inner: &Expr, ty: &crate::ast::TypeExpr) -> ElabResult<(Term, Type)> {
-        let expected = self.elab_type(ty)?;
-        let term = self.check(inner, &expected)?;
-        Ok((term, expected))
-    }
-
-    /// Elaborate a `return` expression (ADR 13.5.26d).
-    ///
-    /// - `return e` checks `e` against the current function's return type
-    /// - bare `return` is `return ()`, valid only when return type is Unit
-    /// - Type of `return e` is ⊥ (Void)
-    fn elab_return(
-        &mut self,
-        inner: Option<&Expr>,
-        span: crate::span::Span,
-    ) -> ElabResult<(Term, Type)> {
-        let ret_ty = match &self.current_return_type {
-            Some(ty) => ty.clone(),
-            None => {
-                return Err(ElabError::new(
-                    span,
-                    ElabErrorKind::Other("return outside of a function body".to_string()),
-                ));
-            }
-        };
-
-        let inner_term = if let Some(expr) = inner {
-            self.check(expr, &ret_ty)?
-        } else {
-            // Bare `return` — only valid when return type is Unit
-            if ret_ty != Type::Unit {
-                return Err(self.type_mismatch_error(span, ret_ty, Type::Unit));
-            }
-            Term::Unit
-        };
-
-        Ok((Term::early_return(inner_term), Type::Void))
-    }
+    // `infer_if` / `check_if` / `infer_annot` / `elab_return`: `control.rs`.
 }
 
 mod combinators;
+mod control;
 mod natind;
 mod paths;
 mod refl;

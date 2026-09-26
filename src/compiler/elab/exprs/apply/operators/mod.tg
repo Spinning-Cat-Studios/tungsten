@@ -1,0 +1,193 @@
+// src/compiler/elab/exprs/apply/operators/mod.tg
+// Binary and unary operator elaboration.
+// Produces both Core terms (TermHandle) and CodegenIR in lockstep.
+//
+// `operators.tg` became `operators/` under ADR 14.9.26c: `int.tg` holds the
+// `Int` half and the operand-type dispatch for arithmetic and ordering, this
+// file the boolean, string, pipe and unary dispatch.
+
+pub mod int;
+pub mod int_literals;
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, ExprApp,
+    BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod,
+    OpEq, OpNe, OpLt, OpLe, OpGt, OpGe,
+    OpAnd, OpOr, OpPipe, OpConcat,
+    UnaryOp, OpNot, OpNeg,
+    expr_span
+};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_bool_and, tg_term_bool_or, tg_term_bool_not,
+    tg_term_str_concat, tg_term_str_eq,
+    tg_type_nat, tg_type_bool, tg_type_string,
+    tg_types_equal
+};
+use elab::env::Env;
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, elab_expr_binary_type_error, add_expected_because
+};
+use elab::error::{ExpBinaryOperand, ExpUnaryOperand};
+use elab::cir::{
+    CodegenIR,
+    CIRBoolAnd, CIRBoolOr, CIRBoolNot,
+    CIRStrConcat, CIRStrEq
+};
+
+// Import synth/check from parent module for mutual recursion
+use elab::exprs::{synth, check};
+use elab::exprs::apply::equality::{
+    synth_polymorphic_eq, synth_polymorphic_ne
+};
+use elab::exprs::apply::operators::int::{synth_arith};
+use elab::exprs::apply::operators::int_literals::{synth_negation};
+
+// ===========================================================================
+// BINARY OPERATOR DISPATCH
+// ===========================================================================
+
+/// Synthesize a binary operation.
+pub fn synth_binary(
+    env: Env,
+    op: BinOp,
+    left: Expr,
+    right: Expr,
+    span: Span
+) -> ElabExprResult {
+    match op {
+        // Arithmetic: Nat or Int, by operand type (ADR 14.9.26c)
+        OpAdd() => synth_arith(env, op, left, right, span),
+        OpSub() => synth_arith(env, op, left, right, span),
+        OpMul() => synth_arith(env, op, left, right, span),
+        OpDiv() => synth_arith(env, op, left, right, span),
+        OpMod() => synth_arith(env, op, left, right, span),
+
+        // Ordering: Nat or Int -> Bool, by operand type
+        OpLt() => synth_arith(env, op, left, right, span),
+        OpLe() => synth_arith(env, op, left, right, span),
+        OpGt() => synth_arith(env, op, left, right, span),
+        OpGe() => synth_arith(env, op, left, right, span),
+        
+        // Equality: polymorphic - infer from left side
+        OpEq() => synth_polymorphic_eq(env, left, right, span),
+        OpNe() => synth_polymorphic_ne(env, left, right, span),
+        
+        // Logical: Bool -> Bool -> Bool
+        OpAnd() => synth_bool_and(env, left, right, span),
+        OpOr() => synth_bool_or(env, left, right, span),
+        
+        // String: String -> String -> String
+        OpConcat() => synth_str_concat(env, left, right, span),
+        
+        // Pipeline: a |> f  =  f(a)
+        OpPipe() => synth_pipe(env, left, right, span)
+    }
+}
+
+// Arithmetic and ordering (`+ - * / % < <= > >=`) dispatch on the operand
+// type in `operators/int.tg` — `synth_arith` — which holds today's `Nat`
+// nodes byte-for-byte beside the `Int` ones (ADR 14.9.26c).
+
+// ===========================================================================
+// BOOLEAN OPERATIONS: Bool -> Bool -> Bool
+// ===========================================================================
+
+fn synth_bool_and(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, left, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("&&", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            synth_bool_and_right(env2, left_term, left_cir, right, span)
+    }
+}
+
+fn synth_bool_and_right(env: Env, left_term: TermHandle, left_cir: CodegenIR, right: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, right, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("&&", span))),
+        ElabExprOk(env2, right_term, _, right_cir) =>
+            let result_term = tg_term_bool_and(left_term, right_term);
+            let result_cir = CIRBoolAnd(left_cir, right_cir);
+            ElabExprOk(env2, result_term, bool_ty, result_cir)
+    }
+}
+
+fn synth_bool_or(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, left, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("||", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            synth_bool_or_right(env2, left_term, left_cir, right, span)
+    }
+}
+
+fn synth_bool_or_right(env: Env, left_term: TermHandle, left_cir: CodegenIR, right: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, right, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("||", span))),
+        ElabExprOk(env2, right_term, _, right_cir) =>
+            let result_term = tg_term_bool_or(left_term, right_term);
+            let result_cir = CIRBoolOr(left_cir, right_cir);
+            ElabExprOk(env2, result_term, bool_ty, result_cir)
+    }
+}
+
+// ===========================================================================
+// STRING AND OTHER OPERATIONS
+// ===========================================================================
+
+/// Synthesize string concatenation.
+fn synth_str_concat(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    let string_ty = tg_type_string();
+    match check(env, left, string_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("++", span))),
+        ElabExprOk(env2, left_term, _, left_cir) =>
+            synth_str_concat_right(env2, left_term, left_cir, right, span)
+    }
+}
+
+fn synth_str_concat_right(env: Env, left_term: TermHandle, left_cir: CodegenIR, right: Expr, span: Span) -> ElabExprResult {
+    let string_ty = tg_type_string();
+    match check(env, right, string_ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand("++", span))),
+        ElabExprOk(env2, right_term, _, right_cir) =>
+            let result_term = tg_term_str_concat(left_term, right_term);
+            let result_cir = CIRStrConcat(left_cir, right_cir);
+            ElabExprOk(env2, result_term, string_ty, result_cir)
+    }
+}
+
+/// Synthesize pipe operator: a |> f  =  f(a)
+fn synth_pipe(env: Env, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    // Desugar to application: f(a)
+    let app_expr = ExprApp(right, Cons(left, Nil), span);
+    synth(env, app_expr)
+}
+
+// ===========================================================================
+// UNARY OPERATORS
+// ===========================================================================
+
+/// Synthesize a unary operation.
+pub fn synth_unary(env: Env, op: UnaryOp, operand: Expr, span: Span) -> ElabExprResult {
+    match op {
+        OpNot() => synth_unary_not(env, operand, span),
+        // A literal folds to `Int`; an `Int` operand negates; `Nat` is refused.
+        OpNeg() => synth_negation(env, operand, span)
+    }
+}
+
+fn synth_unary_not(env: Env, operand: Expr, span: Span) -> ElabExprResult {
+    let bool_ty = tg_type_bool();
+    match check(env, operand, bool_ty) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, _, operand_cir) =>
+            let result = tg_term_bool_not(term);
+            let result_cir = CIRBoolNot(operand_cir);
+            ElabExprOk(env2, result, bool_ty, result_cir)
+    }
+}

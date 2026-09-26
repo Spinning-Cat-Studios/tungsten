@@ -34,6 +34,10 @@ pub enum Type {
     /// Natural numbers (primitive in Phase 1)
     Nat,
 
+    /// Signed 64-bit integers (ADR 14.9.26c): a primitive beside `Nat`, never
+    /// a re-typing of it — the evaluator dispatches on term shape alone.
+    Int,
+
     /// Unit type - single inhabitant ()
     Unit,
 
@@ -86,7 +90,7 @@ pub enum Type {
     /// `Forest<T>` and `Forest` is still a stub, we store `App("Forest", [T])`
     /// instead of losing the type arguments.
     ///
-    /// This variant is resolved in Phase 1d after all types are elaborated.
+    /// This variant is resolved in Deferred-TyVar Resolution after all types are elaborated.
     /// It should never appear in the final Core output.
     App(String, Vec<Type>),
 
@@ -123,6 +127,7 @@ impl Type {
         match self {
             Type::Bool
             | Type::Nat
+            | Type::Int
             | Type::Unit
             | Type::Void
             | Type::Prop
@@ -205,9 +210,13 @@ impl Type {
     pub fn free_type_vars(&self) -> std::collections::HashSet<TyVar> {
         use std::collections::HashSet;
         match self {
-            Type::Bool | Type::Nat | Type::Unit | Type::Void | Type::Prop | Type::String => {
-                HashSet::new()
-            }
+            Type::Bool
+            | Type::Nat
+            | Type::Int
+            | Type::Unit
+            | Type::Void
+            | Type::Prop
+            | Type::String => HashSet::new(),
 
             Type::TyVar(v) => {
                 let mut set = HashSet::new();
@@ -264,7 +273,13 @@ impl Type {
     #[must_use]
     pub fn is_well_formed(&self, type_vars: &std::collections::HashSet<TyVar>) -> bool {
         match self {
-            Type::Bool | Type::Nat | Type::Unit | Type::Void | Type::Prop | Type::String => true,
+            Type::Bool
+            | Type::Nat
+            | Type::Int
+            | Type::Unit
+            | Type::Void
+            | Type::Prop
+            | Type::String => true,
 
             Type::TyVar(v) => type_vars.contains(v),
 
@@ -299,78 +314,21 @@ impl Type {
         }
     }
 
-    /// Count the total number of nodes in this type tree.
-    #[must_use]
-    pub fn node_count(&self) -> usize {
-        match self {
-            Type::Bool
-            | Type::Nat
-            | Type::Unit
-            | Type::Void
-            | Type::Prop
-            | Type::String
-            | Type::TyVar(_)
-            | Type::Error => 1,
-
-            Type::Arrow(t1, t2) | Type::Product(t1, t2) | Type::Sum(t1, t2) => {
-                1 + t1.node_count() + t2.node_count()
-            }
-
-            Type::Forall(_, body) | Type::Mu(_, body) => 1 + body.node_count(),
-
-            Type::Eq(ty, _, _) => 1 + ty.node_count(),
-
-            Type::Ptr(inner) | Type::Ref(inner) => 1 + inner.node_count(),
-
-            Type::App(_, args) => 1 + args.iter().map(Type::node_count).sum::<usize>(),
-
-            Type::Adt(_, type_args, variants) => {
-                1 + type_args.iter().map(Type::node_count).sum::<usize>()
-                    + variants.iter().map(|(_, p)| p.node_count()).sum::<usize>()
-            }
-        }
-    }
-
-    /// Compute the maximum depth of this type tree.
-    #[must_use]
-    pub fn depth(&self) -> usize {
-        match self {
-            Type::Bool
-            | Type::Nat
-            | Type::Unit
-            | Type::Void
-            | Type::Prop
-            | Type::String
-            | Type::TyVar(_)
-            | Type::Error => 1,
-
-            Type::Arrow(t1, t2) | Type::Product(t1, t2) | Type::Sum(t1, t2) => {
-                1 + t1.depth().max(t2.depth())
-            }
-
-            Type::Forall(_, body) | Type::Mu(_, body) => 1 + body.depth(),
-
-            Type::Eq(ty, _, _) => 1 + ty.depth(),
-
-            Type::Ptr(inner) | Type::Ref(inner) => 1 + inner.depth(),
-
-            Type::App(_, args) => 1 + args.iter().map(Type::depth).max().unwrap_or(0),
-
-            Type::Adt(_, type_args, variants) => {
-                let arg_max = type_args.iter().map(Type::depth).max().unwrap_or(0);
-                let var_max = variants.iter().map(|(_, p)| p.depth()).max().unwrap_or(0);
-                1 + arg_max.max(var_max)
-            }
-        }
-    }
+    // `node_count` / `depth` fold over `children()` in `reconstruction.rs`.
 }
 
 mod constructors;
 mod display;
 mod equality;
+pub mod mu_unfold;
+mod poison;
+pub mod positivity;
+mod primitives; // the one primitive type table (ADR 18.9.26f)
 mod reconstruction;
 mod tyvar_ops;
 pub use equality::types_equal_alpha;
+pub use mu_unfold::unfold_mu_type;
+pub use primitives::PRIMITIVE_TYPES;
 
 #[cfg(test)]
 mod tests;

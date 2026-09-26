@@ -1,0 +1,13 @@
+[E0063] Error: `wrapped` is a proof, so it may not depend on the partial constant `spin`
+   ╭─[tests/golden/error/termination_partial_in_proof.tg:9:1]
+   │
+ 9 │ theorem wrapped(l: Lst): Nat { wrapper(l) }
+   │ ─────────────────────┬─────────────────────  
+   │                      ╰─────────────────────── 
+   │ 
+   │ Help: a proof may not depend on a partial definition — prove the recursion terminates, or state the theorem about a total one
+   │ 
+   │ Note: reaches `spin` (marked `#[partial]`) through wrapper
+───╯
+
+error: aborting due to 1 error

@@ -171,6 +171,10 @@ fn parse_lambda_params_pipe_after_pattern(
 }
 
 /// Finish constructing pipe-delimited lambda parameter and continue.
+// Partial (ADR 11.8.26b): this 129-member SCC exceeds the descent assignment-
+// search ceiling; resolving it needs size-change analysis, which Non-Goals
+// defers to v2.1. Executable compiler code, reached by no proof.
+#[partial]
 fn finish_lambda_params_pipe(
     start_span: Span,
     pat: Pattern,

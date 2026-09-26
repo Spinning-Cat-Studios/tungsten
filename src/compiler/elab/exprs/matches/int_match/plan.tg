@@ -1,0 +1,274 @@
+// src/compiler/elab/exprs/matches/int_match/plan.tg
+// Integer-match planning (ADR 18.9.26e): classify every arm's pattern, find
+// the one unguarded catch-all, and warn about what cannot run — before any
+// body is elaborated. The chain itself is built in `mod.tg`.
+//
+// A duplicate literal, or an arm after the catch-all, warns W0001 on stderr
+// (the route `let`-`else` uses for W0003) and the file still compiles.
+
+use lexer::span::Span;
+use parser::ast::{
+    Pattern, PatWildcard, PatVar, PatLiteral, PatOr,
+    PatLit, PatLitInt, PatLitNat, PatLitNegInt,
+    MatchArm, MaybeExpr, NoExpr, SomeExpr,
+    ident_name, pattern_span
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::ffi::process::eprintln;
+use driver::util::list_reverse;
+use elab::ffi::{TermHandle, tg_term_nat_lit};
+use elab::env::Env;
+use elab::exprs::forms::result::{
+    ElabExprOk, ElabExprErr, ElabExprError, elab_expr_error_coded
+};
+use elab::error::{ErrInexhaustiveMatch, ErrUnsupportedPattern, error_kind_code, error_kind_message};
+use elab::cir::{CodegenIR, CIRNatLit};
+use elab::exprs::apply::operators::int_literals::{check_int_literal, negated_bits};
+
+// ===========================================================================
+// TYPES
+// ===========================================================================
+
+/// A term and its codegen IR, built in lockstep.
+pub type TermCir = { term: TermHandle, cir: CodegenIR }
+
+/// One literal of an arm's pattern: its duplicate key (an `Int`'s
+/// two's-complement bits, so `-0` and `0` are one value), its value, its span.
+pub type IntArmLiteral = { key: Nat, value: TermCir, span: Span }
+
+/// What an arm's pattern tests, before its guard.
+pub type IntArmTest =
+    | IntArmOneOf(List<IntArmLiteral>)
+    | IntArmCatchAll(String)           // the binder; `_` binds nothing
+
+/// An arm that can run, with its classified pattern.
+pub type PlannedArm = { arm: MatchArm, test: IntArmTest }
+pub type IntPlanResult = | IntPlanOk(List<PlannedArm>) | IntPlanErr(ElabExprError)
+
+type IntArmTestResult = | IntArmTestOk(IntArmTest) | IntArmTestErr(ElabExprError)
+type IntLiteralResult = | IntLiteralOk(IntArmLiteral) | IntLiteralErr(ElabExprError)
+type OrLiteralsResult = | OrLiteralsOk(List<IntArmLiteral>) | OrLiteralsErr(ElabExprError)
+
+/// Planning state threaded through the arms: unguarded literal keys seen so far.
+type IntPlanState = { is_int: Bool, seen: List<Nat>, planned: List<PlannedArm>, span: Span }
+
+// ===========================================================================
+// ENTRY
+// ===========================================================================
+
+/// The arms that can run, in source order, ending with the unguarded catch-all.
+pub fn plan_int_match(env: Env, arms: List<MatchArm>, is_int: Bool, span: Span) -> IntPlanResult {
+    let no_keys: List<Nat> = Nil();
+    let no_arms: List<PlannedArm> = Nil();
+    let state: IntPlanState = { is_int: is_int, seen: no_keys, planned: no_arms, span: span };
+    plan_int_arms(env, arms, state)
+}
+
+pub fn missing_catch_all(span: Span) -> ElabExprError {
+    let missing: List<String> = Cons("_", Nil());
+    let kind = ErrInexhaustiveMatch(missing);
+    elab_expr_error_coded(
+        error_kind_message(kind) ++ ": literal patterns cannot cover every integer; add an unguarded `_ =>` arm",
+        span, error_kind_code(kind))
+}
+
+// ===========================================================================
+// CLASSIFICATION
+// ===========================================================================
+
+fn unsupported_pattern(what: String, help: String, span: Span) -> ElabExprError {
+    let kind = ErrUnsupportedPattern(what);
+    elab_expr_error_coded(error_kind_message(kind) ++ "; " ++ help, span, error_kind_code(kind))
+}
+
+/// A literal pattern as a value of the scrutinee's number type.
+fn numeric_literal(env: Env, magnitude: Nat, negated: Bool, is_int: Bool, span: Span) -> IntLiteralResult {
+    if is_int {
+        int_literal(env, magnitude, negated, span)
+    } else if negated {
+        IntLiteralErr(unsupported_pattern("negative literal on a Nat scrutinee",
+            "a `Nat` is never negative; match on an `Int` instead — `match to_int(n) { … }`", span))
+    } else {
+        let value: TermCir = { term: tg_term_nat_lit(magnitude), cir: CIRNatLit(magnitude) };
+        let literal: IntArmLiteral = { key: magnitude, value: value, span: span };
+        IntLiteralOk(literal)
+    }
+}
+
+/// An `Int` literal, range-checked (E0009) as a literal expression is.
+fn int_literal(env: Env, magnitude: Nat, negated: Bool, span: Span) -> IntLiteralResult {
+    match check_int_literal(env, magnitude, negated, span) {
+        ElabExprErr(e) => IntLiteralErr(e),
+        ElabExprOk(_, term, _, cir) =>
+            let value: TermCir = { term: term, cir: cir };
+            let key = if negated { negated_bits(magnitude) } else { magnitude };
+            let literal: IntArmLiteral = { key: key, value: value, span: span };
+            IntLiteralOk(literal)
+    }
+}
+
+fn classify_literal(env: Env, lit: PatLit, is_int: Bool, span: Span) -> IntLiteralResult {
+    match lit {
+        PatLitInt(n) => numeric_literal(env, n, false, is_int, span),
+        PatLitNat(n) => numeric_literal(env, n, false, is_int, span),
+        PatLitNegInt(n) => numeric_literal(env, n, true, is_int, span),
+        _ => IntLiteralErr(unsupported_pattern("non-integer literal in an integer match",
+            "an integer match takes integer literals", span))
+    }
+}
+
+/// Flatten an or-pattern into its literals, accumulated in reverse; any
+/// other alternative refuses — a variable or wildcard is a catch-all in disguise.
+#[partial]
+fn collect_or_literals(env: Env, pattern: Pattern, is_int: Bool, acc: List<IntArmLiteral>) -> OrLiteralsResult {
+    match pattern {
+        PatOr(left, right, _) => collect_or_right(env, collect_or_literals(env, left, is_int, acc), right, is_int),
+        PatLiteral(lit, span) => push_literal(classify_literal(env, lit, is_int, span), acc),
+        PatVar(_) => OrLiteralsErr(catch_all_in_or(pattern_span(pattern))),
+        PatWildcard(_) => OrLiteralsErr(catch_all_in_or(pattern_span(pattern))),
+        _ => OrLiteralsErr(unsupported_pattern("non-literal alternative in an integer or-pattern",
+            "an integer or-pattern takes integer literals", pattern_span(pattern)))
+    }
+}
+
+#[partial]
+fn collect_or_right(env: Env, left: OrLiteralsResult, right: Pattern, is_int: Bool) -> OrLiteralsResult {
+    match left {
+        OrLiteralsErr(e) => OrLiteralsErr(e),
+        OrLiteralsOk(acc) => collect_or_literals(env, right, is_int, acc)
+    }
+}
+
+fn push_literal(result: IntLiteralResult, acc: List<IntArmLiteral>) -> OrLiteralsResult {
+    match result {
+        IntLiteralErr(e) => OrLiteralsErr(e),
+        IntLiteralOk(literal) => OrLiteralsOk(Cons(literal, acc))
+    }
+}
+
+fn catch_all_in_or(span: Span) -> ElabExprError {
+    unsupported_pattern("variable or wildcard inside an or-pattern",
+        "it matches every value, so the or-pattern is a catch-all in disguise; give it an arm of its own", span)
+}
+
+fn classify_pattern(env: Env, pattern: Pattern, is_int: Bool) -> IntArmTestResult {
+    let no_literals: List<IntArmLiteral> = Nil();
+    match pattern {
+        PatWildcard(_) => IntArmTestOk(IntArmCatchAll("_")),
+        PatVar(id) => IntArmTestOk(IntArmCatchAll(ident_name(id))),
+        PatLiteral(_, _) => one_of(collect_or_literals(env, pattern, is_int, no_literals)),
+        PatOr(_, _, _) => one_of(collect_or_literals(env, pattern, is_int, no_literals)),
+        _ => IntArmTestErr(unsupported_pattern("constructor or tuple pattern in an integer match",
+            "an integer match takes literal, variable and wildcard patterns", pattern_span(pattern)))
+    }
+}
+
+fn one_of(result: OrLiteralsResult) -> IntArmTestResult {
+    match result {
+        OrLiteralsErr(e) => IntArmTestErr(e),
+        OrLiteralsOk(literals) => IntArmTestOk(IntArmOneOf(list_reverse(literals)))
+    }
+}
+
+// ===========================================================================
+// THE WALK: stop at the first unguarded catch-all
+// ===========================================================================
+
+#[partial]
+fn plan_int_arms(env: Env, arms: List<MatchArm>, state: IntPlanState) -> IntPlanResult {
+    match arms {
+        Nil() => IntPlanErr(missing_catch_all(state.span)),
+        Cons(arm, rest) => plan_classified(env, arm, classify_pattern(env, arm.pattern, state.is_int), rest, state)
+    }
+}
+
+#[partial]
+fn plan_classified(env: Env, arm: MatchArm, classified: IntArmTestResult, rest: List<MatchArm>, state: IntPlanState) -> IntPlanResult {
+    match classified {
+        IntArmTestErr(e) => IntPlanErr(e),
+        IntArmTestOk(test) =>
+            let _ = warn_duplicates(test, state.seen);
+            let planned: PlannedArm = { arm: arm, test: test };
+            let so_far = Cons(planned, state.planned);
+            if is_catch_all(test) && is_unguarded(arm.guard) {
+                let _ = warn_after_catch_all(rest);
+                IntPlanOk(list_reverse(so_far))
+            } else {
+                let seen = if is_unguarded(arm.guard) { remember_keys(test, state.seen) } else { state.seen };
+                let next: IntPlanState = { is_int: state.is_int, seen: seen, planned: so_far, span: state.span };
+                plan_int_arms(env, rest, next)
+            }
+    }
+}
+
+pub fn is_catch_all(test: IntArmTest) -> Bool {
+    match test {
+        IntArmCatchAll(_) => true,
+        IntArmOneOf(_) => false
+    }
+}
+
+fn is_unguarded(guard: MaybeExpr) -> Bool {
+    match guard {
+        NoExpr() => true,
+        SomeExpr(_) => false
+    }
+}
+
+/// The literal keys an unguarded arm settles: a later arm repeating one is unreachable.
+fn remember_keys(test: IntArmTest, seen: List<Nat>) -> List<Nat> {
+    match test {
+        IntArmCatchAll(_) => seen,
+        IntArmOneOf(literals) => literal_keys(literals, seen)
+    }
+}
+
+fn literal_keys(literals: List<IntArmLiteral>, seen: List<Nat>) -> List<Nat> {
+    match literals {
+        Nil() => seen,
+        Cons(literal, rest) => literal_keys(rest, Cons(literal.key, seen))
+    }
+}
+
+// ===========================================================================
+// W0001
+// ===========================================================================
+
+fn warn_duplicates(test: IntArmTest, seen: List<Nat>) -> Nat {
+    match test {
+        IntArmCatchAll(_) => 0,
+        IntArmOneOf(literals) => warn_each_duplicate(literals, seen)
+    }
+}
+
+fn warn_each_duplicate(literals: List<IntArmLiteral>, seen: List<Nat>) -> Nat {
+    match literals {
+        Nil() => 0,
+        Cons(literal, rest) =>
+            let warned = if key_seen(literal.key, seen) { warn_duplicate(literal) } else { 0 };
+            warned + warn_each_duplicate(rest, seen)
+    }
+}
+
+// Takes the literal so it is not a nullary definition, which the evaluator
+// would treat as a constant and run once.
+fn warn_duplicate(literal: IntArmLiteral) -> Nat {
+    let _ = eprintln("[W0001] warning: unreachable pattern in an integer match: an earlier arm already matches this value");
+    1
+}
+
+fn key_seen(key: Nat, seen: List<Nat>) -> Bool {
+    match seen {
+        Nil() => false,
+        Cons(k, rest) => k == key || key_seen(key, rest)
+    }
+}
+
+fn warn_after_catch_all(rest: List<MatchArm>) -> Nat {
+    match rest {
+        Nil() => 0,
+        Cons(_, more) =>
+            let _ = eprintln("[W0001] warning: unreachable pattern in an integer match: this arm follows a catch-all pattern, which matches all values");
+            1 + warn_after_catch_all(more)
+    }
+}

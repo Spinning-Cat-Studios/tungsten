@@ -1,0 +1,295 @@
+// Unit tests for the self-host `test` verb — discovery and CLI (ADR 7.8.26a),
+// harness-mode detection and the two templates (ADR 7.8.26b).
+//
+// WHY EVERY TEST HERE IS PURE, and none is end to end: the evaluator executes
+// only the externs in `tungsten info eval externs`. A call reaching any other
+// goes silently Stuck — the assertion never runs and `tungsten test` reports
+// `ok` having asserted nothing (ADR 29.6.26f's failure mode). Both functions
+// this file exists to test are unreachable that way: `find_test_defs` through
+// `tg_type_tag` (7.8.26a D2), `generate_harness_source` through
+// `tg_string_slice` (`tg_string_append_char` until ADR 19.8.26c; both
+// unregistered, so the conclusion is unchanged). The FFI fetch is split and only
+// the verdict is tested; the generator is covered by real elaboration instead
+// (7.8.26b §2.0's probe, and outcome conformance). Check that premise rather
+// than assume it: `info eval reachable-externs <def> src/compiler/main.tg`.
+//
+// Everything below bottoms out in `++`, a literal, or an executable extern.
+// Prove it rather than trust it:
+//
+//   tungsten test src/compiler/test_test_verb.tg --assertion-census
+//
+// and check against 6 / 6 / 6 / 3 / 2 / 6 / 4 / 4 / 4 / 4 / 4. A SHORT count is
+// a Stuck path, the observable this file's whole premise turns on.
+//
+// AT THE 300-LINE CAP, do NOT add a second `src/compiler/test_*.tg`: that glob
+// makes every such file a `make tg-test` entry point costing ~31-39 s per run
+// (7.8.26a D5). Move the ENCODERS to a non-`test_`-prefixed module this file
+// imports — the `test_*` functions must stay here to stay discovered.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_nat, assert_eq_bool, assert_eq_string};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option, Some, None, string_is_empty, string_contains, list_len};
+use driver::cli::test::{parse_test_options, TestParseState};
+use driver::ffi::{basename_start};
+use driver::pipeline::test::artifact::{harness_artifact_path_from_parts};
+use driver::pipeline::test::discovery::{
+    TestDiscoveryVerdict, Runnable, SkipTakesParameters, SkipReturnsNonUnit,
+    EmptySuiteAction, FailRequireTests, ReportNoTests, Proceed,
+    classify_test_signature, classify_empty_suite, tag_type_name
+};
+use driver::pipeline::test::mode::types::{
+    ItemPath, ItemPublic, ExternNeed, TreeSymbol,
+    ExternVerdict, ExternsReconciled, ExternsConflict
+};
+use driver::pipeline::test::mode::decide::{tree_symbol_problem, reconcile_externs};
+use driver::pipeline::test::harness::runner::{generate_harness_main, generate_test_runner_fn};
+use driver::pipeline::test::harness::tree::{tree_calls};
+use driver::pipeline::test::harness::standalone::{standalone_calls, standalone_prelude};
+
+// ===========================================================================
+// ENCODERS
+//
+// `assert_eq_nat` is the assertion with an executable extern behind it, so the
+// verdicts are compared as codes rather than through the structural comparator.
+// `SkipReturnsNonUnit` encodes as 100 + tag so the assertion pins the CARRIED
+// tag as well as the variant — the tag is what the skip message renders, so a
+// verdict that dropped it would still be the wrong answer.
+// ===========================================================================
+
+fn verdict_code(v: TestDiscoveryVerdict) -> Nat {
+    match v {
+        Runnable() => 0,
+        SkipTakesParameters() => 1,
+        SkipReturnsNonUnit(tag) => 100 + tag
+    }
+}
+
+fn action_code(a: EmptySuiteAction) -> Nat {
+    match a {
+        FailRequireTests() => 0,
+        ReportNoTests() => 1,
+        Proceed() => 2
+    }
+}
+
+fn signature_code(tag: Nat) -> Nat {
+    verdict_code(classify_test_signature(tag))
+}
+
+fn empty_suite_code(num_tests: Nat, num_skipped: Nat, require: Bool) -> Nat {
+    action_code(classify_empty_suite(num_tests, num_skipped, require))
+}
+
+fn args_of(flag: String) -> List<String> {
+    Cons(flag, Cons("f.tg", Nil))
+}
+
+fn state_for(flag: String) -> TestParseState {
+    parse_test_options(args_of(flag), "", "")
+}
+
+fn need(name: String, arity: Nat) -> ExternNeed {
+    { name: name, arity: arity } : ExternNeed
+}
+
+/// `999` for a conflict: a count no reconciliation can produce, so an
+/// assertion on the count cannot be satisfied by a verdict of the wrong shape.
+fn reused_count(v: ExternVerdict) -> Nat {
+    match v {
+        ExternsReconciled(names) => list_len(names),
+        ExternsConflict(_) => 999
+    }
+}
+
+fn conflict_message(v: ExternVerdict) -> String {
+    match v { ExternsConflict(msg) => msg, ExternsReconciled(_) => "" }
+}
+
+fn problem_or_empty(p: Option<String>) -> String {
+    match p { Some(msg) => msg, None() => "" }
+}
+
+// ===========================================================================
+// TESTS
+// ===========================================================================
+
+/// The signature filter, one assertion per outcome class (§2.4).
+///
+/// Tag 3 (Unit) runs; tag 6 (Arrow) is the parameter-taking rejection, checked
+/// FIRST so it wins over the return-type arm; every other tag is a non-Unit
+/// return carrying its own tag. Tag 99 — unknown type, or an invalid handle —
+/// lands in the same arm and so **fails closed**: a def whose type cannot be
+/// read is not run.
+pub fn test_classify_test_signature() -> Unit {
+    assert_eq_nat(signature_code(3), 0);
+    assert_eq_nat(signature_code(6), 1);
+    assert_eq_nat(signature_code(0), 100);
+    assert_eq_nat(signature_code(1), 101);
+    assert_eq_nat(signature_code(2), 102);
+    assert_eq_nat(signature_code(99), 199)
+}
+
+/// The six empty-suite input classes of §2.4, in table order.
+///
+/// Case 3 (`0` tests, some skipped, `--require-tests` on → fail) is the one
+/// that matters: **skips do not satisfy `--require-tests`**. That is the
+/// regression ADR 2.7.26b closed on the bootstrap, and it is exactly the state
+/// a file would be in if the signature filter rejected too much.
+pub fn test_classify_empty_suite() -> Unit {
+    assert_eq_nat(empty_suite_code(14, 45, true), 2);
+    assert_eq_nat(empty_suite_code(14, 45, false), 2);
+    assert_eq_nat(empty_suite_code(0, 45, true), 0);
+    assert_eq_nat(empty_suite_code(0, 0, true), 0);
+    assert_eq_nat(empty_suite_code(0, 0, false), 1);
+    assert_eq_nat(empty_suite_code(0, 45, false), 2)
+}
+
+/// The tag rendering the skip message interpolates.
+///
+/// The bootstrap prints the type's `Display`; this reproduces it for the
+/// primitive tags the real rejections hit. `<unknown>` for everything else is
+/// §2.1's accepted divergence, stated honestly rather than guessed at — an
+/// ADT-returning `test_*` (tag 16) is the likely real-world instance.
+pub fn test_tag_type_name() -> Unit {
+    assert_eq_string(tag_type_name(0), "Nat");
+    assert_eq_string(tag_type_name(1), "Bool");
+    assert_eq_string(tag_type_name(2), "String");
+    assert_eq_string(tag_type_name(3), "Unit");
+    assert_eq_string(tag_type_name(6), "Arrow");
+    assert_eq_string(tag_type_name(99), "<unknown>")
+}
+
+/// `--require-tests` is parsed, and a misspelling of it is REJECTED.
+///
+/// The third assertion is the one that makes the second meaningful: an unknown
+/// flag has to be distinguishable from a known one, or `unknown_flag` would
+/// simply always be set and the rejection would refuse every invocation.
+pub fn test_parse_test_options_flags() -> Unit {
+    assert_eq_bool(state_for("--require-tests").require_tests, true);
+    assert_eq_string(state_for("--requre-tests").unknown_flag, "--requre-tests");
+    assert_eq_bool(string_is_empty(state_for("-v").unknown_flag), true)
+}
+
+/// The generated harness cannot be named into `make tg-test`'s glob.
+///
+/// Both arms of the dirname/basename split, because getting the `None` one
+/// wrong writes to a directory that does not exist and surfaces only as
+/// `error: could not write harness file`. A basename starting with `_` cannot
+/// match `test_*`, whatever the user named the file under test.
+pub fn test_harness_artifact_path() -> Unit {
+    let in_dir: Option<String> = Some("src/compiler");
+    let bare: Option<String> = None;
+    assert_eq_string(harness_artifact_path_from_parts(in_dir, "test_ctor_store"),
+                     "src/compiler/_tgtest_test_ctor_store");
+    assert_eq_string(harness_artifact_path_from_parts(bare, "test_ctor_store"),
+                     "_tgtest_test_ctor_store")
+}
+
+/// Where a path's final segment begins — the decision half of `path_basename`.
+///
+/// This function exists as a separate thing to test *because* the other half
+/// cannot be: `path_basename` slices the segment out with `tg_string_slice`,
+/// which the evaluator does not execute (ADR 19.8.26c D4), so an assertion on
+/// it would go silently Stuck and report `ok`. `basename_start` reads bytes
+/// only, and both externs on that path are executable — confirm with
+/// `tungsten info eval reachable-externs basename_start src/compiler/main.tg`.
+///
+/// The two edge cases are the ones an off-by-one gets wrong in opposite
+/// directions: a trailing `/` must yield the length (an EMPTY basename, not the
+/// last directory), and a path with no separator must yield 0 rather than 1.
+pub fn test_basename_start() -> Unit {
+    assert_eq_nat(basename_start("src/compiler/test_ctor_store"), 13);
+    assert_eq_nat(basename_start("bare_test_case"), 0);
+    assert_eq_nat(basename_start(""), 0);
+    assert_eq_nat(basename_start("a/"), 2);
+    assert_eq_nat(basename_start("/x"), 1);
+    assert_eq_nat(basename_start("a//b"), 3)
+}
+
+// ===========================================================================
+// HARNESS MODE + TEMPLATES (ADR 7.8.26b)
+// ===========================================================================
+
+/// All four extern-reconciliation cases of §2.2, in the order they are decided.
+///
+/// The third justifies carrying an arity at all: name-only matching would
+/// REUSE a `tg_println` of the wrong shape and produce a type error behind the
+/// very wall this ADR removes.
+pub fn test_reconcile_externs_four_cases() -> Unit {
+    let needs = Cons(need("tg_println", 2), Nil);
+    let no_root: List<ExternNeed> = Nil;
+    let no_tree: List<String> = Nil;
+    assert_eq_nat(reused_count(reconcile_externs(needs, no_root, no_tree)), 0);
+    assert_eq_nat(reused_count(reconcile_externs(needs, Cons(need("tg_println", 2), Nil), no_tree)), 1);
+    assert_eq_string(conflict_message(reconcile_externs(needs, Cons(need("tg_println", 1), Nil), no_tree)),
+                     "tg_println is declared at root with 1 parameter(s); the harness needs 2");
+    assert_eq_bool(string_contains(conflict_message(
+                       reconcile_externs(needs, no_root, Cons("tg_println", Nil))),
+                   "privately inside the module tree"), true)
+}
+
+/// D5's join: `ModuleInfo` answers WHERE, `ElabDef` answers whether `pub`, and
+/// neither answers both. The last assertion is the fail-closed one — a symbol
+/// absent from the path table is a refusal, not an assumed success.
+pub fn test_tree_symbol_problem_join() -> Unit {
+    let syms = Cons({ name: "println", module_path: "driver::ffi::process" } : TreeSymbol, Nil);
+    let here: List<ItemPath> = Cons(("println", "driver::ffi::process"), Nil);
+    let moved: List<ItemPath> = Cons(("println", "driver::io"), Nil);
+    let absent: List<ItemPath> = Nil;
+    let exported: List<ItemPublic> = Cons(("println", true), Nil);
+    let hidden: List<ItemPublic> = Cons(("println", false), Nil);
+    assert_eq_string(problem_or_empty(tree_symbol_problem(syms, here, exported)), "");
+    assert_eq_string(problem_or_empty(tree_symbol_problem(syms, moved, exported)),
+                     "println has moved: expected driver::ffi::process, found driver::io");
+    assert_eq_string(problem_or_empty(tree_symbol_problem(syms, here, hidden)),
+                     "driver::ffi::process::println is no longer pub");
+    assert_eq_string(problem_or_empty(tree_symbol_problem(syms, absent, exported)),
+                     "driver::ffi::process::println is not bound anywhere the harness can reach")
+}
+
+/// D4: the standalone preamble declares NO assertion surface, and skips the
+/// externs the program already has. The first assertion is the whole of D4 —
+/// `tests/test_runner_allpass.tg` declares its own `assert_eq_nat` and the old
+/// preamble declared one too, so the generator collided with its own exemplar.
+pub fn test_standalone_prelude_drops_the_assertion_surface() -> Unit {
+    let nothing_reused: List<String> = Nil;
+    let full = standalone_prelude(nothing_reused);
+    assert_eq_bool(string_contains(full, "assert_eq"), false);
+    assert_eq_bool(string_contains(full, "extern \"C\" fn tg_println"), true);
+    let reuse = Cons("tg_println", Nil);
+    assert_eq_bool(string_contains(standalone_prelude(reuse), "extern \"C\" fn tg_println"), false);
+    assert_eq_bool(string_contains(standalone_prelude(reuse), "extern \"C\" fn tg_exit"), true)
+}
+
+/// Each mode's runner chain uses that mode's call forms, and only those. The
+/// last assertion is the invariant rather than a spot check: standalone mode
+/// must emit no `driver::` path at all, having no module tree to reach one in.
+pub fn test_runner_chain_uses_each_modes_call_forms() -> Unit {
+    let tree_link = generate_test_runner_fn(tree_calls(), "test_x", 0);
+    assert_eq_bool(string_contains(tree_link, "driver::ffi::test::test_begin(\"test_x\")"), true);
+    assert_eq_bool(string_contains(tree_link, "    test_x();"), true);
+    let alone_link = generate_test_runner_fn(standalone_calls(), "test_x", 0);
+    assert_eq_bool(string_contains(alone_link, "_harness_test_begin(\"test_x\")"), true);
+    assert_eq_bool(string_contains(alone_link, "driver::"), false)
+}
+
+/// The `"many"` cap (§1.3) is gone from BOTH modes.
+///
+/// It existed only because the harness emitted no imports and so could not
+/// reach the real `nat_to_string`. Asserting its absence in the STANDALONE
+/// preamble too is what keeps the fix from landing in one mode and not the
+/// other, which is how the duplicate survived in the first place.
+pub fn test_harness_main_renders_the_count_not_many() -> Unit {
+    let nothing_reused: List<String> = Nil;
+    let main_source = generate_harness_main(tree_calls(), 14);
+    assert_eq_bool(string_contains(main_source, "running 14 tests"), true);
+    assert_eq_bool(string_contains(main_source, "14 passed"), true);
+    assert_eq_bool(string_contains(main_source,
+                   "driver::util::strings::convert::nat_to_string(failed)"), true);
+    assert_eq_bool(string_contains(standalone_prelude(nothing_reused), "many"), false)
+}

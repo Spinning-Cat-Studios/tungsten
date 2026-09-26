@@ -17,7 +17,21 @@ jobs:
     name: Check (no codegen)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # The three tools/ submodules are workspace members (ADR 20.7.26b,
+          # 14.8.26c, 5.9.26l) — every cargo invocation needs them checked
+          # out. All are pinned by HTTPS URL
+          # in .gitmodules precisely so the PAT below can fetch them; an SSH
+          # URL is unauthenticatable here, because actions/checkout injects
+          # an HTTPS auth header and has no key.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo and all three sibling repos); the
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -33,11 +47,45 @@ jobs:
       - name: Test (no codegen)
         run: cargo test -p tungsten_core -p tungsten_bootstrap --no-default-features
 
+      # Cache-poisoning canary (ADR 4.7.26d) — host-side, no LLVM, ~2s.
+      # Mirrors ci.yml; the 4.7.26c class is silent to every other gate.
+      - name: Cache-poisoning canary (cold vs warm)
+        run: make check-cache-poisoning-canary
+
+      # This workflow ships with the public repository, so it invokes only make
+      # targets the public make files define (ADR 25.9.26l D6, checked by
+      # `tungsten-snapshot leak-check`). The mutation-baseline, guardrail,
+      # submodule-pin, health-test, playground and coverage checks read files
+      # that do not ship and run in private-checks.yml instead.
+
+      # ADR 28.7.26a AC 3 — mirrors ci.yml. Verified in CI rather than by local
+      # report: the wasm32 build breaks in ways invisible to anyone not building
+      # for the target (a dep that only fails there, or a widened `#[cfg]`).
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build LLVM-free bootstrap for wasm32
+        run: cargo build -p tungsten_bootstrap --lib --no-default-features --target wasm32-unknown-unknown
+
   build-with-llvm:
     name: Build with LLVM
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # tools/claude-hooks and tools/scs-notify are git submodules AND
+          # workspace members (ADR 20.7.26b, 14.8.26c) — every cargo
+          # invocation needs both checked out. Both are pinned by HTTPS URL
+          # in .gitmodules precisely so the PAT below can fetch them; an SSH
+          # URL is unauthenticatable here, because actions/checkout injects
+          # an HTTPS auth header and has no key.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo + scs-claude-hooks + scs-notify); the
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -58,7 +106,9 @@ jobs:
       - name: Test with codegen
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: cargo test
+        run: |
+          cargo build -p tungsten_core
+          cargo test
 
       - name: Test codegen crate
         env:
@@ -79,7 +129,21 @@ jobs:
     needs: build-with-llvm
     if: inputs.run-integration
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # tools/claude-hooks and tools/scs-notify are git submodules AND
+          # workspace members (ADR 20.7.26b, 14.8.26c) — every cargo
+          # invocation needs both checked out. Both are pinned by HTTPS URL
+          # in .gitmodules precisely so the PAT below can fetch them; an SSH
+          # URL is unauthenticatable here, because actions/checkout injects
+          # an HTTPS auth header and has no key.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo + scs-claude-hooks + scs-notify); the
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -100,7 +164,7 @@ jobs:
       - name: Golden tests
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: make check-golden
+        run: make golden
 
       - name: Type-check examples
         run: |

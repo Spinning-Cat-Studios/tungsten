@@ -24,6 +24,7 @@ impl Term {
             | Term::False
             | Term::Zero
             | Term::NatLit(_)
+            | Term::IntLit(_)
             | Term::StringLit(_)
             | Term::Sorry => self.clone(),
 
@@ -38,6 +39,9 @@ impl Term {
             Term::Annot(t, ty) => Term::annot(t.strip_spans(), ty.clone()),
             Term::TyApp(t, ty) => Term::ty_app(t.strip_spans(), ty.clone()),
             Term::StrLen(t) => Term::str_len(t.strip_spans()),
+            Term::IntNeg(t) => Term::int_neg(t.strip_spans()),
+            Term::NatToInt(t) => Term::nat_to_int(t.strip_spans()),
+            Term::IntToNat(t) => Term::int_to_nat(t.strip_spans()),
             Term::BoolNot(t) => Term::bool_not(t.strip_spans()),
             Term::Fold(ty, t) => Term::fold(ty.clone(), t.strip_spans()),
             Term::Unfold(ty, t) => Term::unfold(ty.clone(), t.strip_spans()),
@@ -59,6 +63,7 @@ impl Term {
             Term::StrConcat(a, b) => Term::str_concat(a.strip_spans(), b.strip_spans()),
             Term::StrEq(a, b) => Term::str_eq(a.strip_spans(), b.strip_spans()),
             Term::StrCharAt(a, b) => Term::str_char_at(a.strip_spans(), b.strip_spans()),
+            Term::IntBin(op, a, b) => Term::int_bin(*op, a.strip_spans(), b.strip_spans()),
             Term::NatAdd(a, b) => Term::nat_add(a.strip_spans(), b.strip_spans()),
             Term::NatSub(a, b) => Term::nat_sub(a.strip_spans(), b.strip_spans()),
             Term::NatMul(a, b) => Term::nat_mul(a.strip_spans(), b.strip_spans()),
@@ -136,6 +141,7 @@ impl Term {
             | Term::False
             | Term::Zero
             | Term::NatLit(_)
+            | Term::IntLit(_)
             | Term::StringLit(_) => false,
 
             // Unary — one subterm
@@ -149,6 +155,9 @@ impl Term {
             | Term::Absurd(_, t)
             | Term::Annot(t, _)
             | Term::StrLen(t)
+            | Term::IntNeg(t)
+            | Term::NatToInt(t)
+            | Term::IntToNat(t)
             | Term::BoolNot(t)
             | Term::Fold(_, t)
             | Term::Unfold(_, t)
@@ -179,6 +188,7 @@ impl Term {
             | Term::NatDiv(a, b)
             | Term::NatMod(a, b)
             | Term::NatEq(a, b)
+            | Term::IntBin(_, a, b)
             | Term::BoolAnd(a, b)
             | Term::BoolOr(a, b)
             | Term::RefSet(a, b)

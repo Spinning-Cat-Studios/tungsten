@@ -1,9 +1,13 @@
 // src/compiler/codegen/ir_header.tg
+// The driver never reaches this module: `run_compile` delegates codegen to the
+// bootstrap binary, so it is compiled and type-checked but executed only by
+// `test_codegen*.tg` / `test_cir_captures.tg`. See codegen/mod.tg (ADR 3.9.26a).
 // LLVM IR module header and extern declarations.
 //
 // Emits the target triple, data layout, and FFI function declarations
 // that link against libtungsten_core.
 
+use driver::util::nat_to_string;
 use codegen::ir_builder::{IRState, emit_line, emit_blank};
 
 // ===========================================================================
@@ -20,14 +24,56 @@ pub fn emit_module_header(st: IRState, triple: String, datalayout: String) -> IR
 }
 
 // ===========================================================================
+// ALLOCATION SYMBOL
+// ===========================================================================
+
+/// The runtime allocation symbol: `ptr @__tungsten_alloc(i64 size, i32 class)`
+/// (ADR 14.9.26b).
+//
+// The self-host calls it UNCONDITIONALLY, although the bootstrap now branches
+// on `@__tungsten_arena_mode` and calls `@malloc` directly when the mode is
+// off (ADR 18.9.26c). Three reasons, deliberately:
+//   1. No compiler executes these emitters: `run_compile` delegates codegen to
+//      the bootstrap, so a branch here would run only under the emitter tests.
+//      (What `tungsten1 compile` produces today IS the bootstrap's codegen,
+//      prologue and branch included.)
+//   2. The IR these emitters would produce carries no program prologue, so it
+//      never runs `__tungsten_arena_init` and reads mode `off` by construction
+//      — the branch would be dead code.
+//   3. `emit_if` (codegen/ir_expr/control.tg) names each arm's OPENING label as
+//      the phi predecessor before emitting the arm's body; a helper that ends
+//      in a fresh `alloc.join` block inside an arm would leave a phi naming a
+//      non-predecessor, which `llc` rejects.
+// The two shapes are observationally equal in every mode — `__tungsten_alloc`
+// calls `malloc` when the mode is off — so this is a performance asymmetry,
+// not a libc-versus-arena divergence. B1, which gives the self-host a prologue,
+// is where the branch belongs, and it must fix `emit_if`'s phi predecessors
+// first.
+pub fn alloc_symbol() -> String { "@__tungsten_alloc" }
+
+/// The allocation class a closure environment carries — `CLASS_ENV` in
+/// `tungsten_runtime/src/alloc_profile/mod.rs` and `AllocClass::Env` in the
+/// bootstrap backend. Source-order constants there: Mu=0, Env=1, Ref=2, Str=3.
+pub fn alloc_class_env() -> Nat { 1 }
+
+/// One allocation call as IR text: `call ptr @__tungsten_alloc(i64 N, i32 C)`.
+pub fn emit_alloc_call(size: Nat, class: Nat) -> String {
+    "call ptr " ++ alloc_symbol() ++ "(i64 " ++ nat_to_string(size) ++ ", i32 " ++ nat_to_string(class) ++ ")"
+}
+
+// ===========================================================================
 // EXTERN DECLARATIONS
 // ===========================================================================
 
 /// Emit the standard extern function declarations for libtungsten_core.
 pub fn emit_extern_declarations(st: IRState) -> IRState {
     let st = emit_line(st, "; External declarations (libtungsten_core)");
-    // Memory
-    let st = emit_line(st, "declare ptr @malloc(i64)");
+    // Memory: the runtime's one allocation symbol (ADR 14.9.26b), the same
+    // callee the bootstrap backend emits, so a program either compiler builds
+    // allocates through the arena when TUNGSTEN_ARENA selects it. No bare
+    // @malloc: an arena block handed to libc is undefined behaviour. @free
+    // stays declared and called nowhere, as before.
+    let st = emit_line(st, "declare ptr " ++ alloc_symbol() ++ "(i64, i32)");
     let st = emit_line(st, "declare void @free(ptr)");
     let st = emit_blank(st);
     // IO

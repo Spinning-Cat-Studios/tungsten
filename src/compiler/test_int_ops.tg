@@ -1,0 +1,74 @@
+// Runtime tests for signed integer arithmetic (ADR 14.9.26c AC 2).
+//
+// Cost 5: every assertion here is a RUNTIME comparison through
+// `assert_eq_int`, whose extern has an evaluator arm, so these run on
+// `tungsten test` host-side; `--assertion-census` is what proves each test's
+// comparison ran. Under `make tg-test-codegen` the same file runs under
+// `tungsten1` in the devcontainer (AC 7b), which is the arm that proves the
+// self-host's own `Int` lowering agrees — including the type-tag arm that
+// would otherwise erase `Int` to `CTUnit`.
+//
+// This file is its own entry and must NEVER be imported from
+// `src/compiler/main.tg`. The must-fail twin is `mustfail_int_ops.tg`.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_int, assert_eq_nat, assert_eq_bool};
+
+// The ADR's table, row by row.
+fn test_add_mixed_signs() -> () {
+    assert_eq_int(-3 + 5, 2)
+}
+
+fn test_sub_goes_negative() -> () {
+    assert_eq_int(3 - 5, -2)
+}
+
+fn test_div_truncates_toward_zero() -> () {
+    assert_eq_int(-7 / 2, -3)
+}
+
+fn test_mod_keeps_the_dividend_sign() -> () {
+    assert_eq_int(-7 % 2, -1)
+}
+
+fn test_mul_signs() -> () {
+    assert_eq_int(-7 * 2, -14);
+    assert_eq_int(-7 * -2, 14)
+}
+
+fn test_negation_of_a_variable() -> () {
+    let x: Int = 17;
+    assert_eq_int(-x, -17);
+    assert_eq_int(-(-x), 17)
+}
+
+fn test_negative_one_is_less_than_zero() -> () {
+    assert_eq_bool(-1 < 0, true);
+    assert_eq_bool(0 < -1, false);
+    assert_eq_bool(-1 >= 0, false);
+    assert_eq_bool(-5 == -5, true)
+}
+
+// The bridges at their documented edges.
+fn test_from_int_clamps_negatives() -> () {
+    assert_eq_nat(from_int(-1), 0)
+}
+
+fn test_from_int_of_to_int_is_the_identity() -> () {
+    let n: Nat = 12;
+    assert_eq_nat(from_int(to_int(n)), 12)
+}
+
+fn test_signed_maximum_round_trips() -> () {
+    assert_eq_int(to_int(from_int(9223372036854775807)), 9223372036854775807)
+}
+
+// Nat beside Int stays Nat: saturating subtraction is untouched.
+fn test_nat_subtraction_still_saturates() -> () {
+    let n: Nat = 3;
+    assert_eq_nat(n - 5, 0)
+}

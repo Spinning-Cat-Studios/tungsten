@@ -198,3 +198,82 @@ fn test_resolve_app_to_encoding_recursive_alias_terminates() {
         result
     );
 }
+
+// ========================================================================
+// replace_self_reference — the map_children-migrated self-reference walker
+// (ADR 23.7.26a follow-up). Pins the two non-uniform arms (bare/@-TyVar and
+// App/Adt name-match → the μ variable) and the structural-recursion default.
+// ========================================================================
+
+/// A bare and an `@`-prefixed self TyVar both become the μ variable; a
+/// different TyVar is left untouched.
+#[test]
+fn test_replace_self_reference_tyvar_arms() {
+    let elab = make_elaborator();
+    assert_eq!(
+        elab.replace_self_reference(&Type::TyVar("List".into()), "List", "α_List"),
+        Type::TyVar("α_List".into())
+    );
+    assert_eq!(
+        elab.replace_self_reference(&Type::TyVar("@List".into()), "List", "α_List"),
+        Type::TyVar("α_List".into()),
+        "@-prefixed self reference is also replaced"
+    );
+    assert_eq!(
+        elab.replace_self_reference(&Type::TyVar("Other".into()), "List", "α_List"),
+        Type::TyVar("Other".into()),
+        "a non-self TyVar is untouched"
+    );
+}
+
+/// An `App`/`Adt` whose head names self becomes the μ variable; a differently
+/// named `App` keeps its head and has its args walked.
+#[test]
+fn test_replace_self_reference_app_and_adt_heads() {
+    let elab = make_elaborator();
+    assert_eq!(
+        elab.replace_self_reference(&Type::app("List", vec![Type::Nat]), "List", "α_List"),
+        Type::TyVar("α_List".into()),
+        "self-named App head → μ variable"
+    );
+    assert_eq!(
+        elab.replace_self_reference(
+            &Type::adt("List", vec![Type::Nat], vec![("Nil".into(), Type::Unit)]),
+            "List",
+            "α_List",
+        ),
+        Type::TyVar("α_List".into()),
+        "self-named Adt head → μ variable"
+    );
+    // A different App head is kept, and a self-reference in its args IS walked
+    // (the map_children structural default) — proving recursion reaches inside.
+    assert_eq!(
+        elab.replace_self_reference(
+            &Type::app("Option", vec![Type::TyVar("List".into())]),
+            "List",
+            "α_List",
+        ),
+        Type::app("Option", vec![Type::TyVar("α_List".into())]),
+        "non-self App keeps head; self-ref inside its args is replaced"
+    );
+}
+
+/// The structural default recurses through every compound: a self-reference
+/// nested inside Product / Sum / Ptr / Eq-type-arg is replaced, while Eq
+/// witness terms (non-Type children) are preserved.
+#[test]
+fn test_replace_self_reference_recurses_through_compounds() {
+    let elab = make_elaborator();
+    let nested = Type::product(
+        Type::sum(Type::TyVar("T".into()), Type::ptr(Type::TyVar("T".into()))),
+        Type::Nat,
+    );
+    let expected = Type::product(
+        Type::sum(
+            Type::TyVar("α_T".into()),
+            Type::ptr(Type::TyVar("α_T".into())),
+        ),
+        Type::Nat,
+    );
+    assert_eq!(elab.replace_self_reference(&nested, "T", "α_T"), expected);
+}

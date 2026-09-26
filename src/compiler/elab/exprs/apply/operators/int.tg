@@ -1,0 +1,211 @@
+// src/compiler/elab/exprs/apply/operators/int.tg
+// The `Int` half of binary-operator elaboration — the self-host mirror of the
+// bootstrap's `elaborate/exprs/forms/operators/int.rs` (ADR 14.9.26c §2.2).
+//
+// The operand-type dispatch for `+ - * / % < <= > >=`: synthesise the deciding
+// operand once; `Int` → check the other against `Int`; `Nat` → today's `Nat`
+// nodes from the already-synthesised half (never a second elaboration, which
+// would be exponential in nesting depth). The literal arms, unary minus and
+// the two bridges are the sibling `int_literals.tg`.
+
+use lexer::span::{Span, span_new};
+use parser::ast::{
+    Expr, ExprIntLit, ExprParen,
+    BinOp, OpAdd, OpSub, OpMul, OpDiv, OpMod,
+    OpEq, OpNe, OpLt, OpLe, OpGt, OpGe,
+    OpAnd, OpOr, OpPipe, OpConcat
+};
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_nat_add, tg_term_nat_sub, tg_term_nat_mul, tg_term_nat_div, tg_term_nat_mod,
+    tg_term_nat_lt, tg_term_nat_le, tg_term_nat_gt, tg_term_nat_ge,
+    tg_term_int_bin,
+    tg_type_nat, tg_type_int, tg_type_bool,
+    tg_types_equal
+};
+use elab::env::Env;
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr,
+    elab_expr_error, add_expected_because, TermInfo
+};
+use elab::error::{ExpBinaryOperand};
+use elab::cir::{
+    CodegenIR,
+    CIRNatAdd, CIRNatSub, CIRNatMul, CIRNatDiv, CIRNatMod,
+    CIRNatLt, CIRNatLe, CIRNatGt, CIRNatGe,
+    CIRIntBin
+};
+use elab::exprs::{synth, check};
+use elab::exprs::forms::compare::{compare_synthesized};
+
+// ===========================================================================
+// OPERATOR TABLES
+// ===========================================================================
+
+/// The source spelling, for the expected-because note.
+pub fn arith_op_symbol(op: BinOp) -> String {
+    match op {
+        OpAdd() => "+", OpSub() => "-", OpMul() => "*", OpDiv() => "/", OpMod() => "%",
+        OpLt() => "<", OpLe() => "<=", OpGt() => ">", OpGe() => ">=",
+        OpEq() => "==", OpNe() => "!=", OpAnd() => "&&", OpOr() => "||",
+        OpPipe() => "|>", OpConcat() => "++"
+    }
+}
+
+/// The bootstrap's `IntBinOp::code` for an arithmetic or ordering operator:
+/// 0 + 1 - 2 * 3 / 4 % 5 == 6 < 7 <= 8 > 9 >=. Equality goes through
+/// `equality.tg`, so `==`/`!=` never reach this; the remaining operators are
+/// not numeric and are unreachable by construction of `synth_binary`.
+pub fn int_op_code(op: BinOp) -> Nat {
+    match op {
+        OpAdd() => 0, OpSub() => 1, OpMul() => 2, OpDiv() => 3, OpMod() => 4,
+        OpEq() => 5, OpLt() => 6, OpLe() => 7, OpGt() => 8, OpGe() => 9,
+        OpNe() => 5, OpAnd() => 0, OpOr() => 0, OpPipe() => 0, OpConcat() => 0
+    }
+}
+
+/// `true` for `+ - * / %`, whose result has the operand type.
+pub fn is_arithmetic(op: BinOp) -> Bool {
+    int_op_code(op) < 5
+}
+
+/// The literal under any parentheses, if the expression is one.
+pub fn bare_literal(expr: Expr) -> MaybeLiteral {
+    match expr {
+        ExprIntLit(n, _) => SomeLiteral(n),
+        ExprParen(inner, _) => bare_literal(inner),
+        _ => NoLiteral
+    }
+}
+
+pub type MaybeLiteral =
+    | NoLiteral
+    | SomeLiteral(Nat)
+
+fn is_bare_literal(expr: Expr) -> Bool {
+    match bare_literal(expr) {
+        SomeLiteral(_) => true,
+        NoLiteral() => false
+    }
+}
+
+// ===========================================================================
+// OPERAND-TYPE DISPATCH
+// ===========================================================================
+
+/// Synthesise `left op right` for an arithmetic or ordering operator.
+///
+/// Infer the left; if `Int`, check the right against `Int`; if the left is a
+/// bare literal and the right is not, infer the right first (so `1 + x` works
+/// for `x : Int`); otherwise today's `Nat` path.
+pub fn synth_arith(env: Env, op: BinOp, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    if is_bare_literal(left) && !is_bare_literal(right) {
+        synth_arith_right_first(env, op, left, right, span)
+    } else {
+        synth_arith_left_first(env, op, left, right, span)
+    }
+}
+
+fn synth_arith_left_first(env: Env, op: BinOp, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    match synth(env, left) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(arith_op_symbol(op), span))),
+        ElabExprOk(env2, lt, lty, lcir) =>
+            let li: TermInfo = { term: lt, ty: lty, cir: lcir };
+            if tg_types_equal(lty, tg_type_int()) {
+                finish_with_right(env2, op, li, right, span)
+            } else {
+                nat_left_then_right(env2, op, li, right, span)
+            }
+    }
+}
+
+/// The `Nat` path with the left already synthesised: compare it against
+/// `Nat` the way `check`'s default arm would have, then check the right.
+fn nat_left_then_right(env: Env, op: BinOp, left: TermInfo, right: Expr, span: Span) -> ElabExprResult {
+    match compare_synthesized(env, left, tg_type_nat(), span) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(arith_op_symbol(op), span))),
+        ElabExprOk(env2, lt, _, lcir) =>
+            let li: TermInfo = { term: lt, ty: tg_type_nat(), cir: lcir };
+            finish_with_right(env2, op, li, right, span)
+    }
+}
+
+fn synth_arith_right_first(env: Env, op: BinOp, left: Expr, right: Expr, span: Span) -> ElabExprResult {
+    match synth(env, right) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(arith_op_symbol(op), span))),
+        ElabExprOk(env2, rt, rty, rcir) =>
+            let ri: TermInfo = { term: rt, ty: rty, cir: rcir };
+            if tg_types_equal(rty, tg_type_int()) {
+                finish_with_left(env2, op, left, ri, span)
+            } else {
+                nat_right_then_left(env2, op, left, ri, span)
+            }
+    }
+}
+
+/// The `Nat` path with the right already synthesised (the left is a bare
+/// literal): compare the right against `Nat`, then check the literal.
+fn nat_right_then_left(env: Env, op: BinOp, left: Expr, right: TermInfo, span: Span) -> ElabExprResult {
+    match compare_synthesized(env, right, tg_type_nat(), span) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(arith_op_symbol(op), span))),
+        ElabExprOk(env2, rt, _, rcir) =>
+            let ri: TermInfo = { term: rt, ty: tg_type_nat(), cir: rcir };
+            finish_with_left(env2, op, left, ri, span)
+    }
+}
+
+/// Left already elaborated (its `ty` decides `Nat`/`Int`): check the right
+/// against that type and build.
+pub fn finish_with_right(env: Env, op: BinOp, left: TermInfo, right: Expr, span: Span) -> ElabExprResult {
+    match check(env, right, left.ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(arith_op_symbol(op), span))),
+        ElabExprOk(env2, rt, _, rcir) =>
+            let ri: TermInfo = { term: rt, ty: left.ty, cir: rcir };
+            build_arith(env2, op, left, ri)
+    }
+}
+
+/// Right already elaborated (its `ty` decides): check the left against that
+/// type and build.
+fn finish_with_left(env: Env, op: BinOp, left: Expr, right: TermInfo, span: Span) -> ElabExprResult {
+    match check(env, left, right.ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(arith_op_symbol(op), span))),
+        ElabExprOk(env2, lt, _, lcir) =>
+            let li: TermInfo = { term: lt, ty: right.ty, cir: lcir };
+            build_arith(env2, op, li, right)
+    }
+}
+
+/// Build the node for two elaborated operands of one numeric type.
+fn build_arith(env: Env, op: BinOp, left: TermInfo, right: TermInfo) -> ElabExprResult {
+    if tg_types_equal(left.ty, tg_type_int()) {
+        let code = int_op_code(op);
+        let result_ty = if code >= 5 { tg_type_bool() } else { tg_type_int() };
+        ElabExprOk(env, tg_term_int_bin(code, left.term, right.term), result_ty,
+                   CIRIntBin(code, left.cir, right.cir))
+    } else {
+        build_nat_arith(env, op, left, right)
+    }
+}
+
+/// Today's `Nat` nodes, byte-for-byte: saturating `-`, unsigned comparison.
+fn build_nat_arith(env: Env, op: BinOp, left: TermInfo, right: TermInfo) -> ElabExprResult {
+    let nat_ty = tg_type_nat();
+    let bool_ty = tg_type_bool();
+    let l = left.term;
+    let r = right.term;
+    let lc = left.cir;
+    let rc = right.cir;
+    match op {
+        OpAdd() => ElabExprOk(env, tg_term_nat_add(l, r), nat_ty, CIRNatAdd(lc, rc)),
+        OpSub() => ElabExprOk(env, tg_term_nat_sub(l, r), nat_ty, CIRNatSub(lc, rc)),
+        OpMul() => ElabExprOk(env, tg_term_nat_mul(l, r), nat_ty, CIRNatMul(lc, rc)),
+        OpDiv() => ElabExprOk(env, tg_term_nat_div(l, r), nat_ty, CIRNatDiv(lc, rc)),
+        OpMod() => ElabExprOk(env, tg_term_nat_mod(l, r), nat_ty, CIRNatMod(lc, rc)),
+        OpLt() => ElabExprOk(env, tg_term_nat_lt(l, r), bool_ty, CIRNatLt(lc, rc)),
+        OpLe() => ElabExprOk(env, tg_term_nat_le(l, r), bool_ty, CIRNatLe(lc, rc)),
+        OpGt() => ElabExprOk(env, tg_term_nat_gt(l, r), bool_ty, CIRNatGt(lc, rc)),
+        OpGe() => ElabExprOk(env, tg_term_nat_ge(l, r), bool_ty, CIRNatGe(lc, rc)),
+        _ => ElabExprErr(elab_expr_error("internal: build_nat_arith called with a non-numeric operator", span_new(0, 0, "")))
+    }
+}

@@ -122,6 +122,7 @@
 
 pub mod ast;
 pub mod cache;
+pub mod comparator;
 pub mod config;
 pub mod doctor;
 pub mod driver;
@@ -130,6 +131,7 @@ pub mod error;
 pub mod fold_analysis;
 pub mod lexer;
 pub mod parser;
+pub mod scratch;
 pub mod sidecar;
 pub mod span;
 pub mod token;

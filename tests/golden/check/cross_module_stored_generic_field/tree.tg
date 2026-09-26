@@ -1,0 +1,8 @@
+// Tree module: a fresh k=2 generic recursive ADT (two recursive occurrences
+// per node — the StrMap shape from ADR 21.7.26e wall 1).
+
+pub type Tree<V> =
+    | TreeLeaf
+    | TreeNode(Tree<V>, String, V, Tree<V>, Nat)
+
+pub fn touch_tree<X>(t: Tree<X>) -> Tree<X> { t }

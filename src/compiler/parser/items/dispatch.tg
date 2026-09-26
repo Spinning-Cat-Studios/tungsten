@@ -11,6 +11,7 @@ use parser::option::{Option, None, Some};
 use parser::ast::nodes::Item;
 use parser::items::result::{item_list_reverse};
 use parser::items::shared::visibility::{parse_visibility};
+use parser::items::shared::attributes::{parse_attributes, item_attach_attributes};
 use parser::items::decls::functions::{parse_fn};
 use parser::types::{parse_type_item};
 use parser::items::decls::theorems::{parse_theorem, parse_lemma, parse_axiom};
@@ -21,38 +22,23 @@ use driver::ffi::{List, Nil, Cons};
 use driver::util::{Result, Ok, Err};
 
 // ===========================================================================
-// TOP-LEVEL ITEM LIST PARSING
-// ===========================================================================
-
-/// Parse a list of items (top-level declarations).
-/// Recovers from errors to continue parsing subsequent items.
-pub fn parse_items(cur: Cursor) -> Result<(List<Item>, Cursor), ParseError> {
-    parse_items_acc(cur, Nil)
-}
-
-/// Accumulator-based item list parsing with error recovery.
-fn parse_items_acc(cur: Cursor, acc: List<Item>) -> Result<(List<Item>, Cursor), ParseError> {
-    if cursor_is_eof(cur) || cursor_check(cur, TokEof()) {
-        Ok((item_list_reverse(acc), cur))
-    } else {
-        match parse_item(cur) {
-            Ok((item, cur2)) => {
-                parse_items_acc(cur2, Cons(item, acc))
-            },
-            Err(e) => {
-                // Error recovery: skip to next item boundary
-                let cur2 = synchronize(cur);
-                // Continue parsing, but report the first error
-                // For now, we'll continue and collect what we can
-                parse_items_acc(cur2, acc)
-            }
-        }
-    }
-}
-
-// ===========================================================================
 // SINGLE ITEM PARSING
 // ===========================================================================
+//
+// THE ITEM *LOOP* IS NOT HERE. `parse_file` in `parser/lib.tg` drives
+// `parse_items_with_recovery`, which accumulates errors and guarantees
+// progress; this file owns dispatch for ONE item and nothing above it.
+//
+// It used to also carry a second loop, `parse_items`/`parse_items_acc`, that
+// nothing called — and ADR 12.8.26b's §1.2 was written against that one,
+// diagnosing a bug in a function the compiler never runs. The retrospective
+// deleted it rather than keep two loops that can disagree. If you want a
+// whole-file parse, call `parse_file`.
+//
+// The general lesson, now a command: an export is not a call, and in `.tg` the
+// `pub use` is usually in a different file from both the definition and any
+// call site, so grep cannot tell them apart. Ask
+// `tungsten info def <name> <file> --callers`.
 
 /// Parse a single top-level item.
 ///
@@ -61,11 +47,19 @@ fn parse_items_acc(cur: Cursor, acc: List<Item>) -> Result<(List<Item>, Cursor),
 ///   ItemKind = FnDef | TypeDef | Theorem | Lemma | Axiom | Extern | Mod | Use
 pub fn parse_item(cur: Cursor) -> Result<(Item, Cursor), ParseError> {
     let start_span = cursor_peek_span(cur);
-    
+
+    // Parse leading `#[…]` attributes (ADR 12.8.26b P1). Attaching them AFTER
+    // dispatch keeps every existing item parser's signature unchanged — the
+    // alternative, threading an attribute list through all eight of them, is a
+    // much wider blast radius for the same result.
+    let (attrs, cur_a) = parse_attributes(cur)?;
+
     // Parse optional visibility modifier
-    let vis_result = parse_visibility(cur);
+    let vis_result = parse_visibility(cur_a);
     let (vis, cur2) = vis_result?;
-    dispatch_item(cur2, vis, start_span)
+    let (item, cur3) = dispatch_item(cur2, vis, start_span)?;
+    let annotated = item_attach_attributes(item, attrs)?;
+    Ok((annotated, cur3))
 }
 
 /// Dispatch to the appropriate item parser based on keyword.

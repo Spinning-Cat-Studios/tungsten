@@ -1,0 +1,19 @@
+// ADR 1.7.26b fixture — collection-driven SKIP → HIGH risk.
+//
+// `sum_pairs` is tail-recursive over `List<Nat>` and returns a by-value tuple
+// `(Nat, Nat)` (struct return → SKIP). Because the recursion driver is an
+// unbounded `List`, stack depth is O(input) → HIGH risk.
+
+pub type List<T> = Nil | Cons(T, List<T>)
+
+fn sum_pairs(xs: List<Nat>, acc: Nat) -> (Nat, Nat) {
+    match xs {
+        Nil() => (acc, acc),
+        Cons(h, t) => sum_pairs(t, acc + h),
+    }
+}
+
+fn main() -> Nat {
+    let (a, b) = sum_pairs(Cons(1, Cons(2, Nil)), 0);
+    a + b
+}

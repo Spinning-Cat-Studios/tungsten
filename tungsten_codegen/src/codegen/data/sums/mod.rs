@@ -34,6 +34,7 @@
 //! (planned for Phase 3) will provide proper ownership tracking.
 
 use crate::codegen::backend::CodeGenError;
+use crate::codegen::data::mu_types::unwrap_mu_type;
 use crate::codegen::CodeGen;
 use inkwell::values::{BasicValue, BasicValueEnum};
 use tungsten_core::terms::Term;
@@ -49,87 +50,38 @@ mod case;
 
 impl<'ctx> CodeGen<'ctx> {
     /// Compile injection into left of sum type: inl[A + B](a) -> A + B
-    ///
-    /// Sum type layout: { i32 tag, `largest_variant_type` }
-    /// - Set tag = 0
-    /// - Store 'a' into data field via pointer cast
     pub(crate) fn compile_inl(
         &mut self,
         sum_ty: &Type,
         val: &Term,
     ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
-        // Unwrap μ-type if present to get the actual sum type
-        let unwrapped = self.unwrap_mu_type(sum_ty);
-        // Expand ADT types (Type::App) to their sum form
-        let actual_sum_ty = self.types.expand_type(&unwrapped).unwrap_or(unwrapped);
-
-        let compiled_val = self.compile_term(val)?;
-        let sum_llvm_ty = self.types.lower_type(&actual_sum_ty).into_struct_type();
-        let i32_type = self.context.i32_type();
-
-        // Allocate the sum struct on stack with 16-byte alignment for ARM64 ABI
-        let sum_ptr = self
-            .builder
-            .build_alloca(sum_llvm_ty, "sum_alloca")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        if let Some(inst) = sum_ptr.as_instruction() {
-            let _ = inst.set_alignment(16);
-        }
-
-        // Store tag = 0 (left)
-        let tag_ptr = self
-            .builder
-            .build_struct_gep(sum_llvm_ty, sum_ptr, 0, "tag_ptr")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        self.builder
-            .build_store(tag_ptr, i32_type.const_int(0, false))
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-
-        // Get pointer to data field, cast to payload type, and store value
-        let data_ptr = self
-            .builder
-            .build_struct_gep(sum_llvm_ty, sum_ptr, 1, "data_ptr")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        // data_ptr is ptr to [i8 × N], we can store directly through it as payload type
-        // NOTE: data_ptr is at offset 4 from struct base, so max valid alignment is 4
-        // Using align 16 here would cause misaligned access on ARM64 (SIGSEGV)
-        let store = self
-            .builder
-            .build_store(data_ptr, compiled_val)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        let _ = store.set_alignment(4);
-
-        // Load the complete struct with proper alignment
-        let sum_val = self
-            .builder
-            .build_load(sum_llvm_ty, sum_ptr, "sum_val")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        if let Some(inst) = sum_val.as_instruction_value() {
-            let _ = inst.set_alignment(16);
-        }
-
-        // If original type was Mu-wrapped (recursive), fold by heap-allocating and returning pointer
-        if matches!(sum_ty, Type::Mu(_, _)) {
-            return self
-                .fold_to_heap(sum_val, sum_llvm_ty.into(), 16)
-                .map(std::convert::Into::into);
-        }
-
-        Ok(sum_val)
+        self.compile_sum_injection(sum_ty, val, 0)
     }
 
     /// Compile injection into right of sum type: inr[A + B](b) -> A + B
-    ///
-    /// Sum type layout: { i32 tag, `largest_variant_type` }
-    /// - Set tag = 1
-    /// - Store 'b' into data field via pointer cast
     pub(crate) fn compile_inr(
         &mut self,
         sum_ty: &Type,
         val: &Term,
     ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
+        self.compile_sum_injection(sum_ty, val, 1)
+    }
+
+    /// Shared body of `compile_inl`/`compile_inr` — the two differ only in
+    /// the tag constant (0 = left/inl, 1 = right/inr, matching the
+    /// source-order constructor encoding).
+    ///
+    /// Sum type layout: { i32 tag, `largest_variant_type` }
+    /// - Set tag = `variant_tag`
+    /// - Store the payload into the data field via pointer cast
+    fn compile_sum_injection(
+        &mut self,
+        sum_ty: &Type,
+        val: &Term,
+        variant_tag: u64,
+    ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
         // Unwrap μ-type if present to get the actual sum type
-        let unwrapped = self.unwrap_mu_type(sum_ty);
+        let unwrapped = unwrap_mu_type(sum_ty);
         // Expand ADT types (Type::App) to their sum form
         let actual_sum_ty = self.types.expand_type(&unwrapped).unwrap_or(unwrapped);
 
@@ -146,16 +98,16 @@ impl<'ctx> CodeGen<'ctx> {
             let _ = inst.set_alignment(16);
         }
 
-        // Store tag = 1 (right)
+        // Store the variant tag
         let tag_ptr = self
             .builder
             .build_struct_gep(sum_llvm_ty, sum_ptr, 0, "tag_ptr")
             .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
         self.builder
-            .build_store(tag_ptr, i32_type.const_int(1, false))
+            .build_store(tag_ptr, i32_type.const_int(variant_tag, false))
             .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
 
-        // Get pointer to data field and store value
+        // Get pointer to data field, cast to payload type, and store value
         // NOTE: data_ptr is at offset 4 from struct base, so max valid alignment is 4
         // Using align 16 here would cause misaligned access on ARM64 (SIGSEGV)
         let data_ptr = self
@@ -200,7 +152,7 @@ impl<'ctx> CodeGen<'ctx> {
         let val_compiled = self.compile_term(val)?;
 
         // Get the underlying sum type (unwrap all nested μ layers for mutual recursion)
-        let inner_ty = self.unwrap_mu_type(mu_ty);
+        let inner_ty = unwrap_mu_type(mu_ty);
         let sum_llvm_ty = self.types.lower_type(&inner_ty);
 
         // Check if this fold is in a let-binding that escape analysis marked as non-escaping
@@ -245,7 +197,7 @@ impl<'ctx> CodeGen<'ctx> {
         let ptr = self.compile_term(val)?.into_pointer_value();
 
         // Get the underlying sum type (unwrap all nested μ layers for mutual recursion)
-        let inner_ty = self.unwrap_mu_type(mu_ty);
+        let inner_ty = unwrap_mu_type(mu_ty);
         let sum_llvm_ty = self.types.lower_type(&inner_ty);
 
         // Use shared μ-type helper: load the sum value from the pointer

@@ -83,18 +83,27 @@ fn walk(ast: &TypeAst, step: &mut usize) {
 fn walk_base(name: &str, step: &mut usize) {
     println!("Step {step} — Base type:");
     println!("  {name}");
-    let desc = match name {
+    println!("  {}", base_type_description(name));
+    println!();
+    *step += 1;
+}
+
+/// Fallback description for a base type with no entry of its own.
+const GENERIC_BASE_TYPE_DESCRIPTION: &str = "A base type";
+
+/// One-line description of a primitive type. The names are the shared
+/// primitive table's (ADR 18.9.26f), pinned by a test; the prose stays here.
+fn base_type_description(name: &str) -> &'static str {
+    match name {
         "Nat" => "Natural numbers (0, 1, 2, ...)",
+        "Int" => "Signed 64-bit integers (..., -1, 0, 1, ...); overflow traps",
         "Bool" => "Boolean values (true, false)",
         "Unit" => "The unit type — a type with exactly one value (like void in C)",
         "Void" => "The empty type — a type with no values (uninhabited)",
         "String" => "Text strings",
         "Prop" => "The type of propositions (for theorem proving)",
-        _ => "A base type",
-    };
-    println!("  {desc}");
-    println!();
-    *step += 1;
+        _ => GENERIC_BASE_TYPE_DESCRIPTION,
+    }
 }
 
 fn walk_tyvar(name: &str, step: &mut usize) {
@@ -225,5 +234,35 @@ fn has_structural_constructs(ast: &TypeAst) -> bool {
         }
         TypeAst::Arrow(a, b) => has_structural_constructs(a) || has_structural_constructs(b),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 18.9.26f AC1: every primitive in the shared table has its own
+    // description, so a new primitive cannot fall to the generic line.
+    #[test]
+    fn every_primitive_has_a_description() {
+        for (name, _) in tungsten_core::types::PRIMITIVE_TYPES {
+            assert_ne!(
+                base_type_description(name),
+                GENERIC_BASE_TYPE_DESCRIPTION,
+                "{name} has no description"
+            );
+        }
+    }
+
+    #[test]
+    fn walking_a_base_type_advances_the_step_by_one() {
+        let mut step = 3;
+        walk_base("Nat", &mut step);
+        assert_eq!(step, 4);
+    }
+
+    #[test]
+    fn unknown_base_type_gets_the_generic_description() {
+        assert_eq!(base_type_description("Blah"), GENERIC_BASE_TYPE_DESCRIPTION);
     }
 }

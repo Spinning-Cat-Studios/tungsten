@@ -40,6 +40,18 @@ pub extern "C" fn tg_assert_eq_nat(left: u64, right: u64) {
     }
 }
 
+/// Compare two Int values (ADR 14.9.26c). Sets failure flag and prints the
+/// signed diff on mismatch.
+#[no_mangle]
+pub extern "C" fn tg_assert_eq_int(left: i64, right: i64) {
+    if left != right {
+        eprintln!("  assertion failed: assert_eq_int");
+        eprintln!("    left:  {left}");
+        eprintln!("    right: {right}");
+        TEST_FAILED.with(|f| f.set(true));
+    }
+}
+
 /// Compare two String values (ptr+len pairs). Sets failure flag on mismatch.
 ///
 /// # Safety
@@ -109,6 +121,17 @@ mod tests {
     fn test_nat_eq_fail() {
         tg_test_begin(std::ptr::null(), 0);
         tg_assert_eq_nat(1, 2);
+        assert_eq!(tg_test_check_failure(), 1);
+    }
+
+    /// 14.9.26c AC 2: the signed assertion compares as a SIGNED value — `-1`
+    /// and `u64::MAX` share bits, and only one of them equals `-1`.
+    #[test]
+    fn int_eq_compares_signed_values() {
+        tg_test_begin(std::ptr::null(), 0);
+        tg_assert_eq_int(-1, -1);
+        assert_eq!(tg_test_check_failure(), 0);
+        tg_assert_eq_int(-1, 1);
         assert_eq!(tg_test_check_failure(), 1);
     }
 

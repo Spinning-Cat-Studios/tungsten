@@ -41,6 +41,10 @@ impl fmt::Display for Term {
             Term::Let(x, ty, def, body) => write!(f, "(let {x} : {ty} = {def} in {body})"),
             Term::If(c, t, e) => write!(f, "(if {c} then {t} else {e})"),
             Term::NatLit(n) => write!(f, "{n}"),
+            // `int:` keeps an `Int` literal distinguishable from a `Nat` one in
+            // a Core dump — `-2` alone would read as a negated Nat.
+            Term::IntLit(i) => write!(f, "int:{i}"),
+            Term::IntBin(op, a, b) => write!(f, "({a} int{} {b})", op.symbol()),
             Term::StringLit(s) => write!(f, "\"{s}\""),
             Term::Pair(t1, t2) => write!(f, "({t1}, {t2})"),
             Term::Case(scrut, x, t1, y, t2) => {
@@ -84,6 +88,9 @@ impl fmt::Display for Term {
             | Term::Unfold(..)
             | Term::Succ(..)
             | Term::StrLen(..)
+            | Term::IntNeg(..)
+            | Term::NatToInt(..)
+            | Term::IntToNat(..)
             | Term::Fst(..)
             | Term::Snd(..)
             | Term::RefNew(..)
@@ -174,6 +181,9 @@ impl Term {
         match self {
             Term::Succ(t) => Some(("succ", t)),
             Term::StrLen(t) => Some(("strlen", t)),
+            Term::IntNeg(t) => Some(("intneg", t)),
+            Term::NatToInt(t) => Some(("to_int", t)),
+            Term::IntToNat(t) => Some(("from_int", t)),
             Term::Fst(t) => Some(("fst", t)),
             Term::Snd(t) => Some(("snd", t)),
             Term::RefNew(t) => Some(("ref", t)),

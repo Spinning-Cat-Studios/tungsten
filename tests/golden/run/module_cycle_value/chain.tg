@@ -1,0 +1,2 @@
+// A non-generic list, so the fixture asks about module cycles and nothing else.
+pub type Chain = Link(Nat, Chain) | End

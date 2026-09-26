@@ -87,9 +87,12 @@ impl HintCategory {
             ElabErrorKind::NonExhaustiveMatch
             | ElabErrorKind::UnreachableArm
             | ElabErrorKind::PatternTooDeep { .. }
+            | ElabErrorKind::MatchScrutineeNotAdt { .. }
             | ElabErrorKind::UnsupportedPattern(_) => HintCategory::PatternMatching,
 
-            ElabErrorKind::DeadCodeAfterReturn => HintCategory::ControlFlow,
+            ElabErrorKind::DeadCodeAfterReturn | ElabErrorKind::ReturnOutsideFunction => {
+                HintCategory::ControlFlow
+            }
 
             ElabErrorKind::TryOnNonTryType(_)
             | ElabErrorKind::TryReturnMismatch { .. }
@@ -116,7 +119,11 @@ impl HintCategory {
             | ElabErrorKind::ExtraRecordField { .. }
             | ElabErrorKind::DuplicateRecordField(_) => HintCategory::TypeMismatch,
 
-            ElabErrorKind::RecursiveAlias(_) => HintCategory::Elaboration,
+            ElabErrorKind::RecursiveAlias(_)
+            | ElabErrorKind::NonStrictlyPositive { .. }
+            | ElabErrorKind::CannotProveTermination { .. }
+            | ElabErrorKind::PartialInProof { .. }
+            | ElabErrorKind::NestedRecursiveFamily { .. } => HintCategory::Elaboration,
 
             ElabErrorKind::ReflExpectedEquality(_)
             | ElabErrorKind::InvalidRefl { .. }
@@ -128,7 +135,11 @@ impl HintCategory {
             | ElabErrorKind::MotiveBodyNotType
             | ElabErrorKind::NatIndMotiveNotNat(_) => HintCategory::TypeMismatch,
 
-            ElabErrorKind::Other(_) => HintCategory::General,
+            ElabErrorKind::ComparatorUnavailable(_) => HintCategory::TypeMismatch,
+            ElabErrorKind::IntLiteralOutOfRange(_) => HintCategory::TypeMismatch,
+            ElabErrorKind::BuiltinTypeRedefined(_) => HintCategory::NameResolution,
+
+            ElabErrorKind::InternalError(_) | ElabErrorKind::Other(_) => HintCategory::General,
         }
     }
 

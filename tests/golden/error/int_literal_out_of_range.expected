@@ -1,0 +1,9 @@
+[E0090] Error: integer literal `9223372036854775808` is out of range for `Int` (the signed 64-bit range is -9223372036854775808 to 9223372036854775807)
+   ╭─[tests/golden/error/int_literal_out_of_range.tg:2:17]
+   │
+ 2 │ fn f() -> Int { 9223372036854775808 }
+   │                 ─────────┬─────────  
+   │                          ╰─────────── 
+───╯
+
+error: aborting due to 1 error

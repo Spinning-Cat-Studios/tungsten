@@ -1,0 +1,8 @@
+// == recursion through a function argument escapes the call graph
+type Lst = Nil | Cons(Nat, Lst)
+
+fn apply(f: Lst -> Nat, l: Lst) -> Nat { f(l) }
+
+fn rec(l: Lst) -> Nat { apply(rec, l) }
+
+fn main() -> Nat { 0 }

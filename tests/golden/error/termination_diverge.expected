@@ -1,0 +1,13 @@
+[E0062] Error: cannot prove termination of `diverge`
+   ╭─[tests/golden/error/termination_diverge.tg:2:1]
+   │
+ 2 │ fn diverge() -> Void { diverge() }
+   │ ─────────────────┬────────────────  
+   │                  ╰────────────────── 
+   │ 
+   │ Help: call the definition directly so the recursion is visible, or mark it `#[partial]`
+   │ 
+   │ Note: `diverge` is mentioned outside call position, so the recursive call cannot be inspected
+───╯
+
+error: aborting due to 1 error

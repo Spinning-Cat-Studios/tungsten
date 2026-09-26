@@ -1,0 +1,291 @@
+// Semantics tests for the CtorStore dedup index (ADR 21.7.26c AC3):
+// (a) exact-duplicate idempotence, (b) near-duplicate retention,
+// (c) phase-crossing stub/real coexistence + export dedup parity,
+// (d) adversarial key-separator names, (e) representation invariant
+// across module_contents_empty + every add_* path.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_bool, assert_eq_nat};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_len};
+use lexer::span::{Span, span_new};
+use parser::ast::common::{Visibility, VisPublic};
+use elab::ffi::{INVALID_HANDLE};
+use elab::env::defs::{
+    ConstructorInfo, CtorIdentity, constructor_info_new, constructor_list_contains_exact,
+    CtorStore, ctor_store_empty, ctor_store_add, ctor_store_contains_exact,
+    TypeDefCore, TypeDefMeta, type_def_info_new, value_def_info_new
+};
+use elab::env::module::{
+    ModuleContents, module_contents_empty, module_contents_add_type,
+    module_contents_add_value, module_contents_add_constructor,
+    module_contents_add_constructors, module_contents_add_import,
+    elab_module_path_root, elab_module_path_append, import_new,
+    ModuleMap, module_map_empty, module_map_insert, module_map_lookup,
+    module_map_concat, MaybeModuleContents, SomeModuleContents, NoModuleContents
+};
+use elab::items::per_module::combined::dedup::{dedup_constructors};
+
+// ---------------------------------------------------------------------------
+// Test fixtures
+// ---------------------------------------------------------------------------
+
+/// A fully-registered constructor with a concrete field_types handle.
+fn mk_ctor(parent: String, name: String, index: Nat, arity: Nat, field_types: Nat) -> ConstructorInfo {
+    constructor_info_new(
+        { name: name, parent_type: parent, index: index, arity: arity },
+        field_types, 0, VisPublic, span_new(0, 0, "")
+    )
+}
+
+/// A Stub Registration stub: INVALID_HANDLE sentinels for field_types/result_type.
+fn mk_stub(parent: String, name: String, index: Nat, arity: Nat) -> ConstructorInfo {
+    constructor_info_new(
+        { name: name, parent_type: parent, index: index, arity: arity },
+        INVALID_HANDLE(), INVALID_HANDLE(), VisPublic, span_new(0, 0, "")
+    )
+}
+
+// ---------------------------------------------------------------------------
+// (a) Exact duplicate re-registration is idempotent
+// ---------------------------------------------------------------------------
+
+pub fn test_ctor_store_exact_duplicate_idempotent() -> Unit {
+    let red = mk_ctor("Color", "Red", 0, 0, 5);
+    let once = ctor_store_add(ctor_store_empty(), red);
+    let twice = ctor_store_add(once, red);
+    assert_eq_nat(list_len(twice.all), 1)
+}
+
+pub fn test_module_contents_add_constructor_idempotent() -> Unit {
+    let red = mk_ctor("Color", "Red", 0, 0, 5);
+    let contents = module_contents_empty(elab_module_path_root());
+    let once = module_contents_add_constructor(contents, red);
+    let twice = module_contents_add_constructor(once, red);
+    assert_eq_nat(list_len(twice.constructors.all), 1)
+}
+
+// ---------------------------------------------------------------------------
+// (b) Near-duplicates — same (parent_type, name, index), differing arity
+//     or field_types — are both retained (bucket discrimination)
+// ---------------------------------------------------------------------------
+
+pub fn test_near_duplicate_differing_arity_both_retained() -> Unit {
+    let narrow = mk_ctor("Shape", "Circle", 0, 1, 7);
+    let wide = mk_ctor("Shape", "Circle", 0, 2, 7);
+    let store = ctor_store_add(ctor_store_add(ctor_store_empty(), narrow), wide);
+    assert_eq_nat(list_len(store.all), 2)
+}
+
+pub fn test_near_duplicate_differing_field_types_both_retained() -> Unit {
+    let of_nat = mk_ctor("Wrap", "MkWrap", 0, 1, 7);
+    let of_string = mk_ctor("Wrap", "MkWrap", 0, 1, 8);
+    let store = ctor_store_add(ctor_store_add(ctor_store_empty(), of_nat), of_string);
+    assert_eq_nat(list_len(store.all), 2)
+}
+
+// ---------------------------------------------------------------------------
+// (c) Phase-crossing: an INVALID_HANDLE stub and its real registration
+//     coexist, and export dedup output is unchanged on that case
+// ---------------------------------------------------------------------------
+
+pub fn test_phase_crossing_stub_and_real_coexist() -> Unit {
+    let stub = mk_stub("Shape", "Circle", 0, 1);
+    let real = mk_ctor("Shape", "Circle", 0, 1, 42);
+    let store = ctor_store_add(ctor_store_add(ctor_store_empty(), stub), real);
+    let _both = assert_eq_nat(list_len(store.all), 2);
+    // The dedup miss is mirrored exactly: both are "contained".
+    let _stub_found = assert_eq_bool(ctor_store_contains_exact(store, stub), true);
+    assert_eq_bool(ctor_store_contains_exact(store, real), true)
+}
+
+pub fn test_phase_crossing_export_dedup_unchanged() -> Unit {
+    let stub = mk_stub("Shape", "Circle", 0, 1);
+    let real = mk_ctor("Shape", "Circle", 0, 1, 42);
+    let store = ctor_store_add(ctor_store_add(ctor_store_empty(), stub), real);
+    let deduped = dedup_constructors(store.all);
+    let _one = assert_eq_nat(list_len(deduped), 1);
+    // The survivor is the most-recent (real) entry, exactly as before.
+    match deduped {
+        Nil() => assert_eq_bool(false, true),
+        Cons(survivor, _) => assert_eq_nat(survivor.field_types, 42)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (d) Adversarial names containing the key separator behave identically
+//     to the list guard — a rendered-key collision only merges buckets
+// ---------------------------------------------------------------------------
+
+pub fn test_separator_collision_keeps_distinct_ctors() -> Unit {
+    // Both render the dedup key "A|B|C|1" but are distinct identities.
+    let split_parent = mk_ctor("A|B", "C", 1, 0, 7);
+    let split_name = mk_ctor("A", "B|C", 1, 0, 7);
+    let store = ctor_store_add(ctor_store_add(ctor_store_empty(), split_parent), split_name);
+    assert_eq_nat(list_len(store.all), 2)
+}
+
+pub fn test_separator_collision_matches_list_guard() -> Unit {
+    let split_parent = mk_ctor("A|B", "C", 1, 0, 7);
+    let split_name = mk_ctor("A", "B|C", 1, 0, 7);
+    let absent = mk_ctor("A|B", "C", 1, 0, 8);
+    let store = ctor_store_add(ctor_store_add(ctor_store_empty(), split_parent), split_name);
+    let _p = assert_eq_bool(
+        ctor_store_contains_exact(store, split_parent),
+        constructor_list_contains_exact(store.all, split_parent)
+    );
+    let _n = assert_eq_bool(
+        ctor_store_contains_exact(store, split_name),
+        constructor_list_contains_exact(store.all, split_name)
+    );
+    assert_eq_bool(
+        ctor_store_contains_exact(store, absent),
+        constructor_list_contains_exact(store.all, absent)
+    )
+}
+
+pub fn test_separator_collision_duplicate_still_idempotent() -> Unit {
+    let split_parent = mk_ctor("A|B", "C", 1, 0, 7);
+    let split_name = mk_ctor("A", "B|C", 1, 0, 7);
+    let store = ctor_store_add(ctor_store_add(ctor_store_empty(), split_parent), split_name);
+    let again = ctor_store_add(store, split_parent);
+    assert_eq_nat(list_len(again.all), 2)
+}
+
+// ---------------------------------------------------------------------------
+// (e) Representation invariant: every list entry is findable through the
+//     index, across module_contents_empty + every add_* path
+// ---------------------------------------------------------------------------
+
+/// The D3 invariant: each entry of `all` is present in its key's bucket
+/// (i.e. the index finds exactly what the list holds).
+fn store_invariant_holds(entries: List<ConstructorInfo>, store: CtorStore) -> Bool {
+    match entries {
+        Nil() => true,
+        Cons(info, rest) =>
+            if ctor_store_contains_exact(store, info) {
+                store_invariant_holds(rest, store)
+            } else {
+                false
+            }
+    }
+}
+
+/// Exercise every ModuleContents builder: empty, add_type, add_value,
+/// add_constructor, batch add_constructors, add_import.
+fn build_contents_via_every_add_path() -> ModuleContents {
+    let root = elab_module_path_root();
+    let empty = module_contents_empty(root);
+    let ty_meta: TypeDefMeta = { kind: 0, vis: VisPublic, span: span_new(0, 0, ""), encoded_type: 0 };
+    let with_type = module_contents_add_type(
+        empty,
+        type_def_info_new({ name: "Color", arity: 0, params: Nil }, ty_meta)
+    );
+    let with_value = module_contents_add_value(
+        with_type,
+        value_def_info_new("paint", 0, VisPublic, span_new(0, 0, ""))
+    );
+    let with_ctor = module_contents_add_constructor(with_value, mk_ctor("Color", "Red", 0, 0, 5));
+    let with_batch = module_contents_add_constructors(
+        with_ctor,
+        Cons(mk_ctor("Color", "Green", 1, 0, 5), Cons(mk_ctor("Color", "Blue", 2, 0, 5), Nil))
+    );
+    module_contents_add_import(
+        with_batch,
+        import_new(root, "paint", "paint", VisPublic, span_new(0, 0, ""))
+    )
+}
+
+pub fn test_invariant_across_every_add_path() -> Unit {
+    let contents = build_contents_via_every_add_path();
+    let _count = assert_eq_nat(list_len(contents.constructors.all), 3);
+    assert_eq_bool(store_invariant_holds(contents.constructors.all, contents.constructors), true)
+}
+
+pub fn test_empty_contents_has_empty_store() -> Unit {
+    let contents = module_contents_empty(elab_module_path_root());
+    assert_eq_nat(list_len(contents.constructors.all), 0)
+}
+
+// ---------------------------------------------------------------------------
+// (f) module_map_concat front-shadows-back (ADR 23.7.26d re-injection fix)
+//
+// The Phase-B walk splices the shared prior-results map (FRONT, full elaborated
+// defs) in front of the per-module fresh env map (BACK, name-only stubs). On a
+// path present in both, the FULL front contents must win — else a completed
+// module resolves to its stub and cross-module imports regress with E0202.
+// ---------------------------------------------------------------------------
+
+/// Contents for `path` carrying the given constructor list (a "full" module).
+fn contents_with_ctors(path: ElabModulePath, ctors: List<ConstructorInfo>) -> ModuleContents {
+    module_contents_add_constructors(module_contents_empty(path), ctors)
+}
+
+/// Constructor count of a looked-up slot (999 = path absent — never expected).
+fn ctor_count_at(map: ModuleMap, path: ElabModulePath) -> Nat {
+    match module_map_lookup(map, path) {
+        SomeModuleContents(c) => list_len(c.constructors.all),
+        NoModuleContents() => 999
+    }
+}
+
+// HISTORY, not a constraint. Keyed on `root::X`, the two `module_map_concat`
+// tests below that predate ADR 6.8.26b (`front_shadows_back` and
+// `empty_front_is_identity` — the third is new) passed with a deliberately
+// wrong expected count: `module_map_lookup` compares paths through
+// `elab_module_path_eq` → `list_eq_string` → `string_eq` → the then-unexecutable
+// `tg_string_char_at_internal`, so comparing two EQUAL non-empty paths went
+// silently Stuck and the enclosing assertion never ran. They had asserted nothing
+// since the day they were written, leaving ADR 23.7.26d's layer-1-shadows-layer-2
+// contract uncovered.
+//
+// ADR 6.8.26b closed that two ways at once, and the second retired the first:
+// `ASSERTED NOTHING` now fails the run, AND D6 (reversed on the census evidence)
+// registered `tg_string_char_at_internal` as executable. So a non-root key is
+// once again a perfectly good key — `tungsten info eval externs | grep char_at`
+// is the check. The root keying below is kept because it is now the *simpler*
+// shape, not because a comparison would stick; §2.4's "the tests can no longer
+// distinguish two populated modules" was true when written and was falsified by
+// D6 inside the same ADR. Widening these back to X-vs-Y is a legitimate change,
+// not a regression — just re-run and confirm the counts are non-zero
+// (`--assertion-census`), which is the guard that made the rewrite unnecessary.
+
+pub fn test_module_map_concat_front_shadows_back() -> Unit {
+    let root = elab_module_path_root();
+    let decoy = elab_module_path_append(root, "X");
+    // BACK: a name-only stub (0 ctors) at root — the populate slot.
+    let back = module_map_insert(module_map_empty(), root, contents_with_ctors(root, Nil));
+    // FRONT: root fully elaborated (2 ctors) — a completed prior result —
+    // behind a decoy entry whose path length differs, so reaching the root
+    // entry exercises fall-through without a same-length comparison.
+    let root_full = Cons(mk_ctor("R", "A", 0, 0, 5), Cons(mk_ctor("R", "B", 1, 0, 5), Nil));
+    let front = module_map_insert(
+        module_map_insert(module_map_empty(), root, contents_with_ctors(root, root_full)),
+        decoy, contents_with_ctors(decoy, Nil)
+    );
+    // root resolves to the FULL front contents (2), NOT the back stub (0).
+    assert_eq_nat(ctor_count_at(module_map_concat(front, back), root), 2)
+}
+
+/// The same splice with the arguments reversed resolves to the stub, which is
+/// what keeps the test above honest: it is reading argument order, not passing
+/// because both sides happen to agree.
+pub fn test_module_map_concat_back_does_not_shadow_front() -> Unit {
+    let root = elab_module_path_root();
+    let back = module_map_insert(module_map_empty(), root, contents_with_ctors(root, Nil));
+    let root_full = Cons(mk_ctor("R", "A", 0, 0, 5), Nil);
+    let front = module_map_insert(module_map_empty(), root, contents_with_ctors(root, root_full));
+    assert_eq_nat(ctor_count_at(module_map_concat(back, front), root), 0)
+}
+
+pub fn test_module_map_concat_empty_front_is_identity() -> Unit {
+    let root = elab_module_path_root();
+    let one = Cons(mk_ctor("R", "A", 0, 0, 5), Nil);
+    let back = module_map_insert(module_map_empty(), root, contents_with_ctors(root, one));
+    // Empty front ⇒ concat is exactly the back map (no shadowing, no loss).
+    assert_eq_nat(ctor_count_at(module_map_concat(module_map_empty(), back), root), 1)
+}

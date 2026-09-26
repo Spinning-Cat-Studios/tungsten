@@ -1,0 +1,85 @@
+// src/compiler/elab/exprs/matches/patterns/projection_path.tg
+// Where a field sits inside a right-nested product — the ONE statement of the
+// convention every projection builder reads (ADR 3.9.26g).
+//
+// ADR 1.8.26b D1 fixed the nesting: an `n`-element product is `A × (B × (C …))`,
+// so field `i` is reached by `i` `snd` steps and then a `fst` — EXCEPT for the
+// last field, which those `snd` steps have already landed on. That exception is
+// the whole of the convention, and it is what four modules used to spell out for
+// themselves, two of them wrongly (ADR 3.9.26g §1.1): projecting the last field
+// with a `fst` too asks for `fst` of a scalar, a Stuck term the type walk beside
+// it never agreed with.
+//
+// Two elements cannot tell the two conventions apart at field 0 — both emit
+// `fst` — so a two-field fixture proves nothing about the convention. Three is
+// the smallest arity where every case is distinguishable, which is why the
+// suite asserts one, two AND three.
+//
+// The chain is a value rather than a shape each builder open-codes, so the Core
+// term walk, the CIR walk and the TYPE walk all fold the same list. A builder
+// can still be wrong here; it can no longer be wrong in a way its neighbour is
+// not.
+
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle,
+    tg_type_get_product_left, tg_type_get_product_right
+};
+
+/// One step of a projection out of a right-nested product.
+pub type ProjectionStep =
+    | StepFst
+    | StepSnd
+
+/// The steps that reach field `index` of an `arity`-element right-nested
+/// product, in APPLICATION order: the first step is applied to the source, the
+/// next to that result. `[StepSnd, StepFst]` is therefore `fst(snd(src))`.
+///
+/// An arity-one "product" is not a product — the value IS the field — so its
+/// chain is empty. So is the tail of the LAST field of any arity, beyond the
+/// `snd` steps that reach it.
+// Partial (ADR 3.9.26g): `index - 1` is not a structural subterm of `index`, so
+// this is a measure recursion over a Nat. Executable compiler code that no proof
+// reaches; E0063 fires if that ever changes.
+#[partial]
+pub fn product_field_projection(index: Nat, arity: Nat) -> List<ProjectionStep> {
+    if index == 0 {
+        first_field_projection(arity)
+    } else {
+        Cons(StepSnd, product_field_projection(index - 1, arity - 1))
+    }
+}
+
+/// The chain for field 0: `fst`, unless field 0 is also the last field.
+fn first_field_projection(arity: Nat) -> List<ProjectionStep> {
+    if arity <= 1 {
+        let none_needed: List<ProjectionStep> = Nil;
+        none_needed
+    } else {
+        Cons(StepFst, Nil)
+    }
+}
+
+/// The type the field `steps` reaches, folding the same chain with the product
+/// accessors.
+///
+/// The type walk and the term walk therefore read ONE list. `tuple_let` used to
+/// type field `i` as `snd^(n-1)` three functions above the code that projected
+/// it as `fst(snd^i)`, in the same module, and nothing could see the
+/// disagreement because neither of them named the convention.
+pub fn product_field_type(ty: TypeHandle, steps: List<ProjectionStep>) -> TypeHandle {
+    match steps {
+        Nil() => ty,
+        Cons(step, rest) => product_field_type(step_field_type(ty, step), rest)
+    }
+}
+
+/// Take one step through a product type. A non-product answers `INVALID_HANDLE`
+/// rather than trapping, which is the accessors' own contract: an ill-typed
+/// destructure is reported by the type-checker, not by this walk.
+fn step_field_type(ty: TypeHandle, step: ProjectionStep) -> TypeHandle {
+    match step {
+        StepFst() => tg_type_get_product_left(ty),
+        StepSnd() => tg_type_get_product_right(ty)
+    }
+}

@@ -3,6 +3,7 @@
 pub mod hints;
 mod renderers;
 mod rendering;
+mod structural_divergence;
 
 pub use hints::{set_hint_mode, HintMode};
 pub use rendering::{
@@ -33,6 +34,19 @@ pub fn set_max_errors(max: usize) {
 /// Get the current maximum number of errors setting.
 pub fn get_max_errors() -> usize {
     MAX_ERRORS.with(|m| m.get())
+}
+
+/// The structural-divergence note for an error whose two types render
+/// identically (ADR 21.7.26f / D2). `None` for every other error and for
+/// mismatches whose renders already differ — the enrichment adds no noise to
+/// the common case.
+pub(super) fn type_mismatch_divergence_note(error: &ElabError) -> Option<String> {
+    match &error.kind {
+        ElabErrorKind::TypeMismatch { expected, found } => {
+            structural_divergence::identical_render_note(expected, found)
+        }
+        _ => None,
+    }
 }
 
 /// Format the primary label message with proper type display.
@@ -224,5 +238,45 @@ mod tests {
         let message = format_error_message(&error);
         assert!(message.contains("Nat"));
         assert!(message.contains("Bool"));
+    }
+
+    // ── identical-render enrichment dispatch (ADR 21.7.26f / D2) ────────────
+
+    /// `StrMap<CtorBucket>` where one argument is the resolved ADT and the
+    /// other an unresolved application — the two render identically.
+    fn identically_rendering_mismatch() -> ElabError {
+        let resolved = Type::App(
+            "StrMap".to_string(),
+            vec![Type::Adt(
+                "CtorBucket".to_string(),
+                vec![],
+                vec![("Bucket".to_string(), Type::Nat)],
+            )],
+        );
+        let unresolved = Type::App(
+            "StrMap".to_string(),
+            vec![Type::App("CtorBucket".to_string(), vec![])],
+        );
+        ElabError::type_mismatch(Span::new(0, 10), resolved, unresolved)
+    }
+
+    #[test]
+    fn identical_render_mismatch_gets_a_divergence_note() {
+        let note = type_mismatch_divergence_note(&identically_rendering_mismatch())
+            .expect("an identical-render mismatch warrants a note");
+        assert!(note.contains("type argument #1 of `StrMap`"), "{note}");
+    }
+
+    #[test]
+    fn an_ordinary_mismatch_gets_no_note() {
+        // The zero-noise guarantee at the dispatch layer.
+        let error = ElabError::type_mismatch(Span::new(0, 10), Type::Nat, Type::Bool);
+        assert_eq!(type_mismatch_divergence_note(&error), None);
+    }
+
+    #[test]
+    fn a_non_mismatch_error_gets_no_note() {
+        let error = ElabError::new(Span::new(0, 10), crate::ElabErrorKind::NoMainFunction);
+        assert_eq!(type_mismatch_divergence_note(&error), None);
     }
 }

@@ -1,0 +1,18 @@
+// The driver half of the split: `mod.tg` owns the recursion, `steps.tg` owns
+// the per-case work — and `steps.tg` names both a type and a function from here.
+pub mod steps;
+
+use pipeline::steps::classify;
+
+pub type Fuel = More(Fuel) | Empty
+pub type Step = Go | Stop
+
+pub fn run_pipeline(f: Fuel) -> Nat {
+    match f {
+        More(rest) => match classify(rest) {
+            Go => 1 + run_pipeline(rest),
+            Stop => 1
+        },
+        Empty => 0
+    }
+}

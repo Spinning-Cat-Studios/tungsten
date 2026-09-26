@@ -1,0 +1,109 @@
+// Runtime tests for integer `match` (ADR 18.9.26e AC 1).
+//
+// Cost 5: every assertion is a RUNTIME comparison, so these run on
+// `tungsten test` host-side (the bootstrap evaluator) and, by hand in the
+// devcontainer, under `tungsten1` (AC 3) — the arm that proves the
+// self-host's conditional chain selects the same arm the bootstrap's does.
+// `--assertion-census` is what proves each test's comparison ran.
+//
+// This file is its own entry and must NEVER be imported from
+// `src/compiler/main.tg`. The must-fail twin is `mustfail_int_match.tg`.
+//
+// The extern is declared here rather than imported from `driver::ffi::test`,
+// as `test_module_cycles.tg` does: a `mod driver;` would elaborate the whole
+// self-hosted compiler to reach a two-line wrapper.
+
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+
+fn assert_eq_nat(left: Nat, right: Nat) -> Unit {
+    tg_assert_eq_nat(left, right)
+}
+
+/// A negative literal, an or-of-literals, a guarded variable arm and the
+/// catch-all, in the order first-match-wins must respect.
+fn classify(n: Int) -> Nat {
+    match n {
+        -1 => 10,
+        0 | 7 => 20,
+        x if x > 0 => 30,
+        _ => 40
+    }
+}
+
+/// `n - 1` is not a structural subterm of `n`, so this is `#[partial]`.
+#[partial]
+fn fib(n: Nat) -> Nat {
+    match n {
+        0 => 0,
+        1 => 1,
+        _ => fib(n - 1) + fib(n - 2)
+    }
+}
+
+/// A failed guard falls through to the NEXT arm, not to the catch-all.
+fn pick(n: Int) -> Nat {
+    match n {
+        x if x > 100 => 1,
+        5 => 2,
+        _ => 3
+    }
+}
+
+/// The guarded arm's `x` scopes only its own guard and body: the catch-all's
+/// `x` is the parameter.
+fn keep(x: Nat) -> Nat {
+    match 3 {
+        x if x == 0 => 1,
+        _ => x
+    }
+}
+
+/// `Int`'s minimum is a legal pattern.
+fn is_min(n: Int) -> Bool {
+    match n {
+        -9223372036854775808 => true,
+        _ => false
+    }
+}
+
+fn test_classify_negative_one() -> () {
+    assert_eq_nat(classify(-1), 10)
+}
+
+fn test_classify_or_of_literals_shares_an_arm() -> () {
+    assert_eq_nat(classify(0), 20);
+    assert_eq_nat(classify(7), 20)
+}
+
+fn test_classify_or_arm_wins_over_the_later_guard() -> () {
+    assert_eq_nat(classify(7), 20)
+}
+
+fn test_classify_positive_takes_the_guarded_arm() -> () {
+    assert_eq_nat(classify(1), 30)
+}
+
+fn test_classify_other_negatives_reach_the_catch_all() -> () {
+    assert_eq_nat(classify(-5), 40)
+}
+
+fn test_fib_on_nat_literals() -> () {
+    assert_eq_nat(fib(0), 0);
+    assert_eq_nat(fib(1), 1);
+    assert_eq_nat(fib(10), 55)
+}
+
+fn test_failed_guard_falls_through_to_the_next_arm() -> () {
+    assert_eq_nat(pick(5), 2);
+    assert_eq_nat(pick(500), 1);
+    assert_eq_nat(pick(6), 3)
+}
+
+fn test_variable_arm_does_not_shadow_later_arms() -> () {
+    assert_eq_nat(keep(9), 9)
+}
+
+fn test_int_min_is_a_pattern() -> () {
+    assert_eq_nat(if is_min(-9223372036854775808) { 1 } else { 0 }, 1);
+    assert_eq_nat(if is_min(-1) { 1 } else { 0 }, 0)
+}

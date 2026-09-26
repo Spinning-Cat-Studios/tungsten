@@ -21,6 +21,10 @@ pub(crate) fn cmd_compile(
         }
     }
 
+    if let Err(code) = validate_only_unit_flags(flags) {
+        return code;
+    }
+
     // Use driver's elaborate_project for multi-module support
     let trace_opts = driver::TraceOptions {
         trace_types: flags.diagnostics.trace_types.clone(),
@@ -40,16 +44,7 @@ pub(crate) fn cmd_compile(
         };
     let elab_elapsed = elab_start.elapsed();
 
-    if flags.verbose {
-        eprintln!("[perf] elab={:.2}s", elab_elapsed.as_secs_f64());
-        eprintln!("Elaborated {} definition(s)", project.defs.len());
-        if !project.record_types.is_empty() {
-            eprintln!("Found {} record type(s)", project.record_types.len());
-        }
-        if !project.adt_types.is_empty() {
-            eprintln!("Found {} ADT type(s)", project.adt_types.len());
-        }
-    }
+    log_elaboration_summary(flags, &project, elab_elapsed);
 
     if flags.dump_types {
         for def in &project.defs {
@@ -96,6 +91,7 @@ pub(crate) fn cmd_compile(
 
     // Choose codegen strategy: per-module when multi-module, single-module otherwise
     let has_multiple_units = project.codegen_units.len() > 1;
+    warn_only_unit_ignored_for_single_unit(flags, has_multiple_units);
     let codegen_start = std::time::Instant::now();
     let result = if has_multiple_units {
         per_module::run_codegen_per_module(file, output, flags, &project, &main_ty)
@@ -117,6 +113,46 @@ pub(crate) fn cmd_compile(
         );
     }
     result
+}
+
+/// Gate for `--only-unit` (ADR 3.7.26b): isolation compiles a subset of
+/// codegen units; the resulting partial object set cannot link, so
+/// --emit-llvm is required (--no-codegen warns the flag away instead).
+fn validate_only_unit_flags(flags: &CompileFlags) -> Result<(), ExitCode> {
+    if !flags.diagnostics.only_units.is_empty() && !flags.emit_llvm && !flags.no_codegen {
+        eprintln!("error: --only-unit requires --emit-llvm.");
+        eprintln!("       Unit isolation emits .ll files for the selected unit(s) only;");
+        eprintln!("       a partial object set cannot be linked into a binary.");
+        return Err(ExitCode::FAILURE);
+    }
+    Ok(())
+}
+
+/// `--only-unit` only has meaning on the per-module codegen path; a
+/// single-unit program silently taking the single-module path would make
+/// the flag a no-op, so say so (ADR 3.7.26b).
+fn warn_only_unit_ignored_for_single_unit(flags: &CompileFlags, has_multiple_units: bool) {
+    if !flags.diagnostics.only_units.is_empty() && !has_multiple_units {
+        eprintln!("warning: --only-unit ignored: program has a single codegen unit");
+    }
+}
+
+/// Verbose post-elaboration summary (definition/record/ADT counts + timing).
+fn log_elaboration_summary(
+    flags: &CompileFlags,
+    project: &driver::ProjectOutput,
+    elab_elapsed: std::time::Duration,
+) {
+    if flags.verbose {
+        eprintln!("[perf] elab={:.2}s", elab_elapsed.as_secs_f64());
+        eprintln!("Elaborated {} definition(s)", project.defs.len());
+        if !project.record_types.is_empty() {
+            eprintln!("Found {} record type(s)", project.record_types.len());
+        }
+        if !project.adt_types.is_empty() {
+            eprintln!("Found {} ADT type(s)", project.adt_types.len());
+        }
+    }
 }
 
 /// Apply compile flags to a CodeGen instance.
@@ -144,6 +180,9 @@ fn configure_codegen(
     }
     if flags.diagnostics.tracing.trace_escape {
         codegen.set_trace_escape();
+    }
+    if let Some(ref filter) = flags.diagnostics.dump_synthesized {
+        codegen.set_dump_synthesized(filter.clone());
     }
     if flags.named_lambdas {
         codegen.set_named_lambdas(true);
@@ -182,8 +221,22 @@ fn run_codegen(
 
     configure_codegen(&mut codegen, file, flags);
 
-    codegen.register_record_types(project.record_types);
+    codegen.register_record_types(project.record_types.clone());
+    // Comparator synthesis resolves generic instantiations through the same ADT
+    // definitions codegen lowers (ADR 1.8.26c), so keep a copy before the
+    // codegen-shaped conversion consumes them.
+    let adt_types_for_comparator = project.adt_types.clone();
     codegen.register_adt_types(convert_adt_types_for_codegen(project.adt_types));
+    // Install the lazy comparator-synthesis callback (ADR 29.6.26f P6′ step 2).
+    codegen.set_comparator_synth(tungsten_bootstrap::comparator::codegen_hook::codegen_synth(
+        tungsten_bootstrap::comparator::ComparatorTypes::new(
+            project.record_types,
+            &project.encoded_types,
+            &project.type_provenance,
+            adt_types_for_comparator,
+            &project.mutual_recursion_groups,
+        ),
+    ));
 
     // Pass 1: Declare all functions and register definitions
     let extern_name_map = match declare_and_register_defs(&mut codegen, &project.defs) {

@@ -1,0 +1,217 @@
+// src/compiler/driver/pipeline/test/execute.tg
+// Writing the harness, compiling it, running it — and always cleaning up
+// afterwards (ADR 7.8.26b §2.3).
+//
+// Split out of `test/mod.tg`, which held both halves and went past the 300-line
+// cap once the funnel arrived. The seam is real rather than arithmetic:
+// everything above it decides WHAT to run, everything here performs it.
+//
+// Note who pays for the codegen. Neither `run_compile` nor this file codegens:
+// both shell out to the bootstrap binary. So the wall clock of a self-hosted
+// `test` on a compiler-sized file is the BOOTSTRAP compiling a compiler-sized
+// harness, and improving self-host codegen would not move it. Measured at
+// 40.2 s for `test_ctor_store.tg` (2117 definitions) against the bootstrap's
+// own 35.4 s for the same file — 1.14×, not the order of magnitude the ADR's
+// D6 predicted (§2.0 Step 3, ARM 3).
+
+use driver::ffi::{
+    eprintln, List, Nil, Cons,
+    exec_process_outcome, exec_succeeded, ExecOutcome, ExecExited, ExecSpawnFailed,
+    read_file, write_file, remove_file,
+    FfiOk, FfiErr
+};
+use driver::util::{Option, Some, None, nat_to_string};
+use driver::cli::{TestOpts};
+use elab::error::render::colors::{colorize_bold, ColorRed, ColorCyan};
+use driver::pipeline::{PipelineResult, PipelineOk, PipelineErr};
+use driver::pipeline::bootstrap_lookup::{
+    BootstrapChoice, find_bootstrap_choice, bootstrap_failure_message
+};
+use driver::pipeline::test::harness::{generate_harness_source};
+use driver::pipeline::test::artifact::{harness_artifact_path};
+use driver::pipeline::test::mode::types::{HarnessPlan};
+
+/// The two files a run leaves behind, and must not.
+pub type HarnessArtifacts = {
+    source: String,
+    binary: String
+}
+
+/// Everything the steps below need, bundled so no step reaches the
+/// five-parameter cap and none of them can be handed a different plan than the
+/// one detection produced.
+pub type HarnessRun = {
+    opts: TestOpts,
+    plan: HarnessPlan,
+    artifacts: HarnessArtifacts,
+    use_color: Bool
+}
+
+/// Generate harness source, compile, execute, report — and always clean up.
+pub fn compile_and_run_tests(opts: TestOpts, plan: HarnessPlan,
+                             use_color: Bool) -> PipelineResult {
+    match read_file(opts.file) {
+        FfiErr(err) => {
+            // Nothing has been written yet, so there is nothing to unlink.
+            eprintln(colorize_bold("error", ColorRed, use_color) ++
+                    ": could not read test file: " ++ err);
+            PipelineErr(1)
+        },
+        FfiOk(source) => run_and_clean_up(harness_run(opts, plan, use_color), source)
+    }
+}
+
+/// Where the artifacts go. The `_tgtest_` prefix on the BASENAME is what keeps
+/// the generated file out of `make tg-test`'s `test_*` glob (7.8.26a D4).
+fn harness_run(opts: TestOpts, plan: HarnessPlan, use_color: Bool) -> HarnessRun {
+    let binary = harness_artifact_path(opts.file);
+    {
+        opts: opts,
+        plan: plan,
+        artifacts: { source: binary ++ ".tg", binary: binary } : HarnessArtifacts,
+        use_color: use_color
+    } : HarnessRun
+}
+
+/// THE FUNNEL. Every path that could leave an artifact behind goes through here.
+///
+/// The old body deleted the artifacts on NO path, and the fix is not to scatter
+/// a `remove_file` at each of the five returns: `.tg` has no `defer` and no
+/// `Drop`, so scattering is how "deleted on every path but one" happens next.
+/// The body computes a `PipelineResult`, and exactly one place unlinks.
+///
+/// `remove_file` treats a missing file as success, which is what makes the
+/// write-failed path safe to route through here too.
+fn run_and_clean_up(run: HarnessRun, source: String) -> PipelineResult {
+    let result = write_compile_run(run, source);
+    remove_file(run.artifacts.source);
+    remove_file(run.artifacts.binary);
+    result
+}
+
+fn write_compile_run(run: HarnessRun, source: String) -> PipelineResult {
+    match generate_harness_source(run.plan, source) {
+        None() => {
+            // Unreachable: `run_servable_suite` refuses an unsupported layout
+            // before we get here. Loud rather than silent if that ever changes.
+            eprintln(colorize_bold("error", ColorRed, run.use_color) ++
+                    ": internal error: no harness template for this file");
+            PipelineErr(1)
+        },
+        Some(harness_source) => write_then_compile(run, harness_source)
+    }
+}
+
+fn write_then_compile(run: HarnessRun, harness_source: String) -> PipelineResult {
+    match write_file(run.artifacts.source, harness_source) {
+        FfiErr(err) => {
+            eprintln(colorize_bold("error", ColorRed, run.use_color) ++
+                    ": could not write harness file: " ++ err);
+            PipelineErr(1)
+        },
+        FfiOk(_) => compile_then_run(run)
+    }
+}
+
+fn compile_then_run(run: HarnessRun) -> PipelineResult {
+    let compile_args = Cons("compile",
+                       Cons(run.artifacts.source,
+                       Cons("-o", Cons(run.artifacts.binary, Nil))));
+
+    if run.opts.verbose {
+        eprintln(colorize_bold("info", ColorCyan, run.use_color) ++
+                ": compiling test harness (" ++
+                nat_to_string(run.plan.test_count) ++ " tests)")
+    };
+
+    // The CHOICE, not just the path: a failure here has to name the step that
+    // picked the binary, or the reader cannot tell which knob to turn
+    // (ADR 3.9.26s D3).
+    let bootstrap = find_bootstrap_choice();
+
+    // BIND THE EXEC TO A `let` BEFORE BRANCHING ON IT. An `exec_process(...)`
+    // written directly into an `if` condition RUNS THE PROCESS TWICE when it
+    // exits 0 — observed on the self-compiled `tungsten1`, where it produced
+    // two "✓ Compiled to" lines and ran the harness binary twice. A `let`
+    // forces it exactly once. Filed as a bug report (an effectful call in an
+    // `if` condition runs twice on the self-hosted compiler); until that is
+    // fixed, treat this as a rule for every effectful call here.
+    let outcome = exec_process_outcome(bootstrap.path, compile_args);
+    if exec_succeeded(outcome) {
+        run_harness_binary(run)
+    } else {
+        eprintln(colorize_bold("error", ColorRed, run.use_color) ++
+                harness_compile_failure_message(bootstrap, outcome));
+        PipelineErr(1)
+    }
+}
+
+/// What the test pipeline says when the bootstrap will not compile the harness.
+///
+/// The stage prefix is the only thing that differs from the compile pipeline's
+/// wording; everything after it is `bootstrap_failure_message`, so the path,
+/// the step that chose it and the spawn-versus-exit distinction are worded in
+/// exactly one place. The old message — `": test compilation failed"` — carried
+/// none of the three, which is the pre-ADR-3.9.26b experience one file over
+/// (ADR 3.9.26s D3).
+///
+/// Pure over its two arguments, so the shape is assertable without spawning
+/// anything; that is what `test_driver_paths.tg` pins.
+pub fn harness_compile_failure_message(choice: BootstrapChoice,
+                                       outcome: ExecOutcome) -> String {
+    ": test harness compilation failed" ++ bootstrap_failure_message(choice, outcome)
+}
+
+/// What the driver says about a harness binary that never started — and, on the
+/// other arm, that it says nothing at all (ADR 5.9.26b D1).
+///
+/// `None` is a decision, not a missing case: a harness that ran and exited
+/// non-zero has already printed its own test report, and a driver verdict under
+/// it would be a second, less informative one. The silence is only wrong when
+/// the process produced no report because it never ran.
+///
+/// Pure over its two arguments, so both arms are assertable without spawning
+/// anything — the same seam `harness_compile_failure_message` has.
+pub fn harness_run_message(binary: String, outcome: ExecOutcome) -> Option<String> {
+    match outcome {
+        ExecExited(_) => None,
+        ExecSpawnFailed(err) => Some(harness_run_failure_message(binary, err))
+    }
+}
+
+/// Not `bootstrap_failure_message` (ADR 5.9.26b D2).
+///
+/// That builder names the resolution STEP, because the compile pipeline's binary
+/// was found by searching. This one was built by this same run into a path the
+/// driver computed, so there is no step to name and no bootstrap knob to turn:
+/// what the reader needs is the artefact path and the operating system's reason.
+pub fn harness_run_failure_message(binary: String, error: String) -> String {
+    ": could not run the compiled test harness at " ++ binary ++ ": " ++ error
+}
+
+fn run_harness_binary(run: HarnessRun) -> PipelineResult {
+    if run.opts.verbose {
+        eprintln(colorize_bold("info", ColorCyan, run.use_color) ++
+                ": running tests...")
+    };
+    // `let` first — see the note in `compile_then_run`. Inlined here, a passing
+    // suite printed its whole report twice.
+    let outcome = exec_process_outcome(run.artifacts.binary, Nil);
+    if exec_succeeded(outcome) {
+        PipelineOk(run.plan.test_count)
+    } else {
+        report_harness_run_failure(run, outcome)
+    }
+}
+
+/// The effectful half of D1: print the message when there is one, and always
+/// fail the suite.
+fn report_harness_run_failure(run: HarnessRun, outcome: ExecOutcome) -> PipelineResult {
+    match harness_run_message(run.artifacts.binary, outcome) {
+        None() => PipelineErr(1),
+        Some(message) => {
+            eprintln(colorize_bold("error", ColorRed, run.use_color) ++ message);
+            PipelineErr(1)
+        }
+    }
+}

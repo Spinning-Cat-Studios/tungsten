@@ -121,10 +121,10 @@ impl<'a> Elaborator<'a> {
                 _ => {
                     return Err(ElabError::new(
                         span,
-                        ElabErrorKind::Other(format!(
-                            "expected tuple type with {} elements, found non-product type",
-                            expected_len
-                        )),
+                        ElabErrorKind::ExpectedType {
+                            expected: format!("tuple with {} elements", expected_len),
+                            found: current,
+                        },
                     ));
                 }
             }

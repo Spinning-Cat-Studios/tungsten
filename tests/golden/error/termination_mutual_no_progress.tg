@@ -1,0 +1,8 @@
+// == the group occupies each other's decreasing position but makes no progress
+type Lst = Nil | Cons(Nat, Lst)
+
+fn ping(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => pong(t) } }
+
+fn pong(m: Lst) -> Nat { ping(m) }
+
+fn main() -> Nat { 0 }

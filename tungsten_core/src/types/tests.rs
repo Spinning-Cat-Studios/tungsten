@@ -203,6 +203,145 @@ fn test_reconstruct_wrapper_panics_on_non_wrapper() {
 }
 
 // ======================================================================
+// Type::children / Type::map_children — structural traversal helpers
+// ======================================================================
+
+#[test]
+fn test_children_terminals_are_empty() {
+    for terminal in [
+        Type::Bool,
+        Type::Nat,
+        Type::Unit,
+        Type::Void,
+        Type::Prop,
+        Type::String,
+        Type::TyVar("α".into()),
+        Type::Error,
+    ] {
+        assert!(
+            terminal.children().is_empty(),
+            "{terminal:?} should have no child types"
+        );
+    }
+}
+
+#[test]
+fn test_children_structural_order() {
+    let binary = Type::product(Type::Nat, Type::Bool);
+    assert_eq!(binary.children(), vec![&Type::Nat, &Type::Bool]);
+
+    let wrapper = Type::ptr(Type::Nat);
+    assert_eq!(wrapper.children(), vec![&Type::Nat]);
+
+    let binding = Type::mu("α", Type::Bool);
+    assert_eq!(binding.children(), vec![&Type::Bool]);
+
+    let app = Type::app("F", vec![Type::Nat, Type::Bool]);
+    assert_eq!(app.children(), vec![&Type::Nat, &Type::Bool]);
+}
+
+#[test]
+fn test_children_adt_yields_type_args_then_payloads() {
+    let adt = Type::adt(
+        "T",
+        vec![Type::Nat],
+        vec![("A".into(), Type::Bool), ("B".into(), Type::Unit)],
+    );
+    // type_args first, then variant payloads — names are not children.
+    assert_eq!(adt.children(), vec![&Type::Nat, &Type::Bool, &Type::Unit]);
+}
+
+#[test]
+fn test_children_eq_yields_only_the_type_arg_not_the_terms() {
+    // Eq(τ, t₁, t₂): only the carried type τ is a child; the witness Terms
+    // are not `Type`s and must not appear.
+    let eq = Type::eq(
+        Type::Nat,
+        crate::terms::Term::Zero,
+        crate::terms::Term::Zero,
+    );
+    assert_eq!(eq.children(), vec![&Type::Nat]);
+}
+
+#[test]
+fn test_map_children_is_shallow_and_preserves_shape() {
+    // f only ever sees the DIRECT children, so mapping Nat→String rewrites the
+    // top layer's Nats but does not recurse on its own.
+    let ty = Type::product(Type::Nat, Type::sum(Type::Nat, Type::Bool));
+    let mapped = ty.map_children(|child| match child {
+        Type::Nat => Type::String,
+        other => other.clone(),
+    });
+    // Outer-left Nat rewritten; the inner Sum is a child (rewritten as a whole
+    // only if it matched — it didn't), so its inner Nat is untouched.
+    assert_eq!(
+        mapped,
+        Type::product(Type::String, Type::sum(Type::Nat, Type::Bool))
+    );
+}
+
+#[test]
+fn test_map_children_identity_roundtrips_every_variant() {
+    let samples = [
+        Type::arrow(Type::Nat, Type::Bool),
+        Type::product(Type::Nat, Type::Bool),
+        Type::sum(Type::Nat, Type::Bool),
+        Type::forall("α", Type::TyVar("α".into())),
+        Type::mu("α", Type::TyVar("α".into())),
+        Type::ptr(Type::Nat),
+        Type::ref_ty(Type::Nat),
+        Type::eq(
+            Type::Nat,
+            crate::terms::Term::Zero,
+            crate::terms::Term::Zero,
+        ),
+        Type::app("F", vec![Type::Nat, Type::Bool]),
+        Type::adt("T", vec![Type::Nat], vec![("A".into(), Type::Bool)]),
+        Type::Unit,
+        Type::TyVar("x".into()),
+    ];
+    for ty in samples {
+        assert_eq!(ty.map_children(Type::clone), ty, "identity map on {ty:?}");
+    }
+}
+
+#[test]
+fn test_map_children_eq_transforms_type_arg_and_preserves_terms() {
+    // The Eq arm maps the carried type but must keep both witness Terms as-is.
+    let eq = Type::eq(
+        Type::Nat,
+        crate::terms::Term::Zero,
+        crate::terms::Term::True,
+    );
+    let mapped = eq.map_children(|_| Type::String);
+    assert_eq!(
+        mapped,
+        Type::eq(
+            Type::String,
+            crate::terms::Term::Zero,
+            crate::terms::Term::True
+        )
+    );
+}
+
+#[test]
+fn test_map_children_recursive_closure_rewrites_whole_tree() {
+    // A caller that recurses through map_children rewrites every Nat, at any
+    // depth — the transformer-default pattern the resolvers use.
+    fn rewrite(ty: &Type) -> Type {
+        match ty {
+            Type::Nat => Type::String,
+            other => other.map_children(rewrite),
+        }
+    }
+    let ty = Type::product(Type::Nat, Type::sum(Type::Nat, Type::Bool));
+    assert_eq!(
+        rewrite(&ty),
+        Type::product(Type::String, Type::sum(Type::String, Type::Bool))
+    );
+}
+
+// ======================================================================
 // Type::node_count — count nodes in type tree
 // ======================================================================
 
@@ -297,4 +436,71 @@ fn test_depth_asymmetric_tree() {
         Type::arrow(Type::Bool, Type::arrow(Type::Unit, Type::Void)),
     );
     assert_eq!(ty.depth(), 4);
+}
+
+// ── display_detailed_to_depth (ADR 21.7.26f) ────────────────────────────────
+//
+// `display_detailed` is unbounded, which is fine for debugging but not for a
+// diagnostic: the stored encodings it is most useful on are the large ones.
+
+#[test]
+fn detailed_depth_zero_elides_everything() {
+    assert_eq!(Type::Nat.display_detailed_to_depth(0), "…");
+}
+
+#[test]
+fn detailed_depth_renders_terminals_in_full() {
+    assert_eq!(Type::Nat.display_detailed_to_depth(1), "Nat");
+    assert_eq!(Type::Bool.display_detailed_to_depth(4), "Bool");
+}
+
+#[test]
+fn detailed_depth_elides_below_the_cut_off() {
+    // Product(Nat, Bool) at depth 1: the constructor is visible, children are not.
+    let ty = Type::product(Type::Nat, Type::Bool);
+    assert_eq!(ty.display_detailed_to_depth(1), "Product(…, …)");
+    assert_eq!(ty.display_detailed_to_depth(2), "Product(Nat, Bool)");
+}
+
+#[test]
+fn detailed_depth_elides_inside_app_and_adt_children() {
+    let inner = Type::product(Type::Nat, Type::Bool);
+    let app = Type::App("Box".to_string(), vec![inner.clone()]);
+    assert_eq!(
+        app.display_detailed_to_depth(2),
+        "App(Box, [Product(…, …)])"
+    );
+
+    let adt = Type::Adt("Wrap".to_string(), vec![], vec![("W".to_string(), inner)]);
+    assert_eq!(
+        adt.display_detailed_to_depth(2),
+        "Adt(Wrap, [], [(W, Product(…, …))])"
+    );
+}
+
+#[test]
+fn detailed_depth_bounds_output_for_a_deep_type() {
+    // A chain far deeper than the cut-off must not render in full.
+    let deep = (0..50).fold(Type::Nat, |acc, _| Type::Ptr(Box::new(acc)));
+    let bounded = deep.display_detailed_to_depth(3);
+    assert_eq!(bounded, "Ptr(Ptr(Ptr(…)))");
+    assert!(deep.display_detailed().len() > bounded.len() * 10);
+}
+
+#[test]
+fn display_detailed_is_the_unbounded_case_of_display_detailed_to_depth() {
+    // The delegation must be behaviour-preserving — every existing caller of
+    // `display_detailed` relies on it.
+    let ty = Type::Adt(
+        "Result".to_string(),
+        vec![Type::Nat],
+        vec![
+            ("Ok".to_string(), Type::product(Type::Nat, Type::Bool)),
+            ("Err".to_string(), Type::String),
+        ],
+    );
+    assert_eq!(
+        ty.display_detailed(),
+        ty.display_detailed_to_depth(usize::MAX)
+    );
 }

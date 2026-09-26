@@ -1,0 +1,33 @@
+type List = Nil | Cons(Nat, List)
+
+// (a) Recurse on a piece of the value you took apart.
+fn length(l: List) -> Nat {
+    match l { Nil => 0, Cons(h, t) => 1 + length(t) }
+}
+
+// (a) Over a `Nat`, which has no pieces, use `natrec`.
+fn count(n: Nat) -> Nat {
+    natrec(Nat, 0, fn(k: Nat, acc: Nat) => acc + 1, n)
+}
+
+// (b) Both lists shrink at every call, so say which one to measure.
+#[decreasing(a)]
+fn zip_sum(a: List, b: List) -> Nat {
+    match a {
+        Nil => 0,
+        Cons(x, rest_a) => match b {
+            Nil => 0,
+            Cons(y, rest_b) => x + y + zip_sum(rest_a, rest_b),
+        },
+    }
+}
+
+// (c) Division is a measure, not a descent: opt out.
+#[partial]
+fn digits(n: Nat) -> Nat {
+    if n < 10 { 1 } else { 1 + digits(n / 10) }
+}
+
+fn main() -> Nat {
+    length(Cons(1, Cons(2, Nil))) + count(3) + zip_sum(Cons(1, Nil), Cons(2, Nil)) + digits(1234)
+}

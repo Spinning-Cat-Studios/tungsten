@@ -1,5 +1,6 @@
 //! Parser tests — split by topic for maintainability.
 
+mod attributes;
 mod expressions;
 mod items;
 mod records;

@@ -60,12 +60,41 @@ pub fn env_resolve_type(env: Env, name: String) -> MaybeResolvedType {
             SomeTypeDef(def) => SomeResolvedType(ResolvedTypeDef(def)),
             NoTypeDef() =>
                 // Check imports
-                env_resolve_type_via_imports(env, contents.imports, name)
+                env_resolve_type_via_imports(env, contents.imports.all, name)
         }
     }
 }
 
+// ---------------------------------------------------------------------------
+// IMPORT WALKS — the four sites that do NOT use the import index
+// ---------------------------------------------------------------------------
+//
+// `env_resolve_{type,value}_via_imports` and their `_via_source_imports` peers
+// each scan `List<Import>` with their own inlined `imp.local_name == name`,
+// bypassing `module_contents_lookup_import` and its `StrMap` index
+// (ADR 5.8.26b). That is deliberate, and it is measured: the 2026-08-05
+// self-compiled profile puts all four at **0.00%** at `--percent-limit 0`
+// (`main.tg` elaborates through a combined AST, so imports are *registered*
+// quadratically and *resolved* almost never), while `import_list_lookup` on
+// the registration path was 56.98%. Indexing these four would have changed
+// control flow — see below — for no measured gain.
+//
+// The control flow in question: on a `local_name` match whose source module
+// fails to resolve, these do NOT stop. They fall through to the *remainder*
+// of the list looking for another entry with the same name. A keyed lookup
+// returns one entry and cannot resume, so replacing the walk is only sound
+// because `elab/items/imports/dedup.tg` inserts solely on the `NoImport()`
+// branch of a prior lookup — i.e. a duplicate `local_name` is unreachable.
+// If that guard ever changes, these four and the index diverge together.
+//
+// If a future profile ranks them, `test_import_store.tg` already pins the
+// equivalence the rewrite would need.
+
 /// Helper: resolve type through imports.
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn env_resolve_type_via_imports(env: Env, imports: List<Import>, name: String) -> MaybeResolvedType {
     match imports {
         Nil() => NoResolvedType,
@@ -77,7 +106,7 @@ fn env_resolve_type_via_imports(env: Env, imports: List<Import>, name: String) -
                 };
                 let SomeTypeDef(def) = type_def_list_lookup(contents.types, imp.source_name) else {
                     // Try source module's imports (re-exports)
-                    return env_resolve_type_via_source_imports(env, contents.imports, imp.source_name, rest, name)
+                    return env_resolve_type_via_source_imports(env, contents.imports.all, imp.source_name, rest, name)
                 };
                 SomeResolvedType(ResolvedTypeDef(def))
             } else {
@@ -143,11 +172,11 @@ pub fn env_resolve_value(env: Env, name: String) -> MaybeResolvedValue {
                 SomeValueDef(def) => SomeResolvedValue(ResolvedGlobal(def.name, def.ty)),
                 NoValueDef() =>
                     // Check constructors
-                    match constructor_list_lookup(contents.constructors, name) {
+                    match constructor_list_lookup(contents.constructors.all, name) {
                         SomeConstructor(info) => SomeResolvedValue(ResolvedConstructor(info)),
                         NoConstructor() =>
                             // Check imports
-                            env_resolve_value_via_imports(env, contents.imports, name)
+                            env_resolve_value_via_imports(env, contents.imports.all, name)
                     }
             }
     }
@@ -159,7 +188,7 @@ fn resolve_value_or_ctor(contents: ModuleContents, name: String) -> MaybeResolve
     match value_def_list_lookup(contents.values, name) {
         SomeValueDef(def) => SomeResolvedValue(ResolvedGlobal(def.name, def.ty)),
         NoValueDef() =>
-            match constructor_list_lookup(contents.constructors, name) {
+            match constructor_list_lookup(contents.constructors.all, name) {
                 SomeConstructor(info) => SomeResolvedValue(ResolvedConstructor(info)),
                 NoConstructor() => NoResolvedValue
             }
@@ -167,6 +196,10 @@ fn resolve_value_or_ctor(contents: ModuleContents, name: String) -> MaybeResolve
 }
 
 /// Helper: resolve value through imports.
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn env_resolve_value_via_imports(env: Env, imports: List<Import>, name: String) -> MaybeResolvedValue {
     match imports {
         Nil() => NoResolvedValue,
@@ -177,7 +210,7 @@ fn env_resolve_value_via_imports(env: Env, imports: List<Import>, name: String) 
                 };
                 let SomeResolvedValue(v) = resolve_value_or_ctor(contents, imp.source_name) else {
                     // Try source module's imports (re-exports)
-                    return env_resolve_value_via_source_imports(env, contents.imports, imp.source_name, rest, name)
+                    return env_resolve_value_via_source_imports(env, contents.imports.all, imp.source_name, rest, name)
                 };
                 SomeResolvedValue(v)
             } else {

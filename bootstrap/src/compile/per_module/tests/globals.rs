@@ -1,5 +1,5 @@
 use crate::compile::per_module::*;
-use compilation::collect_referenced_globals;
+use compilation::{collect_referenced_globals, find_colliding_names};
 use tungsten_core::terms::Term;
 use tungsten_core::types::Type;
 

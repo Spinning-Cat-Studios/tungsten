@@ -1,0 +1,53 @@
+// src/compiler/parser/ast/normalize/types.tg
+// The driver never reaches this module: span normalization is a test affordance,
+// imported only by the AST-comparison entry files. See normalize/mod.tg
+// (ADR 3.9.26a).
+// Span normalization for type expressions.
+//
+// `TypeExpr` is mutually recursive with `Expr` through the equality types
+// (`TyEq` / `TyEqExplicit`), so this file calls back into `normalize::exprs`.
+
+use parser::ast::nodes::types::{
+    TypeExpr, TyPath, TyArrow, TyProduct, TySum, TyApp, TyForall, TyProp,
+    TyUnit, TyVoid, TyPtr, TyRef, TyEq, TyEqExplicit, TyParen, TyError,
+    MaybeTypeExpr, NoTypeExpr, SomeTypeExpr
+};
+use parser::ast::normalize::common::{canonical_span, strip_spans_ident, strip_spans_path};
+use parser::ast::normalize::exprs::{strip_spans_expr};
+use driver::ffi::{List, Nil, Cons};
+
+/// Normalize every span in a type expression.
+pub fn strip_spans_type_expr(t: TypeExpr) -> TypeExpr {
+    match t {
+        TyPath(p) => TyPath(strip_spans_path(p)),
+        TyArrow(a, b, _) => TyArrow(strip_spans_type_expr(a), strip_spans_type_expr(b), canonical_span()),
+        TyProduct(a, b, _) => TyProduct(strip_spans_type_expr(a), strip_spans_type_expr(b), canonical_span()),
+        TySum(a, b, _) => TySum(strip_spans_type_expr(a), strip_spans_type_expr(b), canonical_span()),
+        TyApp(f, args, _) => TyApp(strip_spans_type_expr(f), strip_spans_type_expr_list(args), canonical_span()),
+        TyForall(v, body, _) => TyForall(strip_spans_ident(v), strip_spans_type_expr(body), canonical_span()),
+        TyProp(_) => TyProp(canonical_span()),
+        TyUnit(_) => TyUnit(canonical_span()),
+        TyVoid(_) => TyVoid(canonical_span()),
+        TyPtr(inner, _) => TyPtr(strip_spans_type_expr(inner), canonical_span()),
+        TyRef(inner, _) => TyRef(strip_spans_type_expr(inner), canonical_span()),
+        TyEq(a, b, _) => TyEq(strip_spans_expr(a), strip_spans_expr(b), canonical_span()),
+        TyEqExplicit(ty, a, b, _) =>
+            TyEqExplicit(strip_spans_type_expr(ty), strip_spans_expr(a), strip_spans_expr(b), canonical_span()),
+        TyParen(inner, _) => TyParen(strip_spans_type_expr(inner), canonical_span()),
+        TyError(_) => TyError(canonical_span())
+    }
+}
+
+pub fn strip_spans_type_expr_list(ts: List<TypeExpr>) -> List<TypeExpr> {
+    match ts {
+        Nil() => Nil(),
+        Cons(t, rest) => Cons(strip_spans_type_expr(t), strip_spans_type_expr_list(rest))
+    }
+}
+
+pub fn strip_spans_maybe_type_expr(t: MaybeTypeExpr) -> MaybeTypeExpr {
+    match t {
+        NoTypeExpr() => NoTypeExpr(),
+        SomeTypeExpr(ty) => SomeTypeExpr(strip_spans_type_expr(ty))
+    }
+}

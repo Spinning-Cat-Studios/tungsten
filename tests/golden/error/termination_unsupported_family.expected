@@ -1,0 +1,15 @@
+[E0062] Error: cannot prove termination of `countdown`
+   ╭─[tests/golden/error/termination_unsupported_family.tg:2:1]
+   │
+ 2 │ ╭─▶ fn countdown(n: Nat) -> Nat {
+   ┆ ┆   
+ 4 │ ├─▶ }
+   │ │       
+   │ ╰─────── 
+   │ │   
+   │ │   Help: rewrite the recursion structurally, or mark the definition `#[partial]` (partial definitions cannot be used in proofs)
+   │ │   
+   │ │   Note: no parameter has an inductive type to descend on: `n: Nat` (a primitive — it has no subterms, so a loop over it is a measure, not a descent)
+───╯
+
+error: aborting due to 1 error

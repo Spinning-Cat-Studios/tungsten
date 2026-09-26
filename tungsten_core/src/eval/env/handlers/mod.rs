@@ -3,7 +3,11 @@
 //! String operation handlers are in `handlers_string.rs`.
 
 mod control_flow;
+pub(in crate::eval::env) mod dispatch;
 mod extended;
+pub(crate) mod externs;
+pub(crate) mod int_ops;
+mod malformed;
 mod pairs;
 mod types_and_recursion;
 
@@ -17,5 +21,6 @@ pub(super) use control_flow::{
     CaseArm,
 };
 pub(super) use extended::{step_adt_match_env, step_subst_env};
+pub(super) use externs::call::step_extern_call_env;
 pub(super) use pairs::{step_fst_env, step_pair_env, step_snd_env};
 pub(super) use types_and_recursion::{step_annot_env, step_tyapp_env, step_unfold_env};

@@ -12,6 +12,7 @@
 use std::collections::HashSet;
 
 use crate::elaborate::env::{TypeDef, TypeDefKind};
+use crate::elaborate::types::ref_walk::TypeRefStrategy;
 use crate::elaborate::Elaborator;
 use tungsten_core::Type;
 
@@ -41,92 +42,33 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Internal implementation of type reference resolution with cycle detection.
+    ///
+    /// The traversal itself is the unified walker
+    /// [`Elaborator::walk_type_refs`] (`ref_walk.rs`, ADR 23.7.26a) under
+    /// [`TypeRefStrategy::Encoding`]: this walker looks up **bare names
+    /// only** — a deferred `TyVar("@X")` reaching it embeds unresolved (the
+    /// load-bearing asymmetry vs Deferred-TyVar Resolution — ADR 22.7.26d; see the strategy's
+    /// doc table).
     pub(crate) fn resolve_type_references_impl(
         &mut self,
         ty: &Type,
         alias_expansion_stack: &mut HashSet<String>,
     ) -> Type {
-        match ty {
-            Type::TyVar(name)
-                if !alias_expansion_stack.contains(name)
-                    && !alias_expansion_stack.contains(name.strip_prefix('@').unwrap_or(name)) =>
-            {
-                self.resolve_type_ref_tyvar(name, ty, alias_expansion_stack)
-            }
-            Type::TyVar(_) => ty.clone(),
-
-            // Binary types: recurse both sides
-            Type::Arrow(a, b) | Type::Product(a, b) | Type::Sum(a, b) => {
-                let ra = self.resolve_type_references_impl(a, alias_expansion_stack);
-                let rb = self.resolve_type_references_impl(b, alias_expansion_stack);
-                Type::reconstruct_binary(ty, ra, rb)
-            }
-
-            // Binding types: recurse into body
-            Type::Forall(v, body) => Type::forall(
-                v,
-                self.resolve_type_references_impl(body, alias_expansion_stack),
-            ),
-            Type::Mu(v, body) => Type::mu(
-                v,
-                self.resolve_type_references_impl(body, alias_expansion_stack),
-            ),
-
-            Type::Eq(ty_arg, a, b) => Type::eq(
-                self.resolve_type_references_impl(ty_arg, alias_expansion_stack),
-                (**a).clone(),
-                (**b).clone(),
-            ),
-
-            // Terminal types
-            Type::Nat
-            | Type::Bool
-            | Type::Unit
-            | Type::Void
-            | Type::Prop
-            | Type::String
-            | Type::Error => ty.clone(),
-
-            Type::Ptr(inner) | Type::Ref(inner) => {
-                let resolved = self.resolve_type_references_impl(inner, alias_expansion_stack);
-                Type::reconstruct_wrapper(ty, resolved)
-            }
-
-            // Deferred type application: try to resolve now
-            Type::App(name, args) if !alias_expansion_stack.contains(name) => {
-                self.resolve_type_refs_app(name, args, alias_expansion_stack)
-            }
-            Type::App(name, args) => {
-                // Type is in encoding stack (cycle detected) - just resolve args
-                let resolved_args: Vec<Type> = args
-                    .iter()
-                    .map(|a| self.resolve_type_references_impl(a, alias_expansion_stack))
-                    .collect();
-                Type::app(name.clone(), resolved_args)
-            }
-
-            // Flat ADT (ADR 2.2.26): resolve type args and variant payloads
-            Type::Adt(name, type_args, variants) => {
-                let resolved_args: Vec<Type> = type_args
-                    .iter()
-                    .map(|a| self.resolve_type_references_impl(a, alias_expansion_stack))
-                    .collect();
-                let resolved_variants: Vec<(String, Type)> = variants
-                    .iter()
-                    .map(|(vname, vty)| {
-                        (
-                            vname.clone(),
-                            self.resolve_type_references_impl(vty, alias_expansion_stack),
-                        )
-                    })
-                    .collect();
-                Type::adt(name.clone(), resolved_args, resolved_variants)
-            }
-        }
+        self.walk_type_refs(ty, TypeRefStrategy::Encoding, alias_expansion_stack)
     }
 
     /// Resolve a TyVar reference to its encoded form if it's a defined type.
-    fn resolve_type_ref_tyvar(
+    ///
+    /// ⚠ Resolves the **bare** name only (`lookup_type(name)`) — unlike the
+    /// Phase-1d resolver `resolve_tyvar_definition` (in `resolve_tyvars.rs`),
+    /// which strips a leading `@` before lookup. `@`-prefixed named references
+    /// (ADR 13.4.26c §2) are a Phase-1c/1d-era spelling; by the time this
+    /// Phase-1e/encoding path runs they have already been resolved, so a
+    /// `TyVar("@Name")` reaching here is treated as an ordinary (unresolvable)
+    /// type variable and returned as-is. A caller seeding the env directly for
+    /// a Phase-1e test must therefore use bare `TyVar("Name")` references, not
+    /// `@`-prefixed ones, to exercise this inline path (ADR 22.7.26c close-out).
+    pub(super) fn resolve_type_ref_tyvar(
         &mut self,
         name: &str,
         ty: &Type,
@@ -183,29 +125,9 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    /// Handle Type::App resolution for resolve_type_references, extracted to reduce CC.
-    fn resolve_type_refs_app(
-        &mut self,
-        name: &str,
-        args: &[Type],
-        alias_expansion_stack: &mut HashSet<String>,
-    ) -> Type {
-        // Resolve arguments first
-        let resolved_args: Vec<Type> = args
-            .iter()
-            .map(|a| self.resolve_type_references_impl(a, alias_expansion_stack))
-            .collect();
-
-        self.resolve_app_to_encoding(
-            name,
-            resolved_args,
-            alias_expansion_stack,
-            AppResolveMode::TypeRefs,
-        )
-    }
-
-    /// Shared App→encoding resolution used by both `resolve_type_refs_app` and
-    /// `resolve_type_apps_app`. See ADR 20.4.26h §1.
+    /// Shared App→encoding resolution used by the unified walker's `Encoding`
+    /// strategy (`ref_walk.rs`) and by `resolve_type_apps_app`
+    /// (`exprs/helpers/mod.rs`). See ADR 20.4.26h §1.
     ///
     /// Given a type name and pre-resolved args, attempts to encode the App:
     /// - ADT → delegate to `encode_adt_type_impl` (which manages its own cycle detection)
@@ -274,75 +196,41 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Replace references to the ADT name with the μ type variable.
+    ///
+    /// Method form, kept for the encoder's call sites; the walk itself is
+    /// [`replace_self_reference`], a free function (it never needed elaborator
+    /// state, and comparator synthesis reuses it from a `ProjectOutput` where
+    /// no `Elaborator` exists — ADR 1.8.26c).
     pub(super) fn replace_self_reference(&self, ty: &Type, adt_name: &str, mu_var: &str) -> Type {
-        match ty {
-            // Terminal types: no self-references possible
-            Type::Nat
-            | Type::Bool
-            | Type::Unit
-            | Type::Void
-            | Type::Prop
-            | Type::String
-            | Type::Error => ty.clone(),
+        replace_self_reference(ty, adt_name, mu_var)
+    }
+}
 
-            Type::TyVar(v) if v == adt_name || v.strip_prefix('@') == Some(adt_name) => {
-                Type::TyVar(mu_var.to_string())
-            }
-            Type::TyVar(_) => ty.clone(),
-
-            // Binary types: recurse both sides
-            Type::Arrow(a, b) | Type::Product(a, b) | Type::Sum(a, b) => {
-                let ra = self.replace_self_reference(a, adt_name, mu_var);
-                let rb = self.replace_self_reference(b, adt_name, mu_var);
-                Type::reconstruct_binary(ty, ra, rb)
-            }
-
-            // Binding types: recurse into body
-            Type::Forall(v, body) | Type::Mu(v, body) => {
-                let resolved = self.replace_self_reference(body, adt_name, mu_var);
-                Type::reconstruct_binding(ty, v.clone(), resolved)
-            }
-
-            // Eq types: only recurse into the type argument, terms are left alone
-            Type::Eq(ty_arg, a, b) => Type::eq(
-                self.replace_self_reference(ty_arg, adt_name, mu_var),
-                (**a).clone(),
-                (**b).clone(),
-            ),
-
-            // Pointer/reference types
-            Type::Ptr(inner) | Type::Ref(inner) => {
-                let resolved = self.replace_self_reference(inner, adt_name, mu_var);
-                Type::reconstruct_wrapper(ty, resolved)
-            }
-
-            // Deferred type application / Flat ADT: replace if name matches self
-            Type::App(name, _args) | Type::Adt(name, _args, _) if name == adt_name => {
-                Type::TyVar(mu_var.to_string())
-            }
-            Type::App(name, args) => {
-                let resolved_args: Vec<Type> = args
-                    .iter()
-                    .map(|a| self.replace_self_reference(a, adt_name, mu_var))
-                    .collect();
-                Type::app(name.clone(), resolved_args)
-            }
-            Type::Adt(name, type_args, variants) => {
-                let resolved_args: Vec<Type> = type_args
-                    .iter()
-                    .map(|a| self.replace_self_reference(a, adt_name, mu_var))
-                    .collect();
-                let resolved_variants: Vec<(String, Type)> = variants
-                    .iter()
-                    .map(|(vname, vty)| {
-                        (
-                            vname.clone(),
-                            self.replace_self_reference(vty, adt_name, mu_var),
-                        )
-                    })
-                    .collect();
-                Type::adt(name.clone(), resolved_args, resolved_variants)
-            }
+/// Replace references to `adt_name` with `TyVar(mu_var)`.
+///
+/// A transforming `Type` walker on the [`Type::map_children`] discipline
+/// (ADR 23.7.26a follow-up): the only non-uniform arms are the two ways an
+/// ADT can name *itself* — a bare (possibly `@`-prefixed) `TyVar`, or a
+/// still-deferred `App`/`Adt` head — both rewritten to the μ variable.
+/// Every other arm is the structural default, so a future `Type` variant
+/// inherits correct recursion here with no edit. The trailing arm is
+/// `map_children`, NOT a silent `_ => clone`, so a new variant cannot
+/// accidentally stop self-reference replacement inside it.
+pub(crate) fn replace_self_reference(ty: &Type, adt_name: &str, mu_var: &str) -> Type {
+    match ty {
+        // Self-reference as a bare (possibly @-prefixed) type variable.
+        Type::TyVar(v) if v == adt_name || v.strip_prefix('@') == Some(adt_name) => {
+            Type::TyVar(mu_var.to_string())
         }
+        // Self-reference as a (possibly still-deferred) named application
+        // or flat ADT head.
+        Type::App(name, _args) | Type::Adt(name, _args, _) if name == adt_name => {
+            Type::TyVar(mu_var.to_string())
+        }
+        // Everything else — terminals, non-self TyVars, and every compound
+        // (binary/binding/Eq/Ptr/Ref/App/Adt) — is uniform structural
+        // recursion, including the `Eq` witness terms which map_children
+        // leaves untouched.
+        _ => ty.map_children(|child| replace_self_reference(child, adt_name, mu_var)),
     }
 }

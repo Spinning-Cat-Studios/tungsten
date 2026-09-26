@@ -8,11 +8,13 @@
 // - check.tg:   Check pipeline (lex → parse → elaborate)
 // - run.tg:     Run pipeline (check + evaluate main)
 // - compile.tg: Compile pipeline (check + codegen)
+// - bootstrap_lookup.tg: Which bootstrap binary, and what to say when it fails
 // - errors.tg:  Error rendering helpers
 
 pub mod check;
 pub mod run;
 pub mod compile;
+pub mod bootstrap_lookup;
 pub mod test;
 pub mod errors;
 pub mod info;

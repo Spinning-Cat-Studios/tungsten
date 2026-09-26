@@ -1,4 +1,4 @@
-//! `tungsten info type visibility <name> <file>` — show effective visibility of members.
+//! `tungsten info type members visibility <name> <file>` — effective visibility of members.
 //!
 //! Displays the parent type visibility and per-member (constructor or field)
 //! effective visibility, including whether each member inherits or overrides.
@@ -10,7 +10,7 @@ use crate::info::elaborate_for_info;
 use crate::info::helpers::format_type_short;
 use tungsten_bootstrap::ast::Visibility;
 
-/// Entry point for `tungsten info type visibility <name> <file>`.
+/// Entry point for `tungsten info type members visibility <name> <file>`.
 pub fn cmd_info_type_visibility(
     name: &str,
     file: &PathBuf,

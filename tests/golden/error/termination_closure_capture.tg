@@ -1,0 +1,9 @@
+// == a self-call captured in a closure is still not a descent
+type Lst = Nil | Cons(Nat, Lst)
+
+fn capt(l: Lst) -> Nat {
+    let f = |x: Lst| capt(x);
+    f(l)
+}
+
+fn main() -> Nat { 0 }

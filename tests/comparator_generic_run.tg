@@ -1,0 +1,49 @@
+// Runtime smoke test for GENERIC comparator dispatch (ADR 29.6.26f §T11.2a / P6′).
+// A single generic `is_eq<T>` calls the `compare` intrinsic; the evaluator
+// resolves `__cmp<T>` to the synthesized compare_T lazily at each instantiation.
+// Run via `tungsten run`.
+//
+// Expected: 54  (binary 110110)
+//   bit 0 (×1) : is_eq(3, 3)                    = 0  (Nat eq)
+//   bit 1 (×2) : is_eq(3, 4)                    = 1  (Nat ne)
+//   bit 2 (×4) : is_eq("hi", "bye")             = 1  (String ne)
+//   bit 3 (×8) : is_eq((1,true), (1,true))      = 0  (tuple eq)
+//   bit 4 (×16): is_eq(Some(5), Some(6))        = 1  (Option ne)
+//   bit 5 (×32): is_eq(Cons(1,Nil), Nil)        = 1  (List ne)
+
+type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+type PathSeg =
+    | Field(String)
+    | Pos(Nat)
+    | Index(Nat)
+    | Tag
+    | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult =
+    | Equal
+    | NotEqual(CompareDiff)
+
+type Option<T> =
+    | None
+    | Some(T)
+
+// One generic function, instantiated at five different concrete types below.
+fn is_eq<T>(a: T, b: T) -> Nat {
+    match compare(a, b) {
+        Equal() => 0,
+        NotEqual(_) => 1
+    }
+}
+
+fn main() -> Nat {
+    is_eq(3, 3)
+        + is_eq(3, 4) * 2
+        + is_eq("hi", "bye") * 4
+        + is_eq((1, true), (1, true)) * 8
+        + is_eq(Some(5), Some(6)) * 16
+        + is_eq(Cons(1, Nil), Nil) * 32
+}

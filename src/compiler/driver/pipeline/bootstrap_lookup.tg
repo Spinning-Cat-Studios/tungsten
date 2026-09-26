@@ -1,0 +1,201 @@
+// src/compiler/driver/pipeline/bootstrap_lookup.tg
+// Finding the bootstrap compiler binary, and saying what went wrong when the
+// one we found does not run (ADR 3.9.26b).
+//
+// ## Why this is not three lines inside compile.tg
+//
+// The resolution order and the failure message are the same subject seen twice.
+// A resolution order can always be wrong on some machine — that is what a
+// fallback IS — so the order is only half a fix, and the half that ages. What
+// makes the next wrong machine self-diagnosing is a message naming the path it
+// tried and the step that chose it, which means the choice has to survive as
+// data rather than as a bare `String`. Hence `BootstrapChoice`.
+//
+// Both halves are pure functions over injected values here: every environment
+// read and every filesystem probe is `find_bootstrap_choice`'s, so the order
+// and the two renderings are assertable without spawning anything.
+
+use driver::ffi::{
+    get_env_var, current_exe_dir, file_exists, path_join,
+    exec_code_is_absent,
+    ExecOutcome, ExecExited, ExecSpawnFailed
+};
+use driver::util::{
+    Option, Some, None,
+    nat_to_string
+};
+
+// ===========================================================================
+// WHAT WAS CHOSEN, AND BY WHICH STEP
+// ===========================================================================
+
+/// Which step of the resolution order produced a path.
+pub type BootstrapSource =
+    | FromOverrideEnv
+    | FromExeDir
+    | FromCargoTargetDir
+    | FromRepoTarget
+
+/// A resolved bootstrap binary path, together with the step that chose it.
+pub type BootstrapChoice = {
+    path: String,
+    source: BootstrapSource
+}
+
+/// How to name a resolution step to a human reading a failure.
+///
+/// Each label is the thing the reader would have to change to pick a different
+/// path — an environment variable, a build location — rather than the internal
+/// name of the branch.
+pub fn bootstrap_source_label(source: BootstrapSource) -> String {
+    match source {
+        FromOverrideEnv() => "TUNGSTEN_BOOTSTRAP_BIN",
+        FromExeDir() => "beside this executable",
+        FromCargoTargetDir() => "CARGO_TARGET_DIR",
+        FromRepoTarget() => "repo-relative fallback"
+    }
+}
+
+fn bootstrap_choice(path: String, source: BootstrapSource) -> BootstrapChoice {
+    let choice: BootstrapChoice = { path: path, source: source };
+    choice
+}
+
+/// The dev fallback: correct on a host checkout, wrong everywhere the build
+/// does not land in the repo's own `target/`.
+pub fn default_bootstrap_path() -> String {
+    "./target/release/tungsten"
+}
+
+// ===========================================================================
+// RESOLUTION
+// ===========================================================================
+
+/// Resolve the bootstrap binary from environment values the caller has already
+/// read.
+///
+/// `exe_dir_binary` is `Some` only when a binary is actually sitting beside this
+/// executable — the existence probe belongs to the caller, so that this stays a
+/// function of its arguments alone (ADR 3.9.26b AC4).
+///
+/// Order: explicit override, release-archive layout, `CARGO_TARGET_DIR`, then
+/// the repo-relative fallback.
+pub fn resolve_bootstrap_path(
+    override_bin: Option<String>,
+    exe_dir_binary: Option<String>,
+    cargo_target_dir: Option<String>
+) -> BootstrapChoice {
+    match override_bin {
+        Some(path) => bootstrap_choice(path, FromOverrideEnv),
+        None() => resolve_without_override(exe_dir_binary, cargo_target_dir)
+    }
+}
+
+fn resolve_without_override(
+    exe_dir_binary: Option<String>,
+    cargo_target_dir: Option<String>
+) -> BootstrapChoice {
+    match exe_dir_binary {
+        Some(path) => bootstrap_choice(path, FromExeDir),
+        None() => resolve_from_target_dir(cargo_target_dir)
+    }
+}
+
+/// The step ADR 3.9.26b D2 adds.
+///
+/// `make/devcontainer.mk` addresses every binary through
+/// `DC_TARGET = $${CARGO_TARGET_DIR:-target}`, and the container sets that
+/// variable to a named volume outside the workspace. Falling straight through
+/// to `./target` there picks the bind-mounted HOST build — a MachO binary on an
+/// ARM Mac, which the container cannot execute.
+fn resolve_from_target_dir(cargo_target_dir: Option<String>) -> BootstrapChoice {
+    match cargo_target_dir {
+        Some(dir) => bootstrap_choice(dir ++ "/release/tungsten", FromCargoTargetDir),
+        None() => bootstrap_choice(default_bootstrap_path(), FromRepoTarget)
+    }
+}
+
+/// Find the bootstrap compiler binary, remembering which step chose it.
+///
+/// This is the effectful half: two environment reads and one existence probe,
+/// handed to `resolve_bootstrap_path`.
+pub fn find_bootstrap_choice() -> BootstrapChoice {
+    let override_bin = get_env_var("TUNGSTEN_BOOTSTRAP_BIN");
+    let exe_dir_binary = existing_binary_beside_exe();
+    let cargo_target_dir = get_env_var("CARGO_TARGET_DIR");
+    resolve_bootstrap_path(override_bin, exe_dir_binary, cargo_target_dir)
+}
+
+/// The path of the bootstrap binary, discarding how it was found.
+///
+/// For callers that only spawn it and report their own failure; anything that
+/// renders the failure to a human wants `find_bootstrap_choice` instead, so it
+/// can name the step.
+pub fn find_bootstrap_binary() -> String {
+    find_bootstrap_choice().path
+}
+
+fn existing_binary_beside_exe() -> Option<String> {
+    match current_exe_dir() {
+        Some(dir) => existing_path(path_join(dir, "tungsten-bootstrap")),
+        None() => None
+    }
+}
+
+fn existing_path(candidate: String) -> Option<String> {
+    if file_exists(candidate) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+// ===========================================================================
+// THE FAILURE MESSAGE
+// ===========================================================================
+
+/// Render a failed delegation to the bootstrap.
+///
+/// The caller adds the `error` label and the colour; this is the body, so the
+/// two renderings AC3 distinguishes can be asserted without spawning anything.
+///
+/// Three things the old message withheld and this one carries: the path, the
+/// step that chose it, and whether the process ran at all.
+pub fn bootstrap_failure_message(choice: BootstrapChoice, outcome: ExecOutcome) -> String {
+    let tried = "bootstrap at " ++ choice.path ++
+                " (chosen by " ++ bootstrap_source_label(choice.source) ++ ")";
+    match outcome {
+        ExecExited(code) => ": " ++ tried ++ " " ++ exit_code_phrase(code),
+        ExecSpawnFailed(err) =>
+            ": could not spawn " ++ tried ++ ": " ++ err ++ "\n" ++ spawn_failure_hint()
+    }
+}
+
+/// How to describe a non-zero exit code.
+///
+/// The wrapped `-1` is the number a reader pastes into a search engine
+/// believing it a compiler crash. It never means an exit code, so it is never
+/// printed as one — and the question is asked through `exec_code_is_absent`,
+/// which is the FFI's own name for it. Comparing against `invalid_handle()`
+/// here was correct arithmetic and a category error: an exit code is not a
+/// handle, and a later reader is right to distrust a line that says it is
+/// (ADR 3.9.26s D2).
+fn exit_code_phrase(code: Nat) -> String {
+    if exec_code_is_absent(code) {
+        "reported no exit code (killed by a signal, or lost after spawning)"
+    } else {
+        "exited with code " ++ nat_to_string(code)
+    }
+}
+
+/// The one cause that is invisible from the exit status.
+///
+/// A binary built for another platform fails at `execve`, so it looks exactly
+/// like a missing file. In the devcontainer that is the *normal* state of
+/// `./target/release/tungsten`, because the container builds into
+/// `$CARGO_TARGET_DIR` and `target/` is the bind-mounted host's.
+fn spawn_failure_hint() -> String {
+    "hint: the devcontainer builds into $CARGO_TARGET_DIR, not the bind-mounted ./target,\n" ++
+    "      so a ./target binary there belongs to the HOST and is for another platform.\n" ++
+    "      Set TUNGSTEN_BOOTSTRAP_BIN to name the binary explicitly."
+}

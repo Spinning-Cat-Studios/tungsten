@@ -69,6 +69,9 @@ pub fn module_path_eq(a: ModulePath, b: ModulePath) -> Bool {
     segments_eq(a.segments, b.segments)
 }
 
+// Both parameters shrink, so Phase 1 asks which one is the measure
+// (ADR 11.8.26b). `a` is the one every recursive call descends on.
+#[decreasing(a)]
 fn segments_eq(a: List<String>, b: List<String>) -> Bool {
     match a {
         Nil() => match b {

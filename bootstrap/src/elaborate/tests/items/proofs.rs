@@ -20,7 +20,8 @@ fn test_elaborate_theorem_sorry() {
     assert_eq!(defs[0].name, "trivial");
     assert_eq!(defs[0].ty, Type::Bool);
     // Sorry is a valid proof term
-    assert_eq!(defs[0].term, Term::Sorry);
+    // (spanned since ADR 18.9.26g, which marks the author's holes)
+    assert_eq!(defs[0].term.strip_spans(), Term::Sorry);
 }
 
 #[test]
@@ -51,7 +52,7 @@ fn test_elaborate_axiom() {
     assert_eq!(defs[0].name, "excluded_middle");
     // Axiom body is sorry
     assert_eq!(
-        defs[0].term,
+        defs[0].term.strip_spans(),
         Term::Lambda("_".to_string(), Type::Prop, Box::new(Term::Sorry))
     );
 }

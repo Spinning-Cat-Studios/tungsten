@@ -4,9 +4,33 @@
 use super::{Expr, Ident, Param, Path, Span, Spanned, TypeExpr, TypeParam, Visibility};
 use serde::{Deserialize, Serialize};
 
+/// Termination attributes written above a function (ADR 29.6.26e §2.2, §2.4).
+///
+/// **AST** representation. The elaborator copies these into `ElabOutput` under
+/// the definition's name, which is where the termination gate reads them —
+/// keeping them off `CoreDef` so an imported or cache-reconstructed definition
+/// carries its annotations by the same route as a freshly elaborated one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminationAttrs {
+    /// `#[partial]` — opt out of termination checking, and carry taint.
+    pub partial: bool,
+    /// `#[decreasing(arg)]` — the parameter that decreases.
+    pub decreasing: Option<Ident>,
+}
+
+impl TerminationAttrs {
+    /// Whether anything was written at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.partial && self.decreasing.is_none()
+    }
+}
+
 /// A function definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDef {
+    /// Termination attributes (ADR 29.6.26e)
+    pub attrs: TerminationAttrs,
     /// Visibility modifier
     pub visibility: Visibility,
     /// Function name

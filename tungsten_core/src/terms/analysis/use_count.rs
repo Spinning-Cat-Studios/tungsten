@@ -23,6 +23,7 @@ impl Term {
             | Term::Unit
             | Term::Zero
             | Term::NatLit(_)
+            | Term::IntLit(_)
             | Term::Sorry
             | Term::StringLit(_) => 0,
 
@@ -56,6 +57,9 @@ impl Term {
             | Term::Refl(_, t)
             | Term::Annot(t, _)
             | Term::StrLen(t)
+            | Term::IntNeg(t)
+            | Term::NatToInt(t)
+            | Term::IntToNat(t)
             | Term::Fold(_, t)
             | Term::Unfold(_, t)
             | Term::BoolNot(t)
@@ -69,6 +73,7 @@ impl Term {
             | Term::Pair(t1, t2)
             | Term::StrConcat(t1, t2)
             | Term::StrEq(t1, t2)
+            | Term::IntBin(_, t1, t2)
             | Term::NatAdd(t1, t2)
             | Term::NatSub(t1, t2)
             | Term::NatMul(t1, t2)

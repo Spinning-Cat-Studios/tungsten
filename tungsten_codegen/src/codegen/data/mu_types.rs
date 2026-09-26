@@ -21,7 +21,33 @@ use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValue, BasicValueEnum, PointerValue};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use tungsten_core::types::Type;
+
+/// ADR 7.7.26k sizing experiment: per-μ-chain unfold call counts, enabled by
+/// setting `TUNGSTEN_MU_UNFOLD_STATS`. Returns `None` (a single `OnceLock`
+/// check) when the env var is unset, so production builds pay ~nothing.
+fn mu_unfold_stats() -> Option<&'static Mutex<HashMap<String, u64>>> {
+    static STATS: OnceLock<Option<Mutex<HashMap<String, u64>>>> = OnceLock::new();
+    STATS
+        .get_or_init(|| {
+            std::env::var_os("TUNGSTEN_MU_UNFOLD_STATS").map(|_| Mutex::new(HashMap::new()))
+        })
+        .as_ref()
+}
+
+/// The names of a nested μ-type's binder chain joined with `→`
+/// (e.g. `α_Expr→α_Stmt`) — a compact, SCC-unique stats key.
+fn mu_binder_chain(ty: &Type) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    let mut current = ty;
+    while let Type::Mu(var, body) = current {
+        names.push(var.as_str());
+        current = body;
+    }
+    names.join("→")
+}
 
 impl<'ctx> CodeGen<'ctx> {
     /// Heap-allocate a value and return a pointer to it.
@@ -47,18 +73,9 @@ impl<'ctx> CodeGen<'ctx> {
         let i64_type = self.context.i64_type();
         let size_val = i64_type.const_int(size, false);
 
-        // Get malloc function (uses profiling wrapper when --alloc-profile is enabled)
-        let malloc_fn = self.get_malloc();
-
-        // Allocate on heap
-        let ptr = self
-            .builder
-            .build_call(malloc_fn, &[size_val.into()], "mu_alloc")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CodeGenError::LlvmError("malloc returned void".to_string()))?
-            .into_pointer_value();
+        // Allocate on heap (uses class-tagged profiling wrapper when
+        // --alloc-profile is enabled)
+        let ptr = self.build_malloc_call(size_val, crate::codegen::AllocClass::Mu, "mu_alloc")?;
 
         // Store the value with specified alignment
         let store = self
@@ -126,98 +143,49 @@ impl<'ctx> CodeGen<'ctx> {
 
         Ok(loaded)
     }
+}
 
-    /// Substitute a type for a variable in a type expression.
-    ///
-    /// Used for μ-type handling: when unfolding μ X. F[X], we need to
-    /// substitute (μ X. F[X]) for X in F to get F[μ X. F[X]].
-    pub(crate) fn substitute_type(&self, ty: &Type, var: &str, replacement: &Type) -> Type {
-        match ty {
-            Type::TyVar(v) if v == var => replacement.clone(),
-            Type::TyVar(_) => ty.clone(),
-
-            // Terminal types — no type variables to substitute
-            Type::Unit
-            | Type::Bool
-            | Type::Nat
-            | Type::String
-            | Type::Void
-            | Type::Prop
-            | Type::Error => ty.clone(),
-
-            // Composite binary types — recurse into both components
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(self.substitute_type(a, var, replacement)),
-                Box::new(self.substitute_type(b, var, replacement)),
-            ),
-            Type::Product(a, b) => Type::Product(
-                Box::new(self.substitute_type(a, var, replacement)),
-                Box::new(self.substitute_type(b, var, replacement)),
-            ),
-            Type::Sum(a, b) => Type::Sum(
-                Box::new(self.substitute_type(a, var, replacement)),
-                Box::new(self.substitute_type(b, var, replacement)),
-            ),
-
-            // Binding forms — check for shadowing
-            Type::Forall(v, _) | Type::Mu(v, _) if v == var => ty.clone(),
-            Type::Forall(v, body) => Type::Forall(
-                v.clone(),
-                Box::new(self.substitute_type(body, var, replacement)),
-            ),
-            Type::Mu(v, body) => Type::Mu(
-                v.clone(),
-                Box::new(self.substitute_type(body, var, replacement)),
-            ),
-
-            // Equality proofs
-            Type::Eq(ty_inner, t1, t2) => Type::Eq(
-                Box::new(self.substitute_type(ty_inner, var, replacement)),
-                t1.clone(),
-                t2.clone(),
-            ),
-
-            // Pointers and References — recurse into inner
-            Type::Ptr(inner) => Type::Ptr(Box::new(self.substitute_type(inner, var, replacement))),
-            Type::Ref(inner) => Type::Ref(Box::new(self.substitute_type(inner, var, replacement))),
-
-            // Type applications
-            Type::App(name, args) => Type::App(
-                name.clone(),
-                args.iter()
-                    .map(|a| self.substitute_type(a, var, replacement))
-                    .collect(),
-            ),
-
-            // Flat ADT representation
-            Type::Adt(name, type_args, variants) => Type::Adt(
-                name.clone(),
-                type_args
-                    .iter()
-                    .map(|a| self.substitute_type(a, var, replacement))
-                    .collect(),
-                variants
-                    .iter()
-                    .map(|(vname, vty)| {
-                        (vname.clone(), self.substitute_type(vty, var, replacement))
-                    })
-                    .collect(),
-            ),
+/// Unwrap a μ-type to get its underlying type with the μ-variables substituted.
+///
+/// For μ X. F[X], returns F[μ X. F[X]] (the unfolding). Nested binder
+/// chains (mutually recursive SCCs) are unfolded in one simultaneous
+/// pass by `tungsten_core::types::unfold_mu_type` (ADR 7.7.26k) — the
+/// previous accumulated-substitution loop materialized exponentially
+/// sized trees. For non-μ types, returns the type unchanged.
+pub(crate) fn unwrap_mu_type(ty: &Type) -> Type {
+    if matches!(ty, Type::Mu(_, _)) {
+        if let Some(stats) = mu_unfold_stats() {
+            return unfold_mu_with_stats(ty, stats);
         }
     }
+    tungsten_core::types::unfold_mu_type(ty)
+}
 
-    /// Unwrap a μ-type to get its underlying type with the μ-variable substituted.
-    ///
-    /// For μ X. F[X], returns F[μ X. F[X]] (the unfolding).
-    /// For non-μ types, returns the type unchanged.
-    pub(crate) fn unwrap_mu_type(&self, ty: &Type) -> Type {
-        // Unwrap all nested Mu binders. Mutually recursive types use
-        // nested Mu binders (one per SCC member), and all must be
-        // stripped to reach the inner structural type (e.g., Sum).
-        let mut current = ty.clone();
-        while let Type::Mu(ref var, ref body) = current {
-            current = self.substitute_type(body, var, &current);
-        }
-        current
+/// ADR 7.7.26k sizing experiment: measure input/output node counts and
+/// wall time once per distinct μ-binder chain, and count every repeat
+/// unfold of the same chain. One stderr line per call, aggregated
+/// offline. Only reached when `TUNGSTEN_MU_UNFOLD_STATS` is set.
+fn unfold_mu_with_stats(ty: &Type, stats: &'static Mutex<HashMap<String, u64>>) -> Type {
+    let key = mu_binder_chain(ty);
+    let repeat_count = {
+        let mut map = stats.lock().unwrap();
+        let calls = map.entry(key.clone()).or_insert(0);
+        *calls += 1;
+        *calls
+    }; // lock released before the unfold work below
+    if repeat_count > 1 {
+        eprintln!("[mu-unfold-stats] key={key} call={repeat_count}");
+        return tungsten_core::types::unfold_mu_type(ty);
     }
+    let input_nodes = ty.node_count();
+    let started = std::time::Instant::now();
+    let unfolded = tungsten_core::types::unfold_mu_type(ty);
+    let unfold_ms = started.elapsed().as_millis();
+    eprintln!(
+        "[mu-unfold-stats] key={key} call=1 input_nodes={input_nodes} \
+         output_nodes={} output_depth={} first_unfold_ms={unfold_ms}",
+        unfolded.node_count(),
+        unfolded.depth(),
+    );
+    unfolded
 }

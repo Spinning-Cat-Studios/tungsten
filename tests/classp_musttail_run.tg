@@ -1,0 +1,47 @@
+// Class-P indirect struct-param ABI regression (ADR 1.7.26e P2–P5).
+//
+// Each function threads a NON-flattenable struct param (`Ctx` lowers to
+// `{ {i64,i64}, i64 }`) across a self-recursive tail call. With indirect-param
+// lowering these musttail (O(1) stack); pre-1.7.26e they SKIP (O(N) → overflow).
+// `main` returns 0 iff every shape is O(1)-safe AND numerically correct.
+//
+// Verify: `tungsten compile tests/classp_musttail_run.tg -o /tmp/x && /tmp/x`
+// (expect exit 0). Also `tungsten doctor check tco-coverage <this> --json`
+// (expect 0 SKIP) and `info codegen musttail-eligibility spin <this>` (DECOMPOSE).
+
+pub type Inner = { a: Nat, b: Nat }
+pub type Ctx = { inner: Inner, tag: Nat }
+
+// scalar return, 1 indirect param — deep recursion proves O(1) stack.
+pub fn spin(ctx: Ctx, n: Nat) -> Nat {
+    if n == 0 { ctx.tag } else { spin(ctx, n - 1) }
+}
+
+// sret + indirect: STRUCT return AND a non-flattenable param.
+pub fn spin_ret(ctx: Ctx, n: Nat) -> Ctx {
+    if n == 0 { ctx } else { spin_ret(ctx, n - 1) }
+}
+
+// multi-param: two indirect params that SWAP each step (simultaneous assignment).
+pub fn swap2(a: Ctx, b: Ctx, n: Nat) -> Nat {
+    if n == 0 { a.tag } else { swap2(b, a, n - 1) }
+}
+
+// function value: a Class-P function passed as a first-class value + called.
+pub fn call_it(f: Ctx -> Nat -> Nat, c: Ctx) -> Nat {
+    f(c, 3)
+}
+
+fn main() -> Nat {
+    let c1: Ctx = { inner: { a: 1, b: 2 }, tag: 7 };
+    let c2: Ctx = { inner: { a: 3, b: 4 }, tag: 9 };
+    // spin: 5,000,000-deep → O(1) stack, returns tag 7.
+    // swap2(c1,c2,3): odd → b.tag = 9. spin_ret(c1,5).tag = 7. call_it(spin,c2) = 9.
+    if spin(c1, 5000000) == 7 {
+        if swap2(c1, c2, 3) == 9 {
+            if spin_ret(c1, 5).tag == 7 {
+                if call_it(spin, c2) == 9 { 0 } else { 4 }
+            } else { 3 }
+        } else { 2 }
+    } else { 1 }
+}

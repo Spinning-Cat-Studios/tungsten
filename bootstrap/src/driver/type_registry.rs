@@ -23,7 +23,7 @@ thread_local! {
 
 /// Register a type-to-name mapping for reverse lookup in error messages.
 ///
-/// Called during elaboration Phase 1e for non-parameterized types.
+/// Called during elaboration Encoding Finalization for non-parameterized types.
 pub fn register_type_name(encoded_type: Type, name: String) {
     TYPE_NAME_REGISTRY.with(|registry| {
         let mut reg = registry.borrow_mut();
@@ -86,7 +86,7 @@ thread_local! {
 
 /// Register a type pattern for reverse lookup of parameterized types.
 ///
-/// Called during elaboration Phase 1e for parameterized types like `Option<T>`.
+/// Called during elaboration Encoding Finalization for parameterized types like `Option<T>`.
 pub fn register_type_pattern(pattern: TypePattern) {
     TYPE_PATTERN_REGISTRY.with(|registry| {
         let mut reg = registry.borrow_mut();
@@ -107,13 +107,12 @@ fn try_match_pattern<'a>(
     mu_var: Option<&str>,
 ) -> bool {
     match (concrete, pattern) {
-        // Base types must match exactly
-        (Type::Nat, Type::Nat)
-        | (Type::Bool, Type::Bool)
-        | (Type::Unit, Type::Unit)
-        | (Type::Void, Type::Void)
-        | (Type::Prop, Type::Prop)
-        | (Type::String, Type::String) => true,
+        // Primitive types must match exactly (ADR 18.9.26f). Both sides are
+        // guarded: a primitive concrete against a pattern `TyVar` must still
+        // reach the binding arm below.
+        (concrete, pattern) if concrete.is_primitive() && pattern.is_primitive() => {
+            concrete == pattern
+        }
 
         // Pattern variable: bind or check consistency
         (concrete, Type::TyVar(v)) => {
@@ -242,17 +241,55 @@ pub(crate) fn lookup_type_name(ty: &Type) -> Option<String> {
 
 /// Simple type formatting without depth limit (for type arguments).
 fn format_type_simple(ty: &Type) -> String {
+    if let Some(name) = ty.primitive_name() {
+        return name.to_string();
+    }
     match ty {
-        Type::Unit => "Unit".to_string(),
-        Type::Void => "Void".to_string(),
-        Type::Bool => "Bool".to_string(),
-        Type::Nat => "Nat".to_string(),
-        Type::Prop => "Prop".to_string(),
-        Type::String => "String".to_string(),
         Type::TyVar(name) => name.strip_prefix('@').unwrap_or(name).to_string(),
         Type::Arrow(a, b) => format!("{} -> {}", format_type_simple(a), format_type_simple(b)),
         Type::Product(a, b) => format!("({} × {})", format_type_simple(a), format_type_simple(b)),
         Type::Sum(a, b) => format!("({} + {})", format_type_simple(a), format_type_simple(b)),
         _ => format!("{:?}", ty),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn match_pattern(concrete: &Type, pattern: &Type) -> Option<HashMap<String, Type>> {
+        let mut bindings = HashMap::new();
+        try_match_pattern(concrete, pattern, &mut bindings, None).then(|| {
+            bindings
+                .into_iter()
+                .map(|(name, ty)| (name.to_string(), ty))
+                .collect()
+        })
+    }
+
+    // 18.9.26f: primitive pairs match by identity.
+    #[test]
+    fn primitive_pairs_match_only_when_identical() {
+        assert_eq!(match_pattern(&Type::Int, &Type::Int), Some(HashMap::new()));
+        assert_eq!(match_pattern(&Type::Nat, &Type::Int), None);
+    }
+
+    // 18.9.26f: the primitive guard is two-sided, so a primitive concrete
+    // still binds a pattern variable (the doc comment's `Unit + Nat` case).
+    #[test]
+    fn primitive_concrete_binds_a_pattern_variable() {
+        let concrete = Type::sum(Type::Unit, Type::Nat);
+        let pattern = Type::sum(Type::Unit, Type::TyVar("T".to_string()));
+        let bindings = match_pattern(&concrete, &pattern).expect("pattern should match");
+        assert_eq!(bindings.get("T"), Some(&Type::Nat));
+    }
+
+    #[test]
+    fn primitives_render_by_name_in_simple_format() {
+        assert_eq!(format_type_simple(&Type::Prop), "Prop");
+        assert_eq!(
+            format_type_simple(&Type::arrow(Type::Int, Type::Bool)),
+            "Int -> Bool"
+        );
     }
 }

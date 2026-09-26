@@ -51,6 +51,12 @@ impl<'ctx> CodeGen<'ctx> {
         self.context.i64_type().const_int(n, false).into()
     }
 
+    /// Compile a signed integer literal (ADR 14.9.26c): the two's-complement
+    /// bits, sign-extended — `-1` is `i64 -1`, not `i64 18446744073709551615`.
+    pub(crate) fn compile_int_lit(&self, value: i64) -> BasicValueEnum<'ctx> {
+        self.context.i64_type().const_int(value as u64, true).into()
+    }
+
     /// Compile `absurd` (elimination of Void type).
     ///
     /// This code is unreachable since Void has no values.

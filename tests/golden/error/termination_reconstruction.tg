@@ -1,0 +1,6 @@
+// == Cons(0, t) is not a strict subterm of l, even though t is
+type Lst = Nil | Cons(Nat, Lst)
+
+fn grow(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => grow(Cons(0, t)) } }
+
+fn main() -> Nat { 0 }

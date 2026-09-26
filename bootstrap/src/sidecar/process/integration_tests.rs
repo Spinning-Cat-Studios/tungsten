@@ -88,7 +88,10 @@ pub(super) fn connect(socket_path: &std::path::Path) -> (UnixStream, BufReader<U
 #[test]
 fn test_full_workflow_via_socket() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -153,7 +156,10 @@ fn test_full_workflow_via_socket() {
 #[test]
 fn test_disconnect_flushes_session() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
 
     // Connect, start session, report outcome, then disconnect without end_session
@@ -191,7 +197,10 @@ fn test_disconnect_flushes_session() {
 #[test]
 fn test_multiple_concurrent_connections() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
 
     let sp1 = socket_path.clone();
@@ -248,7 +257,10 @@ fn test_multiple_concurrent_connections() {
 #[test]
 fn test_invalid_json_returns_error() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -271,7 +283,10 @@ fn test_invalid_json_returns_error() {
 #[test]
 fn test_report_without_session_returns_error() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 

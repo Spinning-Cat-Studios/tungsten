@@ -12,7 +12,7 @@ use crate::config::MAX_PATTERN_DEPTH;
 use crate::span::Spanned;
 use tungsten_core::{Term, Type};
 
-use super::helpers::PatternBinding;
+use super::helpers::{poison, PatternBinding};
 use crate::elaborate::env::{self as elab_env, ModulePath, PathResolutionError};
 use crate::elaborate::error::{ElabError, ElabErrorKind};
 use crate::elaborate::{ElabResult, Elaborator};
@@ -33,11 +33,16 @@ struct ResolvedCtor {
 impl<'a> Elaborator<'a> {
     /// Resolve a constructor path for pattern matching:
     /// checks module visibility, resolves the path, looks up the type, and validates it's an ADT.
+    ///
+    /// `None` is the poison verdict (ADR 15.8.26d): the constructor's parent
+    /// type failed to elaborate, so there is no field list to bind against.
+    /// The fault is already reported at the type's span; the pattern's
+    /// variables bind at `Type::Error` instead.
     fn resolve_pattern_ctor(
         &self,
         ctor_path: &ast::Path,
         pattern_span: crate::span::Span,
-    ) -> ElabResult<ResolvedCtor> {
+    ) -> ElabResult<Option<ResolvedCtor>> {
         let ctor_name = ctor_path.item_name();
 
         // Check module visibility for qualified paths
@@ -89,22 +94,29 @@ impl<'a> Elaborator<'a> {
         let Some(type_def) = self.env.lookup_type(&ctor_info.type_name).cloned() else {
             return Err(ElabError::new(
                 pattern_span,
-                ElabErrorKind::Other(format!("type '{}' not found", ctor_info.type_name)),
+                ElabErrorKind::InternalError(format!(
+                    "type `{}` not found after constructor resolution",
+                    ctor_info.type_name
+                )),
             ));
         };
+        if type_def.is_poison() {
+            return Ok(None);
+        }
         let elab_env::TypeDefKind::ADT(constructors) = type_def.kind else {
             return Err(ElabError::new(
                 pattern_span,
-                ElabErrorKind::Other(format!("'{}' is not an ADT", ctor_info.type_name)),
+                // A resolved constructor implies its owning type is an ADT.
+                ElabErrorKind::InternalError(format!("`{}` is not an ADT", ctor_info.type_name)),
             ));
         };
 
-        Ok(ResolvedCtor {
+        Ok(Some(ResolvedCtor {
             index: ctor_info.index,
             constructors,
             type_params: type_def.params,
             type_name: ctor_info.type_name,
-        })
+        }))
     }
 
     /// Elaborate a nested constructor pattern by:
@@ -134,7 +146,16 @@ impl<'a> Elaborator<'a> {
 
         match pattern {
             Pattern::Constructor(ref ctor_path, ref sub_patterns, _) => {
-                let resolved = self.resolve_pattern_ctor(ctor_path, pattern.span())?;
+                // A poisoned parent (ADR 15.8.26d) has no fields to destruct:
+                // bind the pattern's variables at `Type::Error`, elaborate the
+                // body for its own faults, and leave a hole in place of the
+                // destructs — no term built here is ever lowered.
+                let Some(resolved) = self.resolve_pattern_ctor(ctor_path, pattern.span())? else {
+                    let mut bindings: Vec<PatternBinding> = Vec::new();
+                    poison::collect_poisoned_pattern_bindings(pattern, &mut bindings);
+                    self.with_pattern_bindings(&bindings, |elab| elab.infer(body_expr))?;
+                    return Ok(Term::Sorry);
+                };
                 let constructor = &resolved.constructors[resolved.index];
 
                 // Instantiate constructor field types with proper two-phase substitution
@@ -190,7 +211,12 @@ impl<'a> Elaborator<'a> {
             }
             _ => Err(ElabError::new(
                 pattern.span(),
-                ElabErrorKind::Other(format!("expected constructor pattern, got {:?}", pattern)),
+                // Dispatch invariant: callers route only constructor patterns
+                // here; exotic pattern forms were rejected earlier (E0021).
+                ElabErrorKind::InternalError(format!(
+                    "expected constructor pattern, got {:?}",
+                    pattern
+                )),
             )),
         }
     }
@@ -239,7 +265,12 @@ impl<'a> Elaborator<'a> {
                 });
             }
             Pattern::Constructor(ref ctor_path, ref sub_patterns, _) => {
-                let resolved = self.resolve_pattern_ctor(ctor_path, pattern.span())?;
+                // A poisoned parent (ADR 15.8.26d): every variable beneath
+                // binds at `Type::Error`.
+                let Some(resolved) = self.resolve_pattern_ctor(ctor_path, pattern.span())? else {
+                    poison::collect_poisoned_pattern_bindings(pattern, bindings);
+                    return Ok(());
+                };
                 let constructor = &resolved.constructors[resolved.index];
 
                 // Instantiate constructor field types with proper two-phase substitution

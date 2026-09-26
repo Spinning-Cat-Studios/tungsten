@@ -279,9 +279,11 @@ impl Parser {
 
 /// Classify an identifier as a base type or type variable.
 fn ident_to_type_ast(name: String) -> TypeAst {
-    match name.as_str() {
-        "Nat" | "Bool" | "Unit" | "Void" | "String" | "Prop" => TypeAst::Base(name),
-        _ => TypeAst::TyVar(name),
+    // Primitive membership is the shared table (ADR 18.9.26f).
+    if tungsten_core::Type::primitive_by_name(&name).is_some() {
+        TypeAst::Base(name)
+    } else {
+        TypeAst::TyVar(name)
     }
 }
 

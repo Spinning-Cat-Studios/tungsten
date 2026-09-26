@@ -1,4 +1,4 @@
-//! `tungsten info type record-fields <type> <file>` — show record field layout.
+//! `tungsten info type members record-fields <type> <file>` — record field layout.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

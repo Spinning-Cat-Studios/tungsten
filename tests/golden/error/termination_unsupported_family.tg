@@ -1,0 +1,6 @@
+// == a Nat cursor is outside the Phase-1 supported inductive subset
+fn countdown(n: Nat) -> Nat {
+    if n == 0 { 0 } else { countdown(n - 1) }
+}
+
+fn main() -> Nat { 0 }

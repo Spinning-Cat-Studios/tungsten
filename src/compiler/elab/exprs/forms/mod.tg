@@ -1,5 +1,11 @@
 // src/compiler/elab/exprs/forms/mod.tg
-// Expression form elaboration: result types, literals, tuples, proofs, patterns, comparison.
+// Expression form elaboration: result types, literals, tuples, proofs, comparison.
+//
+// `patterns.tg` used to sit here: a `ProjectionList` framework wired to nothing,
+// whose `PatConstructor` arm returned no bindings behind a placeholder comment.
+// It is deleted rather than documented (ADR 3.9.26g D4) — its name is the first
+// place a reader looks for pattern projection, and the answer is
+// `matches/patterns/`.
 
 pub mod result;
 pub mod compare;
@@ -9,7 +15,6 @@ pub mod proofs;
 pub mod equality;
 pub mod induction;
 pub mod annot;
-pub mod patterns;
 
 pub use elab::exprs::forms::compare::*;
 pub use elab::exprs::forms::literals::*;

@@ -187,3 +187,12 @@ fn test_annot_sorry_accepts_any_type() {
     let term = Term::annot(Term::Sorry, Type::arrow(Type::Nat, Type::Bool));
     assert_eq!(type_of(&ctx, &term), Ok(Type::arrow(Type::Nat, Type::Bool)));
 }
+
+// ADR 18.9.26g: an authored hole is `Spanned(Sorry)`; the annotation rule sees through it.
+#[test]
+fn test_annot_spanned_sorry_accepts_any_type() {
+    let ctx = Context::new();
+    let hole = Term::spanned(Term::Sorry, crate::terms::TermSpan::new(0, 5));
+    let term = Term::annot(hole, Type::arrow(Type::Nat, Type::Bool));
+    assert_eq!(type_of(&ctx, &term), Ok(Type::arrow(Type::Nat, Type::Bool)));
+}

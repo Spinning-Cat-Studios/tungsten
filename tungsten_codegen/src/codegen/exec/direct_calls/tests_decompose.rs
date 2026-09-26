@@ -1,5 +1,6 @@
 //! Tests for argument decomposition (ADR 18.5.26a).
 
+use super::decompose::ParamLowering;
 use super::*;
 use crate::codegen::CodeGen;
 use inkwell::context::Context;
@@ -26,7 +27,10 @@ fn test_declare_decomposed_entry_creates_mt_function() {
     assert!(result.is_some(), "should declare decomposed entry");
     let param_map = result.unwrap();
     // First param (after env) is struct with 2 fields, second is scalar
-    assert_eq!(param_map, vec![Some(2), None]);
+    assert_eq!(
+        param_map,
+        vec![ParamLowering::Decompose(2), ParamLowering::Passthrough]
+    );
 
     // $direct_mt should exist in the module
     let mt_fn = cg.module.get_function("foo$direct_mt");
@@ -68,7 +72,7 @@ fn test_shim_has_correct_structure() {
         false,
     );
     let direct_fn = cg.module.add_function("baz$direct", fn_type, None);
-    let param_map = vec![Some(2), None];
+    let param_map = vec![ParamLowering::Decompose(2), ParamLowering::Passthrough];
 
     // Declare the $direct_mt entry
     let result = cg.declare_decomposed_entry("baz", fn_type).unwrap();
@@ -103,7 +107,7 @@ fn test_shim_ir_extracts_and_delegates() {
         false,
     );
     cg.module.add_function("shim_test$direct", fn_type, None);
-    let param_map = vec![Some(2), None];
+    let param_map = vec![ParamLowering::Decompose(2), ParamLowering::Passthrough];
 
     cg.declare_decomposed_entry("shim_test", fn_type).unwrap();
     let mt_fn = cg.module.get_function("shim_test$direct_mt").unwrap();
@@ -163,25 +167,91 @@ fn test_decomposed_mt_has_scalar_params_in_ir() {
     );
 }
 
-/// AC11: Nested struct params are not decomposed.
+/// ADR 1.7.26a (Stage 1): a struct-*returning* fn with a flattenable struct
+/// param lowers `$direct_mt` to the sret ABI — `void` return, leading `ptr`
+/// out-pointer — so the gate no longer SKIPs on the struct return.
 #[test]
-fn test_nested_struct_not_decomposed() {
+fn test_sret_direct_mt_has_void_return_and_leading_out_pointer() {
     let context = Context::create();
-    let mut cg = CodeGen::new(&context, "test_nested_skip");
+    let mut cg = CodeGen::new(&context, "test_sret_shape");
     cg.module
         .set_triple(&TargetTriple::create("aarch64-unknown-linux-gnu"));
     let ptr_type = context.ptr_type(AddressSpace::default());
     let i64_type = context.i64_type();
-    let inner = context.struct_type(&[i64_type.into(), i64_type.into()], false);
-    let nested = context.struct_type(&[ptr_type.into(), inner.into()], false);
-    let fn_type = i64_type.fn_type(&[ptr_type.into(), nested.into()], false);
-    cg.module.add_function("nested$direct", fn_type, None);
+    // By-value aggregate RETURN {i64, ptr} + flattenable {ptr, i64} struct param.
+    let ret_struct = context.struct_type(&[i64_type.into(), ptr_type.into()], false);
+    let string_struct = context.struct_type(&[ptr_type.into(), i64_type.into()], false);
+    // {i64,ptr} @f$direct(ptr env, {ptr,i64} s)
+    let fn_type = ret_struct.fn_type(&[ptr_type.into(), string_struct.into()], false);
+    cg.module.add_function("f$direct", fn_type, None);
 
-    let result = cg.declare_decomposed_entry("nested", fn_type).unwrap();
-    assert!(result.is_none(), "nested struct should not be decomposed");
+    let param_map = cg.declare_decomposed_entry("f", fn_type).unwrap().unwrap();
+    assert_eq!(param_map, vec![ParamLowering::Decompose(2)]);
+
+    let mt_fn = cg.module.get_function("f$direct_mt").unwrap();
+    // sret: `$direct_mt` returns void (LLVM 18 rejects musttail with struct return).
     assert!(
-        cg.module.get_function("nested$direct_mt").is_none(),
-        "no $direct_mt should be created for nested struct"
+        mt_fn.get_type().get_return_type().is_none(),
+        "sret $direct_mt must return void, got {:?}",
+        mt_fn.get_type().get_return_type()
+    );
+    // Params: sret out-ptr, env, s.0 (ptr), s.1 (i64) = 4.
+    assert_eq!(
+        mt_fn.count_params(),
+        4,
+        "sret out-ptr + env + 2 flattened scalars"
+    );
+}
+
+/// ADR 1.7.26a (Stage 1) — the core regression guard: inside an sret-style
+/// `$direct_mt`, the self-recursive tail edge is `musttail call void @…$direct_mt`
+/// forwarding the out-pointer, with **no** bounce through the `$direct` shim.
+#[test]
+fn test_sret_direct_mt_recursive_edge_is_musttail_void_no_bounce() {
+    let context = Context::create();
+    let mut cg = CodeGen::new(&context, "test_sret_edge");
+    cg.module
+        .set_triple(&TargetTriple::create("aarch64-unknown-linux-gnu"));
+    let ptr_type = context.ptr_type(AddressSpace::default());
+    let i64_type = context.i64_type();
+    let ret_struct = context.struct_type(&[i64_type.into(), ptr_type.into()], false);
+    let string_struct = context.struct_type(&[ptr_type.into(), i64_type.into()], false);
+    let fn_type = ret_struct.fn_type(&[ptr_type.into(), string_struct.into()], false);
+    cg.module.add_function("f$direct", fn_type, None);
+    let param_map = cg.declare_decomposed_entry("f", fn_type).unwrap().unwrap();
+    let mt_fn = cg.module.get_function("f$direct_mt").unwrap();
+
+    // Drive the self-recursive tail edge from inside `$direct_mt`.
+    cg.direct_calls.set_decompose_map("f", param_map);
+    cg.compilation.current_fn = Some(mt_fn);
+    let entry = context.append_basic_block(mt_fn, "entry");
+    cg.builder.position_at_end(entry);
+
+    // Recursive call passes the (unchanged-shape) struct arg; undef suffices for IR.
+    let arg = string_struct.get_undef().into();
+    let emitted = cg.try_emit_decomposed_musttail("f", &[arg]).unwrap();
+    assert!(
+        emitted.is_some(),
+        "sret $direct_mt is musttail-legal (void return) → recursive edge must EMIT"
+    );
+
+    let ir = cg.module.print_to_string().to_string();
+    // Recursive edge: `musttail call void @"f$direct_mt"(ptr …)` — forwards the sret
+    // out-pointer, void return.
+    assert!(
+        ir.contains(r#"musttail call void @"f$direct_mt""#),
+        "recursive edge must be `musttail call void @f$direct_mt`, got IR:\n{ir}"
+    );
+    // No `$direct_mt ⇄ $direct` bounce: no call/invoke instruction targets the
+    // `$direct` shim (the `declare @"f$direct"(…)` line is not a call).
+    let bounced = ir.lines().any(|l| {
+        let t = l.trim_start();
+        (t.starts_with("call") || t.starts_with("musttail call") || t.starts_with("tail call"))
+            && t.contains(r#"@"f$direct"("#)
+    });
+    assert!(
+        !bounced,
+        "recursive edge must not bounce through the $direct shim, got IR:\n{ir}"
     );
 }
 
@@ -211,9 +281,67 @@ fn test_declare_mixed_struct_scalar_param_map() {
     assert!(result.is_some());
     let param_map = result.unwrap();
     // param_map: [Some(2), None, Some(2)] — struct, scalar, struct
-    assert_eq!(param_map, vec![Some(2), None, Some(2)]);
+    assert_eq!(
+        param_map,
+        vec![
+            ParamLowering::Decompose(2),
+            ParamLowering::Passthrough,
+            ParamLowering::Decompose(2)
+        ]
+    );
 
     let mt_fn = cg.module.get_function("mixed$direct_mt").unwrap();
     // env + ptr + i64 + i64 + ptr + i64 = 6 params
     assert_eq!(mt_fn.count_params(), 6);
+}
+
+/// ADR 1.7.26c P1 (Class R): when no struct params are decomposable but the
+/// return is struct (sret-eligible), declare_decomposed_entry still creates
+/// a `$direct_mt` entry with sret and non-decomposed params.
+/// This unblocks musttail for return-only struct functions (5 functions).
+#[test]
+fn test_class_r_direct_mt_with_sret_when_no_decomposition() {
+    let context = Context::create();
+    let mut cg = CodeGen::new(&context, "test_class_r");
+    cg.module
+        .set_triple(&TargetTriple::create("aarch64-unknown-linux-gnu"));
+    let ptr_type = context.ptr_type(AddressSpace::default());
+    let i64_type = context.i64_type();
+
+    // Struct-returning function with scalar-only params (e.g., module_map_lookup).
+    // Return: {i64, ptr} (non-recursive sum-with-payload).
+    // Params: i64 (scalar), i64 (scalar) → no struct params, decomposition not possible,
+    // but return is struct → Class R, should create $direct_mt with sret.
+    let ret_struct = context.struct_type(&[i64_type.into(), ptr_type.into()], false);
+    // fn_type: {i64,ptr} @foo$direct(ptr env, i64 key, i64 sentinel)
+    let fn_type = ret_struct.fn_type(&[ptr_type.into(), i64_type.into(), i64_type.into()], false);
+
+    cg.module.add_function("foo$direct", fn_type, None);
+
+    // Test: declare_decomposed_entry should create $direct_mt with sret
+    let result = cg.declare_decomposed_entry("foo", fn_type).unwrap();
+    assert!(
+        result.is_some(),
+        "Class R should declare $direct_mt even with no decomposable params"
+    );
+
+    let param_map = result.unwrap();
+    // param_map: [None, None] — both scalar params are passthrough (no decomposition)
+    assert_eq!(
+        param_map,
+        vec![ParamLowering::Passthrough, ParamLowering::Passthrough]
+    );
+
+    let mt_fn = cg.module.get_function("foo$direct_mt").unwrap();
+    // Verify sret: $direct_mt returns void (LLVM 18 rejects musttail with struct return)
+    assert!(
+        mt_fn.get_type().get_return_type().is_none(),
+        "Class R $direct_mt must return void (sret)"
+    );
+    // Params: sret out-ptr, env, i64 key, i64 sentinel = 4 params
+    assert_eq!(
+        mt_fn.count_params(),
+        4,
+        "Class R $direct_mt has: sret out-ptr + env + 2 scalar params (no decomposition)"
+    );
 }

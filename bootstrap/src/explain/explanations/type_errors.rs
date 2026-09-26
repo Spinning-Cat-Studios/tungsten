@@ -14,6 +14,7 @@ fn inference_errors(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "TypeMismatch" => ErrorExplanation {
             name: "TypeMismatch",
+            code: "E0010",
             category: "Type Errors",
             summary: "expected one type, found another",
             detail: "\
@@ -39,6 +40,7 @@ fn greet() -> String {\n\
 
         "CannotInferType" => ErrorExplanation {
             name: "CannotInferType",
+            code: "E0011",
             category: "Type Errors",
             summary: "type annotation needed",
             detail: "\
@@ -60,6 +62,7 @@ fn main() -> Nat {\n\
 
         "CannotInferTypeArg" => ErrorExplanation {
             name: "CannotInferTypeArg",
+            code: "E0015",
             category: "Type Errors",
             summary: "cannot infer type argument",
             detail: "\
@@ -89,6 +92,7 @@ fn application_errors(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "ArityMismatch" => ErrorExplanation {
             name: "ArityMismatch",
+            code: "E0012",
             category: "Type Errors",
             summary: "wrong number of arguments",
             detail: "\
@@ -109,6 +113,7 @@ fn main() -> Nat {\n\
 
         "ExpectedFunction" => ErrorExplanation {
             name: "ExpectedFunction",
+            code: "E0013",
             category: "Type Errors",
             summary: "expected function, found other type",
             detail: "\
@@ -129,6 +134,7 @@ fn main() -> Nat {\n\
 
         "ExpectedType" => ErrorExplanation {
             name: "ExpectedType",
+            code: "E0014",
             category: "Type Errors",
             summary: "expected a specific type",
             detail: "\
@@ -143,6 +149,69 @@ fn main() -> Nat {\n\
     if 42 { 1 } else { 0 }    // error: expected `Bool`, found `Nat`\n\
 }",
             see_also: &["TypeMismatch"],
+        },
+
+        "ComparatorUnavailable" => ErrorExplanation {
+            name: "ComparatorUnavailable",
+            code: "E0080",
+            category: "Type Errors",
+            summary: "no comparator for this type",
+            detail: "\
+`__compare` — which the `assert_eq_*` test assertions desugar to — was \
+applied at a type the compiler cannot synthesize a structural comparator \
+for.\n\
+\n\
+Supported: primitives, tuples, sums/ADTs, records, and lists. Function \
+types are the usual culprit: two functions have no decidable equality.\n\
+\n\
+`tungsten doctor check comparable <type> <file>` reports whether a type \
+is comparable before you write assertions at it.",
+            example: "\
+fn f(x: Nat) -> Nat { x }\n\
+fn g(x: Nat) -> Nat { x }\n\
+\n\
+fn test_fns() -> Bool {\n\
+    __compare(f, g)    // error: no comparator for `Nat -> Nat`\n\
+}",
+            see_also: &["TypeMismatch"],
+        },
+
+        "IntLiteralOutOfRange" => ErrorExplanation {
+            name: "IntLiteralOutOfRange",
+            code: "E0090",
+            category: "Type Errors",
+            summary: "integer literal does not fit `Int`",
+            detail: "\
+A literal checked against `Int` is outside the signed 64-bit range \
+(-9223372036854775808 to 9223372036854775807).\n\
+\n\
+Literals default to `Nat`; a literal becomes `Int` only where the \
+expected type says so, or under a unary minus. `Nat` reaches \
+18446744073709551615, so a value that fits `Nat` can still be too large \
+for `Int` — `to_int(n)` traps at runtime for the same values.",
+            example: "\
+fn big() -> Int {\n\
+    9223372036854775808    // error: out of range for `Int`\n\
+}",
+            see_also: &["TypeMismatch"],
+        },
+
+        "BuiltinTypeRedefined" => ErrorExplanation {
+            name: "BuiltinTypeRedefined",
+            code: "E0091",
+            category: "Type Errors",
+            summary: "a `type` under a builtin type's name",
+            detail: "\
+A `type` definition uses the name of a builtin type (`Int`, `Nat`, `Bool`, \
+`Unit`, `Void`, `Prop`, `String`). Builtin lookup precedes user types, so \
+the definition would never be reached — every use of the name would still \
+resolve to the builtin, silently.\n\
+\n\
+Pick another name. For a C `int` return type the compiler's own FFI module \
+uses `CInt`.",
+            example: "\
+type Int = Nat    // error: cannot redefine the builtin type `Int`",
+            see_also: &["DuplicateDefinition"],
         },
 
         _ => return None,

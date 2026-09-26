@@ -20,8 +20,9 @@ echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-18 main" | sudo 
 # Update package lists
 sudo apt-get update
 
-# Install hyperfine for benchmarking
-sudo apt-get install -y hyperfine
+# Install hyperfine for benchmarking, plus bc for ad-hoc elapsed-time arithmetic
+# (the arm64 container's post-create installs the same pair; `time` follows below).
+sudo apt-get install -y hyperfine bc
 
 # Install perf for hardware counter profiling (x86_64 has proper perf support)
 # Also install GNU time for memory profiling (time -v)

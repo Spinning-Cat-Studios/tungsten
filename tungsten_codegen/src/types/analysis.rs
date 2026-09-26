@@ -15,7 +15,7 @@ impl TypeLowering<'_> {
     /// This method distinguishes the two by checking the cached `concrete_type_names`
     /// set (populated from `adt_types ∪ record_types` during registration).
     ///
-    /// The `@`-prefix (a Phase 1c artifact for cross-module references) is
+    /// The `@`-prefix (a Type-Body Collection artifact for cross-module references) is
     /// stripped by `strip_named_prefix` before lookup, so both `TyVar("Token")`
     /// and `TyVar("@Token")` resolve to the same concrete type.
     ///
@@ -80,6 +80,7 @@ impl TypeLowering<'_> {
             | Type::Unit
             | Type::Bool
             | Type::Nat
+            | Type::Int
             | Type::String
             | Type::Prop
             | Type::Void => ty.clone(),
@@ -103,6 +104,13 @@ impl TypeLowering<'_> {
     /// Returns None if the type cannot be expanded (not a known record/ADT).
     ///
     /// For n≥3 ADTs, returns `Type::Adt` (not Sum) for consistency with `lower_type`.
+    ///
+    /// Sibling: [`Self::resolve_to_flat_adt`]. Pick by target form —
+    /// `expand_type` keeps the n≤2 Sum encoding (sum/case codegen) and also
+    /// handles record types, while `resolve_to_flat_adt` always yields the
+    /// canonical `Type::Adt` (flat-ADT codegen) and additionally strips a
+    /// `Mu` wrapper. Neither substitutes μ-variables — callers unfold via
+    /// `unwrap_mu_type` first where equi-recursive payload types matter.
     #[must_use]
     pub fn expand_type(&self, ty: &Type) -> Option<Type> {
         match ty {
@@ -182,6 +190,11 @@ impl TypeLowering<'_> {
     /// For `Type::Adt`, returns it as-is.
     /// For `Type::Mu` wrapping an Adt, unwraps and returns the inner Adt (non-recursive form).
     /// Returns None if the type is not an ADT.
+    ///
+    /// Sibling: [`Self::expand_type`] — same "give me the structural form"
+    /// question, but keeps the n≤2 Sum encoding and record types, and does
+    /// NOT look through a `Mu` wrapper. See its doc comment for the
+    /// decision table.
     #[must_use]
     pub fn resolve_to_flat_adt(&self, ty: &Type) -> Option<Type> {
         match ty {
@@ -287,7 +300,13 @@ impl TypeLowering<'_> {
                 .any(|(_, payload_ty)| Self::type_mentions_var(payload_ty, var_name)),
             Type::Ref(inner) | Type::Ptr(inner) => Self::type_mentions_var(inner, var_name),
             Type::Eq(ty_eq, _, _) => Self::type_mentions_var(ty_eq, var_name),
-            Type::Nat | Type::Bool | Type::String | Type::Unit | Type::Prop | Type::Void => false,
+            Type::Nat
+            | Type::Int
+            | Type::Bool
+            | Type::String
+            | Type::Unit
+            | Type::Prop
+            | Type::Void => false,
             Type::Error => false,
         }
     }

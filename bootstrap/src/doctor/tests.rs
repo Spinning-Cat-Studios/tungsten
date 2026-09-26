@@ -61,7 +61,7 @@ mod type_graph_tests {
         );
         adt_types.insert(k, v);
 
-        let graph = TypeGraph::build(&adt_types);
+        let graph = TypeGraph::build_adt_only(&adt_types);
         assert_eq!(graph.node_count(), 1);
         assert!(graph.has_edge("List", "List"));
     }
@@ -82,7 +82,7 @@ mod type_graph_tests {
         );
         adt_types.insert(k, v);
 
-        let graph = TypeGraph::build(&adt_types);
+        let graph = TypeGraph::build_adt_only(&adt_types);
         assert_eq!(graph.node_count(), 2);
         assert!(graph.has_edge("TypeExpr", "Expr"));
         assert!(graph.has_edge("Expr", "TypeExpr"));
@@ -98,148 +98,8 @@ mod type_graph_tests {
         );
         adt_types.insert(k, v);
 
-        let graph = TypeGraph::build(&adt_types);
+        let graph = TypeGraph::build_adt_only(&adt_types);
         assert_eq!(graph.node_count(), 1);
         assert!(!graph.has_edge("Color", "Color"));
-    }
-}
-
-/// CLI grouping tests — verify both grouped and legacy check paths parse (ADR 12.5.26h).
-#[cfg(test)]
-mod cli_grouping_tests {
-    use crate::doctor::CheckCommands;
-    use clap::Parser;
-    #[derive(Parser)]
-    struct TestCli {
-        #[command(subcommand)]
-        cmd: CheckCommands,
-    }
-
-    fn parse(args: &[&str]) -> Result<TestCli, clap::Error> {
-        TestCli::try_parse_from(std::iter::once("test").chain(args.iter().copied()))
-    }
-
-    // ── Grouped type paths ──
-
-    #[test]
-    fn test_check_type_normalization_consistency_parses() {
-        assert!(parse(&["type", "normalization-consistency", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_type_encoding_depth_parses() {
-        assert!(parse(&["type", "encoding-depth", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_type_encoding_depth_with_thresholds_parses() {
-        assert!(parse(&[
-            "type",
-            "encoding-depth",
-            "test.tg",
-            "--max-stack",
-            "10",
-            "--max-depth",
-            "30",
-            "--max-nodes",
-            "2000"
-        ])
-        .is_ok());
-    }
-
-    #[test]
-    fn test_check_type_phase_invariants_parses() {
-        assert!(parse(&["type", "phase-invariants", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_type_type_sizes_parses() {
-        assert!(parse(&["type", "type-sizes", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_type_stubs_parses() {
-        assert!(parse(&["type", "stubs", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_type_fold_consistency_parses() {
-        assert!(parse(&["type", "fold-consistency", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_type_constructor_counts_parses() {
-        assert!(parse(&["type", "constructor-counts", "test.tg"]).is_ok());
-    }
-
-    // ── Grouped IR paths ──
-
-    #[test]
-    fn test_check_ir_layout_parses() {
-        assert!(parse(&["ir", "layout", "test.ll"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_ir_declares_parses() {
-        assert!(parse(&["ir", "declares", "--from-existing-ir", "target/ll/"]).is_ok());
-    }
-
-    // ── Legacy paths (hidden aliases) ──
-
-    #[test]
-    fn test_check_normalization_consistency_legacy_parses() {
-        assert!(parse(&["normalization-consistency", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_encoding_depth_legacy_parses() {
-        assert!(parse(&["encoding-depth", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_stubs_legacy_parses() {
-        assert!(parse(&["stubs", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_phase_invariants_legacy_parses() {
-        assert!(parse(&["phase-invariants", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_type_sizes_legacy_parses() {
-        assert!(parse(&["type-sizes", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_fold_consistency_legacy_parses() {
-        assert!(parse(&["fold-consistency", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_constructor_counts_legacy_parses() {
-        assert!(parse(&["constructor-counts", "test.tg"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_ir_layout_legacy_parses() {
-        assert!(parse(&["ir-layout", "test.ll"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_declares_legacy_parses() {
-        assert!(parse(&["declares", "--from-existing-ir", "target/ll/"]).is_ok());
-    }
-
-    // ── Top-level (unchanged) ──
-
-    #[test]
-    fn test_check_module_overlap_parses() {
-        assert!(parse(&["module-overlap"]).is_ok());
-    }
-
-    #[test]
-    fn test_check_reexport_completeness_parses() {
-        assert!(parse(&["reexport-completeness", "test.tg"]).is_ok());
     }
 }

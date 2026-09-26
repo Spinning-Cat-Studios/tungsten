@@ -1,9 +1,16 @@
 // Unit tests for string concatenation (ADR 18.5.26f).
 // Verifies aliased strings remain valid after concat (AC7).
 
+// Full module tree (matches test_string_utils.tg): with only `mod driver`,
+// Signature Collection fails resolving `Option` in driver::util (ADR 2.7.26b T5b).
 mod driver;
+mod lexer;
+mod parser;
+mod elab;
 
 use driver::ffi::test::{assert_eq_string, assert_eq_nat};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::strings::{string_concat, string_join};
 
 // ---------------------------------------------------------------------------
 // AC7: Aliased string values remain valid after concat
@@ -45,4 +52,59 @@ pub fn test_concat_reuse_bound_value() -> Unit {
 pub fn test_concat_right_recursive() -> Unit {
     let a = "x" ++ ("y" ++ "z");
     assert_eq_string(a, "xyz")
+}
+
+// ---------------------------------------------------------------------------
+// ADR 20.8.26d AC4: `string_concat` the FUNCTION, not just the `++` operator
+// ---------------------------------------------------------------------------
+//
+// These assertions could not be written before 20.8.26d. `string_concat`'s body
+// was a character-append loop reaching `tg_string_append_char`, which is absent
+// from `tungsten info eval externs`, so the call went silently Stuck and the
+// enclosing `assert_eq_string` never ran. With the body now `a ++ b` the chain
+// carries no extern DECLARATION at all and the evaluator executes it — so a
+// suite here reporting `ASSERTED NOTHING` would mean `++` is not the native
+// Core term the ADR claims.
+
+/// The headline case: two non-empty operands join in order.
+pub fn test_string_concat_fn_basic() -> Unit {
+    assert_eq_string(string_concat("a", "b"), "ab")
+}
+
+/// Empty left operand is the identity.
+pub fn test_string_concat_fn_empty_left() -> Unit {
+    assert_eq_string(string_concat("", "tail"), "tail")
+}
+
+/// Empty right operand is the identity.
+pub fn test_string_concat_fn_empty_right() -> Unit {
+    assert_eq_string(string_concat("head", ""), "head")
+}
+
+/// Both operands empty.
+pub fn test_string_concat_fn_empty_both() -> Unit {
+    assert_eq_string(string_concat("", ""), "")
+}
+
+/// Multi-character operands, so a one-character-per-step loop and a native
+/// concatenation could not both pass by accident.
+pub fn test_string_concat_fn_multichar() -> Unit {
+    assert_eq_string(string_concat("hello ", "world"), "hello world")
+}
+
+/// The nested call site R1 names: `string_join` calls `string_concat` twice per
+/// element, the inner result feeding the outer's LEFT operand. D2 says it gains
+/// executability for free — this is that claim asserted rather than assumed.
+pub fn test_string_join_rides_along() -> Unit {
+    let parts: List<String> = Cons("a", Cons("b", Cons("c", Nil())));
+    assert_eq_string(string_join(parts, "-"), "a-b-c")
+}
+
+/// `string_join` on a one-element list returns the element untouched, and on
+/// the empty list the empty string — the two arms that never reach `++`.
+pub fn test_string_join_degenerate_arms() -> Unit {
+    let one: List<String> = Cons("solo", Nil());
+    let none: List<String> = Nil();
+    assert_eq_string(string_join(one, "-"), "solo");
+    assert_eq_string(string_join(none, "-"), "")
 }

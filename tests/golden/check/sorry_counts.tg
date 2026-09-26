@@ -1,0 +1,48 @@
+// ADR 18.9.26g: `check` counts the holes it finds as authored or synthesised,
+// and `doctor check sorry-sites` names each definition that carries one.
+//
+// One definition per class: an authored `sorry`, an `axiom`, a nested
+// two-constructor pattern (absurd branch), a nested three-constructor pattern
+// (unreachable pattern arm), `==` on a type with no equality primitive
+// (unclassified), and one definition mixing an authored hole with a nested
+// pattern.
+
+pub type List<T> = | Nil | Cons(T, List<T>)
+
+pub type Option<T> = | None | Some(T)
+
+pub type Tri = | A(Nat) | B(Nat) | C(Nat)
+
+pub fn authored_hole() -> Nat {
+    sorry
+}
+
+axiom trusted(n: Nat): Bool
+
+pub fn singleton_head(xs: List<Nat>) -> Nat {
+    match xs {
+        Cons(x, Nil()) => x,
+        _ => 0
+    }
+}
+
+pub fn tri_payload(o: Option<Tri>) -> Nat {
+    match o {
+        Some(A(n)) => n,
+        _ => 0
+    }
+}
+
+pub fn same_option(a: Option<Nat>, b: Option<Nat>) -> Bool {
+    a == b
+}
+
+pub fn mixed_hole(xs: List<Nat>) -> Nat {
+    match xs {
+        Cons(x, Nil()) => {
+            let hole: Nat = sorry;
+            hole
+        },
+        _ => 0
+    }
+}

@@ -1,0 +1,75 @@
+// Unit tests for driver/ffi/diagnostics/escape_count.tg (ADR 5.9.26c).
+//
+// The subject is a pure function over an injected number — the raw `u64` the
+// diagnostic FFI hands back — so nothing here needs a term arena, a real
+// handle, or a developer build. That is the point of the split rather than an
+// accident of testing: `diagnostic_tyvar_escape_count` lives in the swapped
+// `dev.tg`, which no production build compiles and no host-side suite can
+// reach, while the decision it makes is build-independent and belongs
+// somewhere both builds and this suite can see.
+//
+// These live in their own entry file because `test_driver_paths.tg` — the
+// suite for the sibling sentinel ADR 3.9.26s named — had 8 lines of headroom
+// against the 300-line `.tg` cap when this ADR was actioned.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_bool, assert_eq_nat, assert_eq_string};
+use driver::ffi::diagnostics::escape_count::{
+    tyvar_escape_count_unavailable, tyvar_escape_count_answer
+};
+use driver::ffi::{invalid_handle, ffi_negative_one};
+use parser::option::{is_some, is_none};
+use driver::util::{nat_to_string, option_unwrap_or};
+
+// ---------------------------------------------------------------------------
+// The sentinel itself (5.9.26c AC1, AC2)
+// ---------------------------------------------------------------------------
+
+/// 5.9.26c AC2: the sentinel has one definition, and it is `u64::MAX` — the
+/// value `tg_diagnostic_tyvar_escape_count` documents as its error return.
+/// Pinned as a literal rather than derived from a neighbour, so that a change
+/// to the Rust side is a red test rather than a count that silently starts
+/// reading as an answer.
+pub fn test_tyvar_escape_count_unavailable_is_u64_max() -> Unit {
+    assert_eq_string(nat_to_string(tyvar_escape_count_unavailable()),
+        "18446744073709551615")
+}
+
+/// 5.9.26c AC1: the three sentinels agree arithmetically and mean three
+/// different things. This pins the coincidence deliberately — it is why the
+/// pun kept passing review, and it is the evidence that giving the count its
+/// own name changed no behaviour. It is NOT licence to compare a count against
+/// either of the other two: `escape_count.tg`'s header says which is which.
+pub fn test_the_three_sentinels_coincide_numerically() -> Unit {
+    assert_eq_nat(tyvar_escape_count_unavailable(), invalid_handle());
+    assert_eq_nat(tyvar_escape_count_unavailable(), ffi_negative_one())
+}
+
+// ---------------------------------------------------------------------------
+// The wrapper's answer (5.9.26c AC3)
+// ---------------------------------------------------------------------------
+
+/// 5.9.26c AC3: the sentinel is the only failure. `diagnostic_tyvar_escape_count`
+/// is this function applied to the raw FFI return, so deleting the comparison
+/// turns this red.
+pub fn test_escape_count_answer_is_none_for_the_sentinel() -> Unit {
+    assert_eq_bool(is_none(tyvar_escape_count_answer(
+        tyvar_escape_count_unavailable())), true)
+}
+
+/// 5.9.26c AC3: zero is a legitimate answer — a term with no escapes — and must
+/// not be read as failure. The count one below the sentinel is here for the
+/// same reason `exec_code_is_absent` pins it: an off-by-one in the constant
+/// would otherwise turn a real count into a silent `None`.
+pub fn test_escape_count_answer_is_some_for_an_ordinary_count() -> Unit {
+    assert_eq_bool(is_some(tyvar_escape_count_answer(0)), true);
+    assert_eq_nat(option_unwrap_or(tyvar_escape_count_answer(0), 99), 0);
+    assert_eq_nat(option_unwrap_or(tyvar_escape_count_answer(3), 99), 3);
+    assert_eq_nat(
+        option_unwrap_or(tyvar_escape_count_answer(18446744073709551614), 99),
+        18446744073709551614)
+}

@@ -3,7 +3,7 @@
 //
 // When a module has `pub use other::Item`, this pass copies the referenced
 // items into the re-exporting module's ModuleItemNames so that import
-// resolution (Phase 1b) can find them.
+// resolution (Import Resolution) can find them.
 
 use driver::ffi::{List, Nil, Cons};
 use parser::ast::common::{Visibility, VisPublic};

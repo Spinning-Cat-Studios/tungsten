@@ -3,8 +3,10 @@
 
 pub mod types;
 pub mod constructors;
+pub mod ctor_index;
 pub mod resolved;
 
 pub use elab::env::defs::types::*;
 pub use elab::env::defs::constructors::*;
+pub use elab::env::defs::ctor_index::*;
 pub use elab::env::defs::resolved::*;

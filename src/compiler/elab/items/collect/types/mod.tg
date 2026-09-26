@@ -1,5 +1,5 @@
 // src/compiler/elab/items/collect/types/mod.tg
-// Phase 1c type body elaboration — dispatch and pre-registration.
+// Type-Body Collection type body elaboration — dispatch and pre-registration.
 //
 // Elaborates ADT bodies (sum types, records) and type aliases.
 // Handles self-referential types via μ-variable placeholders,
@@ -46,7 +46,7 @@ use elab::items::collect::types::helpers::{
 use elab::items::collect::types::adt::{elaborate_adt_body, elaborate_alias_body};
 
 // ===========================================================================
-// PHASE 1c PRE-PASS: PRE-REGISTER μ-VARIABLE PLACEHOLDERS
+// TYPE-BODY COLLECTION PRE-PASS: PRE-REGISTER μ-VARIABLE PLACEHOLDERS
 // ===========================================================================
 
 /// Pre-register μ-variable placeholders for all types before body elaboration.
@@ -90,29 +90,29 @@ fn preregister_mu_handle(ctx: ElabContext, type_name: String) -> ElabContext {
 }
 
 // ===========================================================================
-// PHASE 1c: ELABORATE TYPE BODIES
+// TYPE-BODY COLLECTION: ELABORATE TYPE BODIES
 // ===========================================================================
 
 /// Elaborate the bodies of all type definitions.
 /// Imports are now resolved, so type bodies can reference imported types.
-pub fn collect_phase_1c(ctx: ElabContext, items: List<Item>) -> ElabContext {
+pub fn collect_type_bodies(ctx: ElabContext, items: List<Item>) -> ElabContext {
     match items {
         Nil() => ctx,
         Cons(item, rest) =>
             let ctx2 = elaborate_type_body(ctx, item);
-            collect_phase_1c(ctx2, rest)
+            collect_type_bodies(ctx2, rest)
     }
 }
 
-/// Phase 1c fixup: Only re-elaborate record type bodies.
+/// Type-Body Collection fixup: Only re-elaborate record type bodies.
 /// This fixes record fields that got placeholder type handles because
 /// the referenced type wasn't yet encoded during the first pass.
-pub fn collect_phase_1c_records_only(ctx: ElabContext, items: List<Item>) -> ElabContext {
+pub fn collect_type_bodies_records_only(ctx: ElabContext, items: List<Item>) -> ElabContext {
     match items {
         Nil() => ctx,
         Cons(item, rest) =>
             let ctx2 = maybe_elaborate_record(ctx, item);
-            collect_phase_1c_records_only(ctx2, rest)
+            collect_type_bodies_records_only(ctx2, rest)
     }
 }
 
@@ -131,11 +131,11 @@ fn maybe_elaborate_record_body(ctx: ElabContext, def: TypeDef) -> ElabContext {
     }
 }
 
-/// Phase 1c fixup 2: Re-elaborate all type alias bodies.
+/// Type-Body Collection fixup 2: Re-elaborate all type alias bodies.
 /// On the first pass, a type alias like VisibilityEntry = (A, B, Option<C>) may
 /// elaborate with a partial encoding because Option hadn't been fully elaborated yet.
 /// Re-elaborating all aliases after all ADTs are done fixes these ordering issues.
-pub fn collect_phase_1c_aliases_only(ctx: ElabContext, items: List<Item>) -> ElabContext {
+pub fn collect_type_bodies_aliases_only(ctx: ElabContext, items: List<Item>) -> ElabContext {
     match items {
         Nil() => ctx,
         Cons(item, rest) =>
@@ -144,7 +144,7 @@ pub fn collect_phase_1c_aliases_only(ctx: ElabContext, items: List<Item>) -> Ela
                     elaborate_alias_body(ctx, def),
                 _ => ctx
             };
-            collect_phase_1c_aliases_only(ctx2, rest)
+            collect_type_bodies_aliases_only(ctx2, rest)
     }
 }
 

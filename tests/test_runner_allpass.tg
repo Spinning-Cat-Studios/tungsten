@@ -1,0 +1,5 @@
+// All-pass companion to test_runner_pass_fail.tg — the runner must exit 0.
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+fn assert_eq_nat(a: Nat, b: Nat) -> Unit { tg_assert_eq_nat(a, b) }
+pub fn test_a() -> Unit { assert_eq_nat(2, 2) }
+pub fn test_b() -> Unit { assert_eq_nat(7, 7) }

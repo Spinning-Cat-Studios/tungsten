@@ -10,37 +10,24 @@ impl Type {
     /// Walk the type tree and return `true` if any TyVar satisfies `predicate`.
     ///
     /// The predicate receives the TyVar name. This is the shared backbone for
-    /// `has_mono_blocking_tyvar`.
+    /// `has_mono_blocking_tyvar`. Only the `TyVar` leaf is non-uniform; every
+    /// other variant delegates to [`Type::children`] so a future `Type`
+    /// variant inherits the structural default (ADR 23.7.26b).
     #[must_use]
     pub fn any_tyvar<F: Fn(&str) -> bool>(&self, predicate: &F) -> bool {
         match self {
             Type::TyVar(name) => predicate(name),
-            Type::Arrow(a, b) | Type::Product(a, b) | Type::Sum(a, b) => {
-                a.any_tyvar(predicate) || b.any_tyvar(predicate)
-            }
-            Type::Forall(_, inner) | Type::Mu(_, inner) | Type::Ptr(inner) | Type::Ref(inner) => {
-                inner.any_tyvar(predicate)
-            }
-            Type::Eq(t, _, _) => t.any_tyvar(predicate),
-            Type::App(_, args) => args.iter().any(|a| a.any_tyvar(predicate)),
-            Type::Adt(_, type_args, variants) => {
-                type_args.iter().any(|a| a.any_tyvar(predicate))
-                    || variants.iter().any(|(_, t)| t.any_tyvar(predicate))
-            }
-            Type::Nat
-            | Type::Bool
-            | Type::String
-            | Type::Unit
-            | Type::Void
-            | Type::Prop
-            | Type::Error => false,
+            _ => self
+                .children()
+                .iter()
+                .any(|child| child.any_tyvar(predicate)),
         }
     }
 
     /// Check whether a type contains any TyVar that blocks monomorphization.
     ///
     /// A TyVar is "mono-blocking" if it is NOT:
-    /// - `@`-prefixed (Phase 1c cross-reference to a concrete type)
+    /// - `@`-prefixed (Type-Body Collection cross-reference to a concrete type)
     /// - `α_`-prefixed (Mu-bound variable in recursive type encoding)
     /// - A known concrete type name (ADT or record registered during elaboration)
     ///
@@ -59,9 +46,12 @@ impl Type {
 
     /// Strip `@` prefixes from all TyVars in a type tree.
     ///
-    /// `@`-prefixed TyVars are Phase 1c artifacts referencing concrete named
+    /// `@`-prefixed TyVars are Type-Body Collection artifacts referencing concrete named
     /// types (e.g., `@Token` → `Token`). Stripping normalizes types so that
     /// `@Token` and `Token` produce identical mono keys.
+    /// Only the `TyVar` leaf is non-uniform; every other variant delegates to
+    /// [`Type::map_children`] so a future `Type` variant inherits the
+    /// structural default (ADR 23.7.26b).
     #[must_use]
     pub fn strip_tyvar_at_prefix(&self) -> Type {
         match self {
@@ -72,45 +62,7 @@ impl Type {
                     self.clone()
                 }
             }
-            Type::Arrow(a, b) => Type::Arrow(
-                Box::new(a.strip_tyvar_at_prefix()),
-                Box::new(b.strip_tyvar_at_prefix()),
-            ),
-            Type::Product(a, b) => Type::Product(
-                Box::new(a.strip_tyvar_at_prefix()),
-                Box::new(b.strip_tyvar_at_prefix()),
-            ),
-            Type::Sum(a, b) => Type::Sum(
-                Box::new(a.strip_tyvar_at_prefix()),
-                Box::new(b.strip_tyvar_at_prefix()),
-            ),
-            Type::Forall(v, inner) => {
-                Type::Forall(v.clone(), Box::new(inner.strip_tyvar_at_prefix()))
-            }
-            Type::Mu(v, inner) => Type::Mu(v.clone(), Box::new(inner.strip_tyvar_at_prefix())),
-            Type::Ptr(inner) => Type::Ptr(Box::new(inner.strip_tyvar_at_prefix())),
-            Type::Ref(inner) => Type::Ref(Box::new(inner.strip_tyvar_at_prefix())),
-            Type::Eq(t, a, b) => {
-                Type::Eq(Box::new(t.strip_tyvar_at_prefix()), a.clone(), b.clone())
-            }
-            Type::App(name, args) => Type::App(
-                name.clone(),
-                args.iter()
-                    .map(super::Type::strip_tyvar_at_prefix)
-                    .collect(),
-            ),
-            Type::Adt(name, type_args, variants) => Type::Adt(
-                name.clone(),
-                type_args
-                    .iter()
-                    .map(super::Type::strip_tyvar_at_prefix)
-                    .collect(),
-                variants
-                    .iter()
-                    .map(|(n, t)| (n.clone(), t.strip_tyvar_at_prefix()))
-                    .collect(),
-            ),
-            _ => self.clone(),
+            _ => self.map_children(Type::strip_tyvar_at_prefix),
         }
     }
 }
@@ -191,5 +143,55 @@ mod tests {
             vec![("A".into(), Type::TyVar("T".into()))],
         );
         assert!(ty.has_mono_blocking_tyvar(&HashSet::new()));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // strip_tyvar_at_prefix — non-uniform TyVar arm + structural recursion
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_at_prefix_on_tyvar_leaf() {
+        assert_eq!(
+            Type::TyVar("@Token".into()).strip_tyvar_at_prefix(),
+            Type::TyVar("Token".into())
+        );
+    }
+
+    #[test]
+    fn strip_at_prefix_leaves_bare_tyvar_unchanged() {
+        assert_eq!(
+            Type::TyVar("Token".into()).strip_tyvar_at_prefix(),
+            Type::TyVar("Token".into())
+        );
+    }
+
+    #[test]
+    fn strip_at_prefix_recurses_structurally() {
+        // Arrow(@A, Mu(α_L, Product(@B, Nat))) — strips at every depth,
+        // preserves the Mu binder name.
+        let ty = Type::arrow(
+            Type::TyVar("@A".into()),
+            Type::mu("α_L", Type::product(Type::TyVar("@B".into()), Type::Nat)),
+        );
+        let expected = Type::arrow(
+            Type::TyVar("A".into()),
+            Type::mu("α_L", Type::product(Type::TyVar("B".into()), Type::Nat)),
+        );
+        assert_eq!(ty.strip_tyvar_at_prefix(), expected);
+    }
+
+    #[test]
+    fn strip_at_prefix_recurses_into_adt_args_and_variants() {
+        let ty = Type::adt(
+            "Foo",
+            vec![Type::TyVar("@T".into())],
+            vec![("A".into(), Type::TyVar("@U".into()))],
+        );
+        let expected = Type::adt(
+            "Foo",
+            vec![Type::TyVar("T".into())],
+            vec![("A".into(), Type::TyVar("U".into()))],
+        );
+        assert_eq!(ty.strip_tyvar_at_prefix(), expected);
     }
 }

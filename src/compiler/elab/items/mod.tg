@@ -13,15 +13,18 @@ pub mod collect;
 pub mod elaborate;
 pub mod imports;
 pub mod per_module;
+pub mod termination;
 
 pub use elab::items::result::*;
 pub use elab::items::collect::*;
 pub use elab::items::elaborate::*;
 pub use elab::items::imports::*;
 pub use elab::items::per_module::*;
+pub use elab::items::termination::*;
 
 use parser::ast::{SourceFile, source_file_items, Item};
 use driver::ffi::{List, Nil, Cons};
+use elab::items::collect::positivity::check_positivity_pass;
 
 // ===========================================================================
 // MAIN ENTRY POINT
@@ -50,9 +53,14 @@ pub fn elaborate_items(env: Env, items: List<Item>) -> ElabResult {
     // Pass 1: Collection
     let collect_result = collect_items(ctx, items);
     let ctx2 = collect_result_context(collect_result);
-    
+
+    // The strict-positivity gate, at the point the bootstrap runs it: after the
+    // complete type graph exists and before Deferred-TyVar Resolution rewrites
+    // the cross-references the walker reads (ADR 18.8.26b P3).
+    let ctx2p = check_positivity_pass(ctx2, items);
+
     // Pass 2: Elaboration
-    let (ctx3, defs) = elaborate_item_bodies(ctx2, items);
+    let (ctx3, defs) = elaborate_item_bodies(ctx2p, items);
     
     // Build final result
     let result = elab_result_new(defs, ctx3.errors);
@@ -79,7 +87,8 @@ pub fn elaborate_items_with_env(env: Env, items: List<Item>) -> (ElabResult, Env
     let ctx = elab_context_new(env);
     let collect_result = collect_items(ctx, items);
     let ctx2 = collect_result_context(collect_result);
-    let (ctx3, defs) = elaborate_item_bodies(ctx2, items);
+    let ctx2p = check_positivity_pass(ctx2, items);
+    let (ctx3, defs) = elaborate_item_bodies(ctx2p, items);
     let result = elab_result_new(defs, ctx3.errors);
     (result, ctx3.env)
 }

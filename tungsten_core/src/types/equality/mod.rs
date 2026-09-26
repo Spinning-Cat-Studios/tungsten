@@ -41,13 +41,9 @@ fn tyvar_matches_mu(v: &str, mu_var: &str, env: &HashMap<String, String>) -> boo
 /// are compared by name equality, not tracked here.
 pub(super) fn types_equal_with_env(a: &Type, b: &Type, env: &mut HashMap<String, String>) -> bool {
     match (a, b) {
-        // Base types
-        (Type::Bool, Type::Bool)
-        | (Type::Nat, Type::Nat)
-        | (Type::Unit, Type::Unit)
-        | (Type::Void, Type::Void)
-        | (Type::Prop, Type::Prop)
-        | (Type::String, Type::String) => true,
+        // Primitive types: a pair of them is equal exactly when identical
+        // (ADR 18.9.26f — no per-primitive arm to forget)
+        (a, b) if a.is_primitive() && b.is_primitive() => a == b,
 
         // Type variables
         (Type::TyVar(v1), Type::TyVar(v2)) => tyvars_equal(v1, v2, env),

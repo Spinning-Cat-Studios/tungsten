@@ -37,7 +37,14 @@ pub fn step(term: &Term) -> StepResult {
         | Term::Unit
         | Term::Zero
         | Term::NatLit(_)
+        | Term::IntLit(_)
         | Term::StringLit(_) => StepResult::Value,
+
+        // Signed integers: a trap is Stuck here — the legacy stepper has no
+        // env to record the reason on (ADR 14.9.26c; use `eval_with_env`).
+        Term::IntBin(..) | Term::IntNeg(_) | Term::NatToInt(_) | Term::IntToNat(_) => {
+            step_int(term)
+        }
 
         // Stuck terms (open/unresolvable)
         Term::Var(_)
@@ -178,6 +185,59 @@ fn step_arith_bool(term: &Term) -> StepResult {
         Term::BoolOr(t1, t2) => step_binary_bool(t1, t2, |a, b| a || b),
         Term::BoolNot(t) => step_bool_not(t),
         _ => unreachable!("step_arith_bool called with non-arith/bool term"),
+    }
+}
+
+/// Signed-integer steps: operands to values, then the shared checked table
+/// (`int_ops::apply_int_bin`); a trap is `Stuck` with no env to record on.
+fn step_int(term: &Term) -> StepResult {
+    use crate::eval::env::handlers::int_ops::{int_to_nat, nat_to_int, negate};
+    match term {
+        Term::IntBin(op, a, b) => step_binary_int(*op, a, b),
+        Term::IntNeg(a) => step_unary_int(a, Term::int_neg, negate),
+        Term::NatToInt(a) => step_unary_int(a, Term::nat_to_int, nat_to_int),
+        Term::IntToNat(a) => step_unary_int(a, Term::int_to_nat, int_to_nat),
+        _ => unreachable!("step_int called with a non-Int term"),
+    }
+}
+
+fn step_binary_int(op: crate::terms::IntBinOp, a: &Term, b: &Term) -> StepResult {
+    use crate::eval::env::handlers::int_ops::apply_int_bin;
+    if let Some(r) = step_operand(a, |a2| Term::int_bin(op, a2, b.clone())) {
+        return r;
+    }
+    if let Some(r) = step_operand(b, |b2| Term::int_bin(op, a.clone(), b2)) {
+        return r;
+    }
+    match (a, b) {
+        (Term::IntLit(x), Term::IntLit(y)) => {
+            apply_int_bin(op, *x, *y).map_or(StepResult::Stuck, StepResult::Stepped)
+        }
+        _ => StepResult::Stuck,
+    }
+}
+
+fn step_unary_int(
+    a: &Term,
+    rebuild: fn(Term) -> Term,
+    apply: fn(&Term) -> Result<Term, crate::eval::env::IntTrapKind>,
+) -> StepResult {
+    if let Some(r) = step_operand(a, rebuild) {
+        return r;
+    }
+    apply(a).map_or(StepResult::Stuck, StepResult::Stepped)
+}
+
+/// Step one operand toward a value, rebuilding the node around it; `None`
+/// when it already is one.
+fn step_operand(operand: &Term, rebuild: impl FnOnce(Term) -> Term) -> Option<StepResult> {
+    if operand.is_value() {
+        return None;
+    }
+    match step(operand) {
+        StepResult::Stepped(next) => Some(StepResult::Stepped(rebuild(next))),
+        StepResult::Stuck => Some(StepResult::Stuck),
+        StepResult::Value => None,
     }
 }
 

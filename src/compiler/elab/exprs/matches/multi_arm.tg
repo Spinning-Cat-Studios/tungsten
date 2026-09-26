@@ -27,7 +27,7 @@ use elab::exprs::forms::result::{elab_expr_error, add_expected_because};
 use elab::error::ExpMatchBranch;
 use elab::exprs::{check, synth};
 use elab::exprs::matches::patterns::{
-    bind_pattern_in_scope, get_arm_binding_type
+    bind_pattern_in_scope, get_arm_binding_type, wrap_arm_payload_projections
 };
 use elab::exprs::matches::{ScrutInfo};
 use elab::exprs::matches::adt_match::{AdtMatchScrutInfo};
@@ -80,6 +80,7 @@ pub fn elab_multi_arm_match(
                 ElabExprErr(e) => ElabExprErr(e),
                 ElabExprOk(env2, body1, result_ty, body1_cir) => {
                     let env2 = env_pop_scope(env2);
+                    let body1 = wrap_arm_payload_projections(arm1.pattern, arm1_bind_ty, var1, body1);
                     let right_ty = tg_type_get_sum_right(ms.sum_ty);
                     let right_ms: AdtMatchScrutInfo = { term: ms.term, sum_ty: right_ty, orig_ty: ms.orig_ty, cir: ms.cir };
                     let check_ctx: MatchCheckCtx = { expected: result_ty, span: span, first_arm_span: arm1_span };
@@ -121,7 +122,8 @@ fn elab_multi_arm_rest(
                             let term = tg_term_case(
                                 parts.scrut_term,
                                 tg_string_to_cstr(parts.left_var), parts.left_body,
-                                tg_string_to_cstr(var2), body2
+                                tg_string_to_cstr(var2),
+                                wrap_arm_payload_projections(arm2.pattern, arm2_bind_ty, var2, body2)
                             );
                             let cir = build_cir_case_from_handles(parts.scrut_cir, parts.scrut_sum_ty, parts.left_var, parts.left_cir, var2, body2_cir, check_ctx.expected);
                             ElabExprOk(env_pop_scope(env3), term, check_ctx.expected, cir)
@@ -144,6 +146,7 @@ fn elab_multi_arm_rest(
                         ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(check_ctx.first_arm_span))),
                         ElabExprOk(env3, body2, _, body2_cir) => {
                             let env3 = env_pop_scope(env3);
+                            let body2 = wrap_arm_payload_projections(arm2.pattern, arm2_bind_ty, var2, body2);
                             let right_ty = tg_type_get_sum_right(ms.sum_ty);
                             let rest_var = "_rest";
                             let rest_var_term = tg_term_var_named(tg_string_to_cstr(rest_var));
@@ -197,6 +200,7 @@ pub fn elab_multi_arm_match_checked(
                 ElabExprErr(e) => ElabExprErr(e),
                 ElabExprOk(env2, body1, _, body1_cir) => {
                     let env2 = env_pop_scope(env2);
+                    let body1 = wrap_arm_payload_projections(arm1.pattern, arm1_bind_ty, var1, body1);
                     let right_ty = tg_type_get_sum_right(ms.sum_ty);
                     let right_ms: AdtMatchScrutInfo = { term: ms.term, sum_ty: right_ty, orig_ty: ms.orig_ty, cir: ms.cir };
                     let check_ctx: MatchCheckCtx = { expected: expected, span: span, first_arm_span: arm1_span };

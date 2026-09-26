@@ -144,7 +144,7 @@ fn compare_key_sets<V>(
     }
 }
 
-/// Read the configured thread count for parallel Phase B (ADR 11.5.26b §4).
+/// Read the configured thread count for parallel Body Elaboration (ADR 11.5.26b §4).
 ///
 /// Returns 1 (serial) by default. Set `TUNGSTEN_ELAB_THREADS=N` to override.
 pub(in crate::driver::per_module) fn elab_thread_count() -> usize {
@@ -154,6 +154,14 @@ pub(in crate::driver::per_module) fn elab_thread_count() -> usize {
         .unwrap_or(1)
         .max(1)
 }
+
+/// Serializes tests that mutate `TUNGSTEN_ELAB_THREADS` — declared beside the
+/// resource it protects (the env read above), per the `INTEGRATION_LOCK`
+/// idiom: a per-file lock in a test module would not serialize the other
+/// modules compiled into the same test binary.
+#[cfg(test)]
+pub(in crate::driver::per_module) static ELAB_THREADS_ENV_LOCK: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -165,18 +173,7 @@ mod tests {
     use tungsten_core::Type;
 
     fn empty_output() -> ElabOutput {
-        ElabOutput {
-            defs: Vec::new(),
-            warnings: Vec::new(),
-            record_types: HashMap::new(),
-            adt_types: HashMap::new(),
-            type_aliases: HashMap::new(),
-            type_provenance: TypeProvenance::default(),
-            encoded_types: HashMap::new(),
-            mutual_recursion_groups: HashMap::new(),
-            type_visibilities: HashMap::new(),
-            record_field_visibilities: HashMap::new(),
-        }
+        ElabOutput::test_empty()
     }
 
     #[test]

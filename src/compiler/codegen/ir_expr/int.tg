@@ -1,0 +1,134 @@
+// src/compiler/codegen/ir_expr/int.tg
+// The driver never reaches this module: `run_compile` delegates codegen to the
+// bootstrap binary, so it is compiled and type-checked but executed only by
+// `test_codegen*.tg` / `test_cir_captures.tg`. See codegen/mod.tg (ADR 3.9.26a).
+// Signed-integer emission (ADR 14.9.26c §2.3 / §2.6): the mirror of
+// `tungsten_codegen/src/codegen/data/ops/int_ops.rs`.
+//
+// `+ - *` and negation call the `llvm.s*.with.overflow.i64` intrinsics and
+// branch on the overflow flag into a trap block that calls `tg_int_trap(i32
+// <code>)` and is `unreachable`; `/ %` guard a zero divisor and `MIN / -1`
+// first; comparisons are the signed predicates. The trap codes are the
+// bootstrap's `IntTrapKind::code` — 0..4 overflow in `+ - * / %`, 5 negation,
+// 6 division by zero, 7 `to_int` above the signed maximum — so both compilers
+// print one line from one table.
+
+use driver::util::nat_to_string;
+use elab::cir::types::{CodegenIR};
+use codegen::ir_builder::{
+    IRState, fresh_name, fresh_label, emit_line
+};
+use codegen::ir_expr::{emit_expr};
+
+/// The operator code's LLVM spelling for a NON-trapping form: the five
+/// comparisons. `""` for an arithmetic code, which never reaches this.
+fn signed_predicate(op: Nat) -> String {
+    if op == 5 { "icmp eq i64" }
+    else if op == 6 { "icmp slt i64" }
+    else if op == 7 { "icmp sle i64" }
+    else if op == 8 { "icmp sgt i64" }
+    else if op == 9 { "icmp sge i64" }
+    else { "" }
+}
+
+/// The overflow intrinsic for `+ - *`; `""` for every other code.
+fn overflow_intrinsic(op: Nat) -> String {
+    if op == 0 { "llvm.sadd.with.overflow.i64" }
+    else if op == 1 { "llvm.ssub.with.overflow.i64" }
+    else if op == 2 { "llvm.smul.with.overflow.i64" }
+    else { "" }
+}
+
+/// Emit a signed literal from its two's-complement bits. LLVM reads an
+/// unsigned decimal that fits the width as those bits, so `-1` is emitted as
+/// `18446744073709551615` and means the same thing.
+pub fn emit_int_lit(st: IRState, bits: Nat) -> (String, IRState) {
+    (nat_to_string(bits), st)
+}
+
+/// Emit `a op b` for a signed operator code.
+pub fn emit_int_bin(st: IRState, op: Nat, a: CodegenIR, b: CodegenIR) -> (String, IRState) {
+    let (va, st) = emit_expr(st, a);
+    let (vb, st) = emit_expr(st, b);
+    if op >= 5 {
+        let (r, st) = fresh_name(st);
+        let st = emit_line(st, "  " ++ r ++ " = " ++ signed_predicate(op) ++ " " ++ va ++ ", " ++ vb);
+        (r, st)
+    } else if op <= 2 {
+        emit_checked_binop(st, overflow_intrinsic(op), va, vb, op)
+    } else {
+        emit_int_div_or_mod(st, op, va, vb)
+    }
+}
+
+/// Emit `-a` as the checked `0 - a`, so `-MIN` traps with code 5.
+pub fn emit_int_neg(st: IRState, a: CodegenIR) -> (String, IRState) {
+    let (va, st) = emit_expr(st, a);
+    emit_checked_binop(st, "llvm.ssub.with.overflow.i64", "0", va, 5)
+}
+
+/// Emit `to_int(n)`: one unsigned compare against the signed maximum and a
+/// trap branch (code 7); the bits pass through.
+pub fn emit_nat_to_int(st: IRState, n: CodegenIR) -> (String, IRState) {
+    let (vn, st) = emit_expr(st, n);
+    let (above, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ above ++ " = icmp ugt i64 " ++ vn ++ ", 9223372036854775807");
+    let st = emit_trap_branch(st, above, 7);
+    (vn, st)
+}
+
+/// Emit `from_int(i)`: negatives clamp to 0 through one `select`.
+pub fn emit_int_to_nat(st: IRState, i: CodegenIR) -> (String, IRState) {
+    let (vi, st) = emit_expr(st, i);
+    let (negative, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ negative ++ " = icmp slt i64 " ++ vi ++ ", 0");
+    let (r, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ r ++ " = select i1 " ++ negative ++ ", i64 0, i64 " ++ vi);
+    (r, st)
+}
+
+/// `call {i64, i1} @<intrinsic>(a, b)`, extract both halves, branch on the
+/// overflow flag into a trap block with `code`, continue with the value.
+fn emit_checked_binop(
+    st: IRState, intrinsic: String, va: String, vb: String, code: Nat
+) -> (String, IRState) {
+    let (pair, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ pair ++ " = call { i64, i1 } @" ++ intrinsic ++ "(i64 " ++ va ++ ", i64 " ++ vb ++ ")");
+    let (value, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ value ++ " = extractvalue { i64, i1 } " ++ pair ++ ", 0");
+    let (overflowed, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ overflowed ++ " = extractvalue { i64, i1 } " ++ pair ++ ", 1");
+    let st = emit_trap_branch(st, overflowed, code);
+    (value, st)
+}
+
+/// `/` and `%`: trap on a zero divisor (code 6), then on `MIN / -1` (the
+/// operator's own overflow code), then the signed instruction.
+fn emit_int_div_or_mod(st: IRState, op: Nat, va: String, vb: String) -> (String, IRState) {
+    let (by_zero, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ by_zero ++ " = icmp eq i64 " ++ vb ++ ", 0");
+    let st = emit_trap_branch(st, by_zero, 6);
+    let (is_min, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ is_min ++ " = icmp eq i64 " ++ va ++ ", -9223372036854775808");
+    let (is_neg_one, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ is_neg_one ++ " = icmp eq i64 " ++ vb ++ ", -1");
+    let (both, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ both ++ " = and i1 " ++ is_min ++ ", " ++ is_neg_one);
+    let st = emit_trap_branch(st, both, op);
+    let instr = if op == 3 { "sdiv i64" } else { "srem i64" };
+    let (r, st) = fresh_name(st);
+    let st = emit_line(st, "  " ++ r ++ " = " ++ instr ++ " " ++ va ++ ", " ++ vb);
+    (r, st)
+}
+
+/// `br i1 %cond, %trap, %cont`; the trap block calls `tg_int_trap` and is
+/// `unreachable`; emission continues at `cont`.
+fn emit_trap_branch(st: IRState, cond: String, code: Nat) -> IRState {
+    let (trap_label, st) = fresh_label(st);
+    let (cont_label, st) = fresh_label(st);
+    let st = emit_line(st, "  br i1 " ++ cond ++ ", label %" ++ trap_label ++ ", label %" ++ cont_label);
+    let st = emit_line(st, trap_label ++ ":");
+    let st = emit_line(st, "  call void @tg_int_trap(i32 " ++ nat_to_string(code) ++ ")");
+    let st = emit_line(st, "  unreachable");
+    emit_line(st, cont_label ++ ":")
+}

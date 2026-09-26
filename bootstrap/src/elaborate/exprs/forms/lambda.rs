@@ -15,8 +15,11 @@ use crate::elaborate::{ElabResult, Elaborator};
 impl<'a> Elaborator<'a> {
     /// Build a natural number literal.
     ///
-    /// Uses unary encoding (Zero/Succ) for small numbers (≤ 1000) to maintain
-    /// proof compatibility, and NatLit for larger numbers to avoid stack overflow.
+    /// Uses unary encoding (Zero/Succ) for small numbers (≤ 64) to maintain
+    /// proof compatibility, and NatLit for larger numbers to avoid stack
+    /// overflow (threshold lowered from 1000 by ADR 21.7.26e wall 2 — a `999`
+    /// sentinel's depth-1000 Succ chain wedged debug-build `tungsten test`
+    /// into an unkillable UE state via guard-page overflow in `strip_spans`).
     pub(in crate::elaborate::exprs) fn nat_literal(&self, n: u64) -> Term {
         Term::nat_smart(n)
     }
@@ -35,15 +38,23 @@ impl<'a> Elaborator<'a> {
             return self.check(body, expected);
         }
 
-        // Get the expected parameter type
-        let Type::Arrow(param_ty, result_ty) = expected else {
-            return Err(ElabError::new(
-                span,
-                ElabErrorKind::ExpectedType {
-                    expected: "function type".to_string(),
-                    found: expected.clone(),
-                },
-            ));
+        // Get the expected parameter type. Poison is transit (ADR 15.8.26d):
+        // a lambda checked against a type that already failed reads it as
+        // `<error> -> <error>`, so the parameter binds and the body still
+        // elaborates — its own faults surface, the type's does not repeat.
+        let poisoned_arrow = Box::new(Type::Error);
+        let (param_ty, result_ty) = match expected {
+            Type::Arrow(param_ty, result_ty) => (param_ty, result_ty),
+            Type::Error => (&poisoned_arrow, &poisoned_arrow),
+            _ => {
+                return Err(ElabError::new(
+                    span,
+                    ElabErrorKind::ExpectedType {
+                        expected: "function type".to_string(),
+                        found: expected.clone(),
+                    },
+                ));
+            }
         };
 
         let param = &params[0];

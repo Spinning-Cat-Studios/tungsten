@@ -1,0 +1,242 @@
+// src/compiler/driver/pipeline/test/mode/decide.tg
+// The harness-mode decision — pure, and therefore the part that is tested.
+//
+// Every function here takes plain values: `List<ItemPath>`, `List<ItemPublic>`,
+// `List<ExternNeed>`. That is forced, not stylistic (ADR 7.8.26a D2): an
+// `ElabDef` carries `TermHandle`/`TypeHandle`/`CodegenIR`, so a `.tg` test that
+// built one would reach an extern the evaluator does not execute, go silently
+// Stuck, assert nothing and report `ok`. `mode/mod.tg` holds the two thin edges
+// that project the real structures onto these pairs; nothing is decided there.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option, Some, None, string_eq, starts_with, nat_to_string, list_append};
+use parser::ast::nodes::{Item, ItemMod};
+use driver::pipeline::test::mode::types::{
+    ItemPath, ItemPublic, ExternNeed, TreeSymbol,
+    ExternVerdict, ExternsReconciled, ExternsConflict
+};
+
+// ===========================================================================
+// TREE OR STANDALONE
+// ===========================================================================
+
+/// Whether the file reaches a module tree at all.
+///
+/// The predicate is "declares ANY `mod`", not "declares `mod driver;`": a file
+/// with `mod lexer;` alone is still a tree file, and splicing standalone
+/// externs into it re-runs the collision the moment `lexer` transitively
+/// reaches the ffi surface. Failing closed to `UnsupportedLayout` there is the
+/// correct answer, not a missed opportunity.
+pub fn root_declares_mod(items: List<Item>) -> Bool {
+    match items {
+        Nil() => false,
+        Cons(item, rest) => item_is_mod(item) || root_declares_mod(rest)
+    }
+}
+
+fn item_is_mod(item: Item) -> Bool {
+    match item {
+        ItemMod(_) => true,
+        _ => false
+    }
+}
+
+// ===========================================================================
+// TREE MODE: THE D5 JOIN
+// ===========================================================================
+
+/// The first tree-mode symbol that is missing, moved, or no longer `pub`.
+///
+/// `None` means all five are callable by qualified path. A symbol absent from
+/// `paths` is reported as a problem rather than assumed fine — detection fails
+/// closed, because the alternative is emitting a harness that will not
+/// elaborate and re-earning the E0016 wall behind it.
+pub fn tree_symbol_problem(syms: List<TreeSymbol>, paths: List<ItemPath>,
+                           pubs: List<ItemPublic>) -> Option<String> {
+    match syms {
+        Nil() => None,
+        Cons(symbol, rest) => first_symbol_problem(
+            one_tree_symbol_problem(symbol, paths, pubs), rest, paths, pubs)
+    }
+}
+
+// Partial (ADR 11.8.26b): the descent is on `rest`, but it crosses a helper
+// whose own parameter `rest` is not a subterm of ITS caller's root, so no call
+// site passes a strict structural subterm. A measure recursion in E0062's
+// sense; executable code no proof reaches.
+#[partial]
+fn first_symbol_problem(here: Option<String>, rest: List<TreeSymbol>,
+                        paths: List<ItemPath>, pubs: List<ItemPublic>) -> Option<String> {
+    match here {
+        Some(msg) => Some(msg),
+        None() => tree_symbol_problem(rest, paths, pubs)
+    }
+}
+
+/// Both halves of the D5 join, in the order a reader should learn them:
+/// bound-where first, because a symbol that MOVED is not a visibility problem
+/// and saying so would send the reader to the wrong file.
+fn one_tree_symbol_problem(symbol: TreeSymbol, paths: List<ItemPath>,
+                           pubs: List<ItemPublic>) -> Option<String> {
+    match lookup_path(paths, symbol.name) {
+        None() =>
+            Some(symbol.module_path ++ "::" ++ symbol.name ++
+                 " is not bound anywhere the harness can reach"),
+        Some(found) => symbol_pub_problem(symbol, found, pubs)
+    }
+}
+
+fn symbol_pub_problem(symbol: TreeSymbol, found_path: String,
+                      pubs: List<ItemPublic>) -> Option<String> {
+    if path_covers(found_path, symbol.module_path) {
+        visibility_problem(symbol, pubs)
+    } else {
+        Some(symbol.name ++ " has moved: expected " ++ symbol.module_path ++
+             ", found " ++ found_path)
+    }
+}
+
+/// Whether `found` is the expected defining module, or an ANCESTOR of it.
+///
+/// The ancestor case is the normal one, not a concession. `item_modules` is
+/// flat and name-keyed, so the last writer wins — and for a glob re-export
+/// (`driver/ffi/mod.tg` does `pub use driver::ffi::test::*;`) that writer is
+/// the re-exporting parent. `test_begin` is therefore recorded under
+/// `driver::ffi`, not `driver::ffi::test`, even though the latter is where it
+/// is defined and what the harness calls.
+///
+/// So an ancestor is evidence the symbol is still inside the expected subtree,
+/// which is what the check is for: a genuine move to an unrelated module
+/// (`driver::io`) is not an ancestor and is refused. Emission stays on the
+/// defining path from `tree_mode_symbols()` — the path §2.0's probe proved
+/// resolves — rather than on whatever the table happened to record.
+pub fn path_covers(found: String, expected: String) -> Bool {
+    string_eq(found, expected) || starts_with(expected, found ++ "::")
+}
+
+fn visibility_problem(symbol: TreeSymbol, pubs: List<ItemPublic>) -> Option<String> {
+    if lookup_public(pubs, symbol.name) {
+        None
+    } else {
+        Some(symbol.module_path ++ "::" ++ symbol.name ++ " is no longer pub")
+    }
+}
+
+// ===========================================================================
+// STANDALONE MODE: EXTERN RECONCILIATION
+// ===========================================================================
+
+/// Reconcile the harness's extern needs against what the program declares.
+///
+/// The four cases of §2.2, in the order they are decided:
+///
+///   absent everywhere                      → emit it
+///   at root, matching arity                → REUSE (do not re-declare)
+///   at root, different arity               → conflict
+///   only privately inside the module tree  → conflict: the harness can neither
+///                                            emit it (collision) nor call it
+///                                            (E0016)
+pub fn reconcile_externs(needs: List<ExternNeed>, root: List<ExternNeed>,
+                         tree: List<String>) -> ExternVerdict {
+    match needs {
+        Nil() => ExternsReconciled(Nil),
+        Cons(need, rest) =>
+            fold_extern_verdict(one_extern_verdict(need, root, tree),
+                                reconcile_externs(rest, root, tree))
+    }
+}
+
+/// A conflict anywhere wins, and the one reported is the EARLIEST need — so the
+/// message is a function of the table, not of which recursion unwound first.
+fn fold_extern_verdict(here: ExternVerdict, rest: ExternVerdict) -> ExternVerdict {
+    match here {
+        ExternsConflict(msg) => ExternsConflict(msg),
+        ExternsReconciled(reused) => append_reused(reused, rest)
+    }
+}
+
+fn append_reused(reused: List<String>, rest: ExternVerdict) -> ExternVerdict {
+    match rest {
+        ExternsConflict(msg) => ExternsConflict(msg),
+        ExternsReconciled(more) => ExternsReconciled(list_append(reused, more))
+    }
+}
+
+fn one_extern_verdict(need: ExternNeed, root: List<ExternNeed>,
+                      tree: List<String>) -> ExternVerdict {
+    match lookup_arity(root, need.name) {
+        Some(arity) => arity_verdict(need, arity),
+        None() => tree_extern_verdict(need, tree)
+    }
+}
+
+fn arity_verdict(need: ExternNeed, declared_arity: Nat) -> ExternVerdict {
+    if declared_arity == need.arity {
+        ExternsReconciled(Cons(need.name, Nil))
+    } else {
+        ExternsConflict(need.name ++ " is declared at root with " ++
+                        nat_to_string(declared_arity) ++
+                        " parameter(s); the harness needs " ++
+                        nat_to_string(need.arity))
+    }
+}
+
+fn tree_extern_verdict(need: ExternNeed, tree: List<String>) -> ExternVerdict {
+    if list_has_name(tree, need.name) {
+        ExternsConflict(need.name ++ " is declared privately inside the module" ++
+                        " tree; the harness can neither re-declare nor call it")
+    } else {
+        ExternsReconciled(Nil)
+    }
+}
+
+/// The reused-extern names, or `Nil` when the verdict is a conflict.
+///
+/// A conflict never reaches the generator, so the empty list is unreachable
+/// rather than a silently wrong answer — but returning it keeps the caller free
+/// of a second `match` on a verdict it has already dispatched on.
+pub fn verdict_reused(verdict: ExternVerdict) -> List<String> {
+    match verdict {
+        ExternsReconciled(names) => names,
+        ExternsConflict(_) => Nil
+    }
+}
+
+// ===========================================================================
+// LOOKUPS
+// ===========================================================================
+
+fn lookup_path(paths: List<ItemPath>, name: String) -> Option<String> {
+    match paths {
+        Nil() => None,
+        Cons(entry, rest) =>
+            let (item_name, path) = entry;
+            if string_eq(item_name, name) { Some(path) } else { lookup_path(rest, name) }
+    }
+}
+
+fn lookup_public(pubs: List<ItemPublic>, name: String) -> Bool {
+    match pubs {
+        Nil() => false,
+        Cons(entry, rest) =>
+            let (item_name, is_pub) = entry;
+            if string_eq(item_name, name) { is_pub } else { lookup_public(rest, name) }
+    }
+}
+
+fn lookup_arity(decls: List<ExternNeed>, name: String) -> Option<Nat> {
+    match decls {
+        Nil() => None,
+        Cons(decl, rest) =>
+            if string_eq(decl.name, name) { Some(decl.arity) }
+            else { lookup_arity(rest, name) }
+    }
+}
+
+/// Whether `name` appears in a plain name list.
+pub fn list_has_name(names: List<String>, name: String) -> Bool {
+    match names {
+        Nil() => false,
+        Cons(n, rest) => string_eq(n, name) || list_has_name(rest, name)
+    }
+}

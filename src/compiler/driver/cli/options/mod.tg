@@ -1,0 +1,101 @@
+// src/compiler/driver/cli/options/mod.tg
+// Shared option parsing for check/run/compile commands: the LOOP.
+//
+// The state and its per-flag transitions are in `state.tg`; this file decides
+// which transition each argument names, and drives them to exhaustion. The
+// split is one-directional on purpose — `mod` reads `state`, never the reverse
+// — because every helper used to tail-call `parse_options`, and splitting the
+// file that way would have made the two modules mutually recursive.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{string_eq, starts_with};
+
+pub mod state;
+pub use driver::cli::options::state::{ParseState, initial_state};
+
+use driver::cli::options::state::{
+    opt_exhausted, opt_verbose, opt_emit_llvm,
+    opt_check_free_vars, opt_check_well_typed, opt_check_tyvar_escape,
+    opt_skipped, opt_file,
+    opt_dump_core, opt_dump_core_terms, opt_max_errors, opt_output
+};
+
+/// Parse options from remaining arguments.
+///
+/// Each step consumes at least the head of `remaining`, and the two
+/// value-consuming flags empty it outright when their argument is missing, so
+/// the loop always reaches `Nil`.
+// Partial (ADR 3.9.26h): the recursive call rebuilds its argument rather than
+// passing a strict subterm — a measure recursion over `remaining`. Executable
+// compiler code no proof reaches; E0063 guards that.
+#[partial]
+pub fn parse_options(state: ParseState) -> ParseState {
+    match state.remaining {
+        Nil() => state,
+        Cons(arg, rest) => parse_options(dispatch_global_option(state, arg, rest))
+    }
+}
+
+/// The diagnostic and codegen flags, then everything else.
+///
+/// Split in two so neither half approaches the cyclomatic gate: an `else if`
+/// chain costs one decision per arm and this one has eleven.
+fn dispatch_global_option(state: ParseState, arg: String, rest: List<String>) -> ParseState {
+    if string_eq(arg, "-v") || string_eq(arg, "--verbose") {
+        opt_verbose(state, rest)
+    } else if string_eq(arg, "--emit-llvm") {
+        opt_emit_llvm(state, rest)
+    } else if string_eq(arg, "--check-free-vars") {
+        opt_check_free_vars(state, rest)
+    } else if string_eq(arg, "--check-well-typed") {
+        opt_check_well_typed(state, rest)
+    } else if string_eq(arg, "--check-tyvar-escape") {
+        opt_check_tyvar_escape(state, rest)
+    } else {
+        dispatch_global_value_option(state, arg, rest)
+    }
+}
+
+/// The flags that consume a value, and the two positional fall-throughs.
+fn dispatch_global_value_option(state: ParseState, arg: String, rest: List<String>) -> ParseState {
+    if string_eq(arg, "--dump-core") {
+        take_value(state, arg, rest)
+    } else if string_eq(arg, "--dump-core-terms") {
+        take_value(state, arg, rest)
+    } else if string_eq(arg, "--max-errors") {
+        take_value(state, arg, rest)
+    } else if string_eq(arg, "-o") || string_eq(arg, "--output") {
+        take_value(state, arg, rest)
+    } else if starts_with(arg, "-") {
+        // Unknown option — skipped rather than rejected (could error).
+        opt_skipped(state, rest)
+    } else {
+        opt_file(state, arg, rest)
+    }
+}
+
+/// A flag whose value is the next argument.
+///
+/// One `match` on `rest` for all four rather than one per flag: the missing
+/// -argument case is the same everywhere and is the one that has to end the
+/// loop, so writing it four times is four chances to write it as "return the
+/// state unchanged" and spin.
+fn take_value(state: ParseState, arg: String, rest: List<String>) -> ParseState {
+    match rest {
+        Nil() => opt_exhausted(state),
+        Cons(value, rest2) => apply_value(state, arg, value, rest2)
+    }
+}
+
+/// Which field the value lands in.
+fn apply_value(state: ParseState, arg: String, value: String, rest: List<String>) -> ParseState {
+    if string_eq(arg, "--dump-core") {
+        opt_dump_core(state, value, rest)
+    } else if string_eq(arg, "--dump-core-terms") {
+        opt_dump_core_terms(state, value, rest)
+    } else if string_eq(arg, "--max-errors") {
+        opt_max_errors(state, value, rest)
+    } else {
+        opt_output(state, value, rest)
+    }
+}

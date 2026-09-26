@@ -106,15 +106,7 @@ pub fn cmd_diff_abi(type_name: &str, file: &Path, verbose: bool, max_errors: usi
 
 /// Resolve a type name to a `Type`, handling primitives and user-defined types.
 fn resolve_type(name: &str, project: &driver::ProjectOutput) -> Option<Type> {
-    match name {
-        "Nat" => Some(Type::Nat),
-        "Bool" => Some(Type::Bool),
-        "String" => Some(Type::String),
-        "Unit" => Some(Type::Unit),
-        "Void" => Some(Type::Void),
-        "Prop" => Some(Type::Prop),
-        _ => project.encoded_types.get(name).cloned(),
-    }
+    Type::primitive_by_name(name).or_else(|| project.encoded_types.get(name).cloned())
 }
 
 /// Compute the LLVM type string for a Tungsten type via the bootstrap codegen.
@@ -284,6 +276,7 @@ mod tests {
         // still resolve.  We can't construct a full ProjectOutput in a unit test
         // without elaboration, so just verify the match arms directly.
         assert_eq!(resolve_type_primitive("Nat"), Some(Type::Nat));
+        assert_eq!(resolve_type_primitive("Int"), Some(Type::Int));
         assert_eq!(resolve_type_primitive("Bool"), Some(Type::Bool));
         assert_eq!(resolve_type_primitive("String"), Some(Type::String));
         assert_eq!(resolve_type_primitive("Unit"), Some(Type::Unit));
@@ -297,16 +290,9 @@ mod tests {
         assert_eq!(resolve_type_primitive("FooBar"), None);
     }
 
-    /// Helper: test only the primitive branch of resolve_type (no ProjectOutput).
+    /// Helper: the primitive branch of resolve_type (no ProjectOutput), which
+    /// is the shared table since ADR 18.9.26f.
     fn resolve_type_primitive(name: &str) -> Option<Type> {
-        match name {
-            "Nat" => Some(Type::Nat),
-            "Bool" => Some(Type::Bool),
-            "String" => Some(Type::String),
-            "Unit" => Some(Type::Unit),
-            "Void" => Some(Type::Void),
-            "Prop" => Some(Type::Prop),
-            _ => None,
-        }
+        Type::primitive_by_name(name)
     }
 }

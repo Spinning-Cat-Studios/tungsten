@@ -48,6 +48,9 @@ fn ext_binary_sub_terms(term: &Term) -> Option<(&Term, &Term, fn(Box<Term>, Box<
 fn ext_unary_sub_term(term: &Term) -> Option<(&Term, fn(Term) -> Term)> {
     match term {
         Term::StrLen(t) => Some((t, Term::str_len)),
+        Term::IntNeg(t) => Some((t, Term::int_neg)),
+        Term::NatToInt(t) => Some((t, Term::nat_to_int)),
+        Term::IntToNat(t) => Some((t, Term::int_to_nat)),
         Term::BoolNot(t) => Some((t, Term::bool_not)),
         Term::RefNew(t) => Some((t, Term::ref_new)),
         Term::RefGet(t) => Some((t, Term::ref_get)),
@@ -65,6 +68,13 @@ pub(super) fn substitute_ext(term: &Term, var: &str, replacement: &Term) -> Term
     }
     match term {
         Term::StringLit(s) => Term::StringLit(s.clone()),
+
+        // The operator rides along, so this cannot use the `fn(Box, Box)` helper.
+        Term::IntBin(op, a, b) => Term::int_bin(
+            *op,
+            a.substitute(var, replacement),
+            b.substitute(var, replacement),
+        ),
 
         Term::Fold(ty, t) => Term::fold(ty.clone(), t.substitute(var, replacement)),
         Term::Unfold(ty, t) => Term::unfold(ty.clone(), t.substitute(var, replacement)),
@@ -133,6 +143,12 @@ pub(super) fn substitute_type_ext(term: &Term, var: &str, replacement: &Type) ->
     }
     match term {
         Term::StringLit(s) => Term::StringLit(s.clone()),
+
+        Term::IntBin(op, a, b) => Term::int_bin(
+            *op,
+            a.substitute_type(var, replacement),
+            b.substitute_type(var, replacement),
+        ),
 
         Term::Fold(ty, t) => Term::fold(
             ty.substitute(var, replacement),

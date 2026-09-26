@@ -23,7 +23,7 @@ use parser::ast::{
 use driver::ffi::{List, Nil, Cons};
 use elab::ffi::{
     TypeHandle, TermHandle, INVALID_HANDLE,
-    tg_type_nat, tg_type_bool, tg_type_string, tg_type_unit,
+    tg_type_nat, tg_type_int, tg_type_bool, tg_type_string, tg_type_unit,
     tg_type_void, tg_type_prop, tg_type_arrow, tg_type_product,
     tg_type_sum, tg_type_forall, tg_type_var, tg_type_mu,
     tg_type_ptr, tg_type_ref, tg_type_eq,
@@ -49,7 +49,7 @@ use elab::cir::{
     CodegenIR, CodegenType,
     CTNat, CTBool, CTString, CTUnit, CTVoid, CTProp,
     CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq,
-    ct_nat, ct_bool, ct_string, ct_unit, ct_void, ct_prop,
+    ct_nat, ct_int, ct_bool, ct_string, ct_unit, ct_void, ct_prop,
     ct_arrow, ct_pair, ct_sum, ct_ref, ct_ptr, ct_var, ct_forall, ct_mu, ct_eq
 };
 use elab::adt::string_to_ptr;
@@ -112,6 +112,10 @@ fn elab_type_single_segment(env: Env, path: Path, segments: List<Ident>, span: S
 fn elab_builtin_type(name: String) -> MaybeBuiltinType {
     if name == "Nat" {
         SomeBuiltin(tg_type_nat(), ct_nat())
+    } else if name == "Int" {
+        // ADR 14.9.26c: a builtin, so it precedes user types — which is why
+        // a user `type Int` is refused (E0091) rather than shadowed.
+        SomeBuiltin(tg_type_int(), ct_int())
     } else if name == "Bool" {
         SomeBuiltin(tg_type_bool(), ct_bool())
     } else if name == "String" {

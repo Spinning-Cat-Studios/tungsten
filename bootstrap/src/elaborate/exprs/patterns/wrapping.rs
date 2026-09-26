@@ -9,6 +9,7 @@ use tungsten_core::{Term, Type};
 
 use crate::elaborate::env::{self as elab_env};
 use crate::elaborate::error::{ElabError, ElabErrorKind};
+use crate::elaborate::exprs::adt_match::ResidualMuChain;
 use crate::elaborate::{ElabResult, Elaborator};
 
 /// Context for a constructor pattern being wrapped.
@@ -137,8 +138,13 @@ impl<'a> Elaborator<'a> {
                 body,
             )),
             Pattern::Constructor(ref ctor_path, ref sub_patterns, _) => {
-                // Nested constructor - wrap recursively
-                let resolved = self.resolve_pattern_ctor(ctor_path, pattern.span())?;
+                // Nested constructor - wrap recursively. A poisoned parent
+                // (ADR 15.8.26d) has no fields to destruct: the body was
+                // elaborated with its variables at `Type::Error` already,
+                // so the wrapped arm is a hole — never lowered.
+                let Some(resolved) = self.resolve_pattern_ctor(ctor_path, pattern.span())? else {
+                    return Ok(Term::Sorry);
+                };
                 let constructor = &resolved.constructors[resolved.index];
 
                 // Instantiate constructor field types with proper two-phase substitution
@@ -273,12 +279,9 @@ impl<'a> Elaborator<'a> {
         if current_index == target.num_ctors - 1 {
             // Last position: this must be our target (no more rights to peel)
             if current_index != target.target_index {
-                return Err(ElabError::new(
+                return Err(ElabError::internal(
                     span,
-                    ElabErrorKind::Other(
-                        "internal error: reached end of sum without finding target constructor"
-                            .to_string(),
-                    ),
+                    "reached end of sum without finding target constructor",
                 ));
             }
             return Ok(Term::let_in(
@@ -289,10 +292,15 @@ impl<'a> Elaborator<'a> {
             ));
         }
 
-        // Unwrap Mu layers if present (including nested Mu from mutual recursion)
+        // Unwrap Mu layers if present (including nested Mu from mutual
+        // recursion). A chain that will not flatten is a nested inductive
+        // family — E0064 rather than the unbounded peel this used to inherit
+        // (ADR 11.8.26c).
         let unfolded;
         let unwrapped = if matches!(sum_type, Type::Mu(_, _)) {
-            unfolded = self.unfold_inner_mu_layers(sum_type.clone());
+            unfolded = self
+                .unfold_inner_mu_layers(ResidualMuChain::after_outer_unfold(sum_type.clone()))
+                .map_err(|unflattened| self.nested_family_error(&unflattened, span))?;
             &unfolded
         } else {
             sum_type
@@ -302,10 +310,12 @@ impl<'a> Elaborator<'a> {
         let (_left_ty, right_ty) = match unwrapped {
             Type::Sum(l, r) => (&**l, &**r),
             _ => {
-                return Err(ElabError::new(
+                // The encoder guarantees `target.num_ctors - 1` nested sums;
+                // running out mid-walk is its invariant broken, not user input.
+                return Err(ElabError::internal(
                     span,
-                    ElabErrorKind::Other("expected sum type in constructor extraction".to_string()),
-                ))
+                    "expected sum type in constructor extraction",
+                ));
             }
         };
 

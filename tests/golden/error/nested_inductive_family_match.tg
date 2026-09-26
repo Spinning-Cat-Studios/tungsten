@@ -1,0 +1,19 @@
+// == matching on a nested inductive family is rejected, not hung (ADR 11.8.26c)
+//
+// `Rose`'s recursive occurrence sits under a generic parameter, so its
+// encoding is the vacuous `μα_Rose. α_Rose` and the inner-μ peel has no
+// structural head to reach. Before the fixpoint guard this file did not
+// produce an error — it spun in Body Elaboration at 100% CPU and flat RSS,
+// which is why ADR 29.6.26e AC 11's fixture could not be written.
+//
+// Complementary to `termination_unsupported_family.tg`, which is a `Nat`
+// cursor rejected by the *termination* gate: this one never reaches that
+// gate, because Body Elaboration rejects it first.
+type Wrap<T> = W(T)
+type Rose = Node(Wrap<Rose>)
+
+fn depth(r: Rose) -> Nat {
+    match r { Node(w) => match w { W(inner) => 1 + depth(inner) } }
+}
+
+fn main() -> Nat { 0 }

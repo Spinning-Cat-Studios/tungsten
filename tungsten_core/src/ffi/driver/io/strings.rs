@@ -5,6 +5,8 @@
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 
+use super::c_allocator;
+
 // ============================================================================
 // String Helpers (for Tungsten string manipulation)
 // ============================================================================
@@ -174,8 +176,9 @@ pub extern "C" fn tg_cstring_to_string(s: *const c_char) -> TgString {
         };
     }
 
-    // Allocate via libc::malloc for allocator consistency (ADR 18.5.26f)
-    let buf = unsafe { libc::malloc(len).cast::<u8>() };
+    // Allocate through the runtime symbol for allocator consistency
+    // (ADR 18.5.26f, 14.9.26b); the symbol records to the profiler itself.
+    let buf = unsafe { c_allocator::malloc(len).cast::<u8>() };
     if buf.is_null() {
         std::process::abort();
     }
@@ -209,13 +212,14 @@ pub extern "C" fn tg_string_char_at_internal(s: TgString, i: u64) -> u64 {
 /// This allocates a new string with the character appended.
 /// The Tungsten runtime is responsible for managing this memory.
 ///
-/// Uses libc::malloc for allocation consistency with codegen-emitted
-/// string buffers (ADR 18.5.26f allocator discipline).
+/// Allocates through the runtime symbol for consistency with codegen-emitted
+/// string buffers (ADR 18.5.26f allocator discipline, ADR 14.9.26b); the
+/// symbol records to the profiler itself.
 #[no_mangle]
 pub extern "C" fn tg_string_append_char(s: TgString, c: u64) -> TgString {
     let new_len = s.len + 1;
 
-    let buf = unsafe { libc::malloc(new_len as usize).cast::<u8>() };
+    let buf = unsafe { c_allocator::malloc(new_len as usize).cast::<u8>() };
     if buf.is_null() {
         std::process::abort();
     }

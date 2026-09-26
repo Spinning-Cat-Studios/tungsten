@@ -1,0 +1,4 @@
+use lib::{helper};
+
+pub fn two_a() -> Nat { helper(3) }
+pub fn two_b() -> Nat { helper(4) }

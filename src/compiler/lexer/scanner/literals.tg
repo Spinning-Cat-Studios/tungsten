@@ -31,6 +31,10 @@ pub fn scan_string(lex: LexerState) -> ScanResult {
     scan_string_contents(lex2, start)
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn scan_string_contents(lex: LexerState, start: Nat) -> ScanResult {
     if lex_at_end(lex) {
         let lex2 = lex_add_error(lex, err_unterminated_string(start, lex_file(lex)));
@@ -131,6 +135,10 @@ fn scan_char_escape_unicode(lex: LexerState) -> LexerState {
     }
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn scan_char_escape_unicode_body(lex: LexerState) -> LexerState {
     if lex_at_end(lex) {
         lex
@@ -161,6 +169,10 @@ pub fn scan_line_comment(lex: LexerState) -> ScanResult {
     { token: token_new(kind, span), state: lex3 }
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn scan_to_newline(lex: LexerState) -> LexerState {
     if lex_at_end(lex) { lex }
     else if lex_peek(lex) == char_newline() { lex }
@@ -176,6 +188,10 @@ pub fn scan_block_comment(lex: LexerState) -> ScanResult {
     { token: token_new(TokBlockComment(text), span), state: lex3 }
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn scan_block_comment_body(lex: LexerState, start: Nat, depth: Nat) -> LexerState {
     if lex_at_end(lex) {
         lex_add_error(lex, err_unterminated_block_comment(start, lex_file(lex)))

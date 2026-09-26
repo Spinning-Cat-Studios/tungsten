@@ -1,23 +1,40 @@
 // src/compiler/driver/ffi/mod.tg
 // Driver FFI declarations and safe wrappers.
 //
-// This module provides the Tungsten-side bindings for driver operations:
-// - Core types and string primitives [types.tg]
-// - File I/O (read, write, exists, directories) [io.tg]
-// - CLI arguments and console output [process.tg]
-// - Process control (exit, exec) [process.tg]
-// - Evaluator bridge (for `run` command) [eval.tg]
+// One directory per family, so a new wrapper lands beside its relatives rather
+// than in whichever file had room (ADR 3.9.26t D1). Subdirectories do not count
+// against the directory budget, so each family can grow without spending the
+// next one's place:
+//
+// - Core types and string primitives [types/]
+// - File I/O (read, write, exists, directories) [io/]
+// - CLI arguments, console output, process control [process/]
+// - Evaluator bridge (for `run` command) [eval/]
+// - Diagnostic bridge, production stub and dev build [diagnostics/]
+// - Test assertions and lifecycle [test/]
+// - Structural comparison result types [compare/]
+// - StringBuilder, an opaque mutable buffer (ADR 14.9.26a) [builder/]
+//
+// `last_error.tg` is deliberately not one of them: the driver's last-error
+// channel is the failure discriminator every family reports through, so it sits
+// at the root beside this file (ADR 3.9.26t D2).
 
 pub mod types;
+pub mod last_error;
 pub mod io;
 pub mod process;
 pub mod eval;
 pub mod diagnostics;
 pub mod test;
+pub mod compare;
+pub mod builder;
 
 pub use driver::ffi::types::*;
+pub use driver::ffi::last_error::*;
 pub use driver::ffi::io::*;
 pub use driver::ffi::process::*;
 pub use driver::ffi::eval::*;
 pub use driver::ffi::diagnostics::*;
 pub use driver::ffi::test::*;
+pub use driver::ffi::compare::*;
+pub use driver::ffi::builder::*;

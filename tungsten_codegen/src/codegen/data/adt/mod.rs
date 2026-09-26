@@ -24,6 +24,7 @@
 mod adt_match;
 
 use crate::codegen::backend::CodeGenError;
+use crate::codegen::data::mu_types::unwrap_mu_type;
 use crate::codegen::CodeGen;
 use inkwell::values::{BasicValue, BasicValueEnum};
 use tungsten_core::terms::Term;
@@ -52,7 +53,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Unwrap μ-type if present to get the actual ADT type
         // This handles recursive types like μ X. Adt(...)
-        let unwrapped = self.unwrap_mu_type(adt_ty);
+        let unwrapped = unwrap_mu_type(adt_ty);
 
         // Use resolve_to_flat_adt to get the Type::Adt representation
         // (not the Sum encoding from expand_type)

@@ -1,0 +1,8 @@
+// Golden test (ADR 18.9.26e): an arm after the catch-all can never run.
+// W0001, with the catch-all noted, and the file still type-checks.
+fn classify(n: Nat) -> Nat {
+    match n {
+        _ => 1,
+        4 => 2
+    }
+}

@@ -1,0 +1,68 @@
+// Native test for the P6 assertion helpers (ADR 29.6.26f §2.4) — run via the
+// evaluator (`tungsten run`). Covers `assert_some` (returns the unwrapped value),
+// `assert_none`, `assert_ne`, and a nested generic `Option<List<(Nat, Bool)>>`
+// (AC 2/4/5). `main` runs checks that must ALL pass, then returns the accumulated
+// failure flag. Expected: 0. Any broken helper flips it to nonzero.
+//
+// The wrappers are inlined here (mirroring `comparator_assert_run.tg`) so the test
+// is self-contained; the same definitions are landed in the compiler's
+// `driver::ffi::compare` lib.
+
+type Never = | Absurd
+extern "C" fn tg_exit(code: Nat) -> Never
+extern "C" fn tg_assert_eq_bool(left: Nat, right: Nat) -> Unit
+extern "C" fn tg_test_check_failure() -> Nat
+
+type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+type PathSeg = | Field(String) | Pos(Nat) | Index(Nat) | Tag | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult = | Equal | NotEqual(CompareDiff)
+type Option<T> = | None | Some(T)
+
+fn is_equal(r: CompareResult) -> Bool { match r { Equal() => true, NotEqual(_) => false } }
+fn assert(cond: Bool) -> Unit { tg_assert_eq_bool(if cond { 1 } else { 0 }, 1) }
+fn assert_false(cond: Bool) -> Unit { tg_assert_eq_bool(if cond { 1 } else { 0 }, 0) }
+fn fail() -> Unit { tg_assert_eq_bool(0, 1) }
+
+fn assert_eq<T>(a: T, b: T) -> Unit { assert(is_equal(compare(a, b))) }
+fn assert_ne<T>(a: T, b: T) -> Unit { assert_false(is_equal(compare(a, b))) }
+
+// `assert_some` returns the unwrapped value; on `None` it diverges (the test
+// binary aborts) via `abort_missing` — `T` inferred from the witness, `tg_exit`
+// reached before the recursion.
+fn abort_missing<T>(w: Option<T>) -> T { tg_exit(1); abort_missing(w) }
+fn assert_some<T>(opt: Option<T>) -> T { match opt { Some(v) => v, None() => abort_missing(opt) } }
+fn assert_none<T>(opt: Option<T>) -> Unit { match opt { None() => (), Some(_) => fail() } }
+
+fn main() -> Nat {
+    // assert_some returns the unwrapped value (and it is the right value).
+    let v: Nat = assert_some(Some(42));
+    assert_eq(v, 42);
+
+    // assert_none passes on None.
+    let n: Option<Nat> = None;
+    assert_none(n);
+
+    // assert_ne on unequal values.
+    assert_ne(1, 2);
+    assert_ne("a", "b");
+
+    // Nested generic: Option<List<(Nat, Bool)>> — equal and unequal.
+    let nested: Option<List<(Nat, Bool)>> = Some(Cons((1, true), Cons((2, false), Nil)));
+    assert_eq(nested, Some(Cons((1, true), Cons((2, false), Nil))));
+    assert_ne(nested, Some(Cons((1, true), Nil)));
+
+    // Negative behaviour proven via the pure layer (so the test stays all-pass):
+    // `assert_ne` fails on equal values iff `compare` reports Equal — the pure
+    // `CompareResult` layer, not an asserting leaf (ADR §2.4 / AC 4).
+    assert(is_equal(compare(5, 5)));        // equal → assert_ne(5,5) would correctly fail
+    assert_false(is_equal(compare(5, 6)));  // unequal → assert_ne(5,6) correctly passes
+    // `assert_none` fails on `Some` iff `Some` is detected.
+    let s: Option<Nat> = Some(1);
+    assert(match s { Some(_) => true, None() => false });
+
+    tg_test_check_failure()
+}

@@ -4,13 +4,20 @@
 //! String helpers: see `strings` submodule
 //! Cache helpers: see `cache` submodule (SHA-256, binary I/O, mkdir)
 
+mod c_allocator;
 mod cache;
+mod compare;
 mod concat;
+mod string_builder;
 mod strings;
+mod substring;
 
 pub use cache::*;
+pub use compare::*;
 pub use concat::*;
+pub use string_builder::*;
 pub use strings::*;
+pub use substring::*;
 
 use std::ffi::{c_char, CStr, CString};
 use std::fs;
@@ -99,6 +106,45 @@ pub extern "C" fn tg_write_file(path: *const c_char, content: *const c_char, len
         Ok(()) => 0,
         Err(e) => {
             set_driver_error(format!("failed to write '{path_str}': {e}"));
+            -1
+        }
+    }
+}
+
+/// Delete a file.
+///
+/// Returns 0 on success, -1 on error.
+///
+/// **A missing file is success.** The one caller is the test pipeline's
+/// clean-up funnel (ADR 7.8.26b §2.3), which runs on every exit path including
+/// the one where the harness was never written — so "already absent" is the
+/// state it wants, not a failure to report. Reporting it would make the funnel
+/// print an error on precisely the path that has nothing wrong with it.
+///
+/// # Safety
+/// - `path` must be a valid null-terminated C string
+#[no_mangle]
+pub extern "C" fn tg_remove_file(path: *const c_char) -> i32 {
+    clear_driver_error();
+
+    if path.is_null() {
+        set_driver_error("path is null");
+        return -1;
+    }
+
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            set_driver_error(format!("invalid path encoding: {e}"));
+            return -1;
+        }
+    };
+
+    match fs::remove_file(path_str) {
+        Ok(()) => 0,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(e) => {
+            set_driver_error(format!("failed to remove '{path_str}': {e}"));
             -1
         }
     }

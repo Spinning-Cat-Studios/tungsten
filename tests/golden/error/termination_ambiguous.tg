@@ -1,0 +1,11 @@
+// == two parameters decrease at every call; the choice must be written down
+type Lst = Nil | Cons(Nat, Lst)
+
+fn both(a: Lst, b: Lst) -> Nat {
+    match a {
+        Nil => 0,
+        Cons(x, t) => match b { Nil => 0, Cons(y, u) => both(t, u) }
+    }
+}
+
+fn main() -> Nat { 0 }

@@ -1,0 +1,8 @@
+// == recursion routed through a constructor field escapes the call graph
+type Lst = Nil | Cons(Nat, Lst)
+
+type Holder = Mk(Lst -> Nat)
+
+fn viafield(l: Lst) -> Nat { match Mk(viafield) { Mk(g) => g(l) } }
+
+fn main() -> Nat { 0 }

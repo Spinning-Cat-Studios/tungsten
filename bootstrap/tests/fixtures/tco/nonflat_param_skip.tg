@@ -1,0 +1,22 @@
+// ADR 1.7.26b fixture — non-flattenable struct param → SKIP.
+//
+// `descend`'s first param is a nested tuple `((Nat, Nat), Nat)`, which lowers
+// to a struct with a nested-struct field. `check_decomposition_eligible`
+// rejects nested structs, so it cannot be flattened → the self-recursive tail
+// call SKIPs musttail with reason NON_FLATTENABLE_PARAM. Recurses over `Nat`
+// → HIGH risk.
+
+// Partial (ADR 11.8.26b): a measure recursion, out of Phase 1's scope.
+// This fixture exercises musttail classification, not termination.
+#[partial]
+fn descend(p: ((Nat, Nat), Nat), n: Nat) -> Nat {
+    if n == 0 {
+        n
+    } else {
+        descend(p, n - 1)
+    }
+}
+
+fn main() -> Nat {
+    descend(((1, 2), 3), 4)
+}

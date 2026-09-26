@@ -42,9 +42,7 @@ impl<'ctx> CodeGen<'ctx> {
             .get_function(&super::exec::direct_calls::direct_name(name))
         {
             if let Some(param_map) = self.declare_decomposed_entry(name, direct_fn.get_type())? {
-                self.direct_calls
-                    .decompose_maps
-                    .insert(name.to_string(), param_map);
+                self.direct_calls.set_decompose_map(name, param_map);
             }
         }
 
@@ -113,7 +111,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Compile the direct (uncurried) entry point if this function has arity > 1.
         // If a decomposition map exists, compile the decomposed $direct_mt + shim instead.
-        if let Some(param_map) = self.direct_calls.decompose_maps.get(name).cloned() {
+        if let Some(param_map) = self.direct_calls.decompose_map(name).cloned() {
             self.compile_decomposed_entry(name, term, ty, span_start, &param_map)?;
         } else {
             self.compile_direct_entry(name, term, ty, span_start)?;

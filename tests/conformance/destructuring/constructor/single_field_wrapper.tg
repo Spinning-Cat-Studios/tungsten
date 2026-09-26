@@ -1,0 +1,23 @@
+// SUBJECT — a single-constructor, single-field wrapper (ADR 18.9.26d).
+//
+// `Wrap = MkWrap(Nat)` encodes to its payload: the scrutinee's type is a bare
+// `Nat`, which is neither a μ, a sum nor a product, so a dispatcher that routes
+// on the scrutinee's structural encoding alone has no arm for it. The match is
+// in both positions — checked (`unwrap_checked`'s body has an expected type)
+// and synthesised (`unwrap_synth`'s `let` has none) — because the self-host
+// dispatches the two separately.
+
+type Wrap = MkWrap(Nat)
+
+fn unwrap_checked(wrapped: Wrap) -> Nat {
+    match wrapped { MkWrap(h) => h }
+}
+
+fn unwrap_synth(wrapped: Wrap) -> Nat {
+    let payload_plus_one = match wrapped { MkWrap(h) => h + 1 };
+    payload_plus_one
+}
+
+pub fn main() -> Nat {
+    unwrap_checked(MkWrap(4)) * 10 + unwrap_synth(MkWrap(6))
+}

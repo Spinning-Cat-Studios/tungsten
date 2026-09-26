@@ -1,7 +1,7 @@
-//! Phase A stub collection helpers (ADR 5.5.26c §2.2).
+//! Stub Registration stub collection helpers (ADR 5.5.26c §2.2).
 //!
 //! These functions convert parsed AST items into shallow stub definitions
-//! for Phase A of per-module elaboration. Stubs provide enough type structure
+//! for Stub Registration of per-module elaboration. Stubs provide enough type structure
 //! for cross-branch import resolution and pattern matching.
 
 use crate::ast::{Item, TypeBody};
@@ -9,7 +9,7 @@ use crate::elaborate::{Constructor, ConstructorInfo, ModuleExports, TypeDef, Typ
 use tungsten_core::Type;
 
 use crate::driver::modules::ParsedModule;
-/// Convert an AST TypeExpr to a placeholder Core Type for Phase A stubs.
+/// Convert an AST TypeExpr to a placeholder Core Type for Stub Registration stubs.
 ///
 /// Uses built-in types where possible and `TyVar` for named types. This is a
 /// shallow translation — no elaboration — that gives the elaborator enough
@@ -46,7 +46,7 @@ pub(super) fn type_expr_to_alias_target(ty: &crate::ast::TypeExpr) -> Option<Typ
     use crate::ast::TypeExpr;
     match ty {
         TypeExpr::Path(path) if path.segments.len() == 1 => {
-            builtin_type_by_name(&path.segments[0].name)
+            Type::primitive_by_name(&path.segments[0].name)
         }
         TypeExpr::Unit(_) => Some(Type::Unit),
         TypeExpr::Void(_) => Some(Type::Void),
@@ -57,20 +57,7 @@ pub(super) fn type_expr_to_alias_target(ty: &crate::ast::TypeExpr) -> Option<Typ
     }
 }
 
-/// Map a type name to the corresponding built-in Core type.
-fn builtin_type_by_name(name: &str) -> Option<Type> {
-    match name {
-        "Nat" => Some(Type::Nat),
-        "Bool" => Some(Type::Bool),
-        "String" => Some(Type::String),
-        "Unit" => Some(Type::Unit),
-        "Void" => Some(Type::Void),
-        "Prop" => Some(Type::Prop),
-        _ => None,
-    }
-}
-
-/// Collect a single type definition stub for Phase A.
+/// Collect a single type definition stub for Stub Registration.
 fn collect_type_def_stub(t: &crate::ast::TypeDef, exports: &mut ModuleExports) {
     let name = t.name.name.clone();
     let params: Vec<String> = t.type_params.iter().map(|p| p.name.name.clone()).collect();
@@ -136,7 +123,7 @@ fn collect_type_def_stub(t: &crate::ast::TypeDef, exports: &mut ModuleExports) {
     }
 }
 
-/// Collect a single type alias stub for Phase A.
+/// Collect a single type alias stub for Stub Registration.
 fn collect_type_alias_stub(t: &crate::ast::TypeAlias, exports: &mut ModuleExports) {
     let name = t.name.name.clone();
     let params: Vec<String> = t.type_params.iter().map(|p| p.name.name.clone()).collect();
@@ -165,7 +152,7 @@ fn collect_type_alias_stub(t: &crate::ast::TypeAlias, exports: &mut ModuleExport
     ));
 }
 
-/// Phase A: collect type and constructor stubs from all modules (ADR 5.5.26c §2.2).
+/// Stub Registration: collect type and constructor stubs from all modules (ADR 5.5.26c §2.2).
 ///
 /// Walks the entire module tree and registers shallow type stubs and ADT
 /// constructor stubs into `exports`. This gives every module cross-branch

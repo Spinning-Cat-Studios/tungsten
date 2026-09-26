@@ -1,0 +1,12 @@
+// == a mutual group whose decreasing arguments swap position still descends
+type Lst = Nil | Cons(Nat, Lst)
+
+fn walk(a: Lst, b: Lst) -> Nat {
+    match a { Nil => 0, Cons(x, t) => step(b, t) }
+}
+
+fn step(p: Lst, q: Lst) -> Nat {
+    match q { Nil => 0, Cons(y, v) => walk(v, p) }
+}
+
+fn main() -> Nat { 0 }

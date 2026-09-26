@@ -12,6 +12,7 @@ use driver::util::{
 };
 use parser::option::{Option, Some, None};
 use driver::util::{parse_nat};
+use driver::util::strings::{string_index_of_char};
 
 // ---------------------------------------------------------------------------
 // string_eq
@@ -141,6 +142,47 @@ pub fn test_is_numeric_false() -> Unit {
 
 pub fn test_is_numeric_empty() -> Unit {
     assert_eq_bool(is_numeric(""), false)
+}
+
+// ---------------------------------------------------------------------------
+// string_index_of_char — the decision half of string_split_once (ADR 19.8.26c)
+//
+// These execute, and that is the point. `string_split_once` itself cannot be
+// asserted here: it slices through `tg_string_slice`, which the evaluator does
+// not run, so the assertion would go Stuck and this file would report
+// ASSERTED NOTHING. The index IS the decision — `string_split_once` branches on
+// `idx >= len` and does nothing else that can be wrong — so pinning the index
+// pins the separator-absent contract (D6) without slicing anything.
+//
+// The newline cases use 10 because that is the character code the positivity
+// wire format splits on; `first` and `last` are the two an off-by-one gets
+// wrong in opposite directions.
+// ---------------------------------------------------------------------------
+
+/// Separator absent yields the LENGTH, not a sentinel like 0 — that is what
+/// makes `idx >= len` mean "not found" at the call site.
+pub fn test_index_of_char_absent_is_length() -> Unit {
+    assert_eq_nat(string_index_of_char("abc", 10), 3);
+    assert_eq_nat(string_index_of_char("", 10), 0)
+}
+
+/// Both ends, because an off-by-one moves them in opposite directions.
+pub fn test_index_of_char_first_and_last() -> Unit {
+    assert_eq_nat(string_index_of_char("\nbc", 10), 0);
+    assert_eq_nat(string_index_of_char("ab\n", 10), 2)
+}
+
+/// FIRST occurrence, not the last: `string_split_once` is split-once, so a
+/// scan that ran to the end would silently change what the second half holds.
+pub fn test_index_of_char_takes_the_first() -> Unit {
+    assert_eq_nat(string_index_of_char("a\nb\nc", 10), 1)
+}
+
+/// A one-character string is where "index" and "length" are easiest to
+/// confuse: found is 0, absent is 1.
+pub fn test_index_of_char_single_char() -> Unit {
+    assert_eq_nat(string_index_of_char("\n", 10), 0);
+    assert_eq_nat(string_index_of_char("a", 10), 1)
 }
 
 pub fn main() -> Nat { 0 }

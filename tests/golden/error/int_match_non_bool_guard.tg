@@ -1,0 +1,7 @@
+// Golden test (ADR 18.9.26e): an integer match's guard must be a `Bool`. E0010.
+fn main() -> Nat {
+    match 3 {
+        x if x => 1,
+        _ => 2
+    }
+}

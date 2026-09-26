@@ -10,34 +10,36 @@
 // |  List<Item> (combined source)                                       |
 // |    v elaborate_file (elab/items/mod.tg)                            |
 // |    v collect_items (elab/items/collect/mod.tg)  <-- YOU ARE HERE   |
-// |      +-- Phase 1a: index type stubs (name + arity)                 |
-// |      +-- Phase 1b: process imports (use declarations)              |
-// |      +-- Phase 1c: elaborate type bodies (ADTs, records, aliases)  |
-// |      +-- Phase 1d: resolve deferred type refs (@-prefixed TyVars)  |
-// |      +-- Phase 1e: cache type encodings (for error messages)       |
-// |      +-- Phase 2:  collect value signatures (fn, theorem, extern)  |
+// |      +-- Type-Name Registration:      index type stubs (name + arity)   |
+// |      +-- Import Resolution:            process imports (use decls)       |
+// |      +-- Type-Body Collection:        elaborate type bodies (ADT/record)|
+// |      +-- Deferred-TyVar Resolution:   resolve @-prefixed type refs       |
+// |      +-- Encoding Finalization:       cache type encodings (errors)      |
+// |      +-- Value Collection:            collect value signatures (fn, …)   |
 // |    v elaborate_item_bodies (elab/items/elaborate.tg)               |
 // |  ElabResult                                                         |
 // +---------------------------------------------------------------------+
 //
 // ## Phase Contracts
 //
-// Phase 1a — Requires: parsed items. Guarantees: all type names visible
-//             in env (as stubs) so Phase 1b can resolve forward refs.
+// Type-Name Registration — Requires: parsed items. Guarantees: all type names visible
+//             in env (as stubs) so Import Resolution can resolve forward refs.
 //
-// Phase 1b — Requires: Phase 1a complete. Guarantees: all use-imported
-//             names in env so Phase 1c can resolve cross-module types.
+// Import Resolution — Requires: Type-Name Registration complete. Guarantees: all use-imported
+//             names in env so Type-Body Collection can resolve cross-module types.
 //
-// Phase 1c — Requires: Phases 1a + 1b complete. Guarantees: type bodies
-//             fully elaborated; recursive refs use @-prefixed TyVars.
+// Type-Body Collection — Requires: Type-Name Registration + Import Resolution
+//             complete. Guarantees: type bodies fully elaborated; recursive
+//             refs use @-prefixed TyVars.
 //
-// Phase 1d — Requires: Phase 1c complete. Guarantees: all @-prefixed
+// Deferred-TyVar Resolution — Requires: Type-Body Collection complete. Guarantees: all @-prefixed
 //             TyVars resolved to their final μ-type encodings.
 //
-// Phase 1e — Requires: Phase 1d complete. Guarantees: all type encodings
+// Encoding Finalization — Requires: Deferred-TyVar Resolution complete. Guarantees: all type encodings
 //             cached in env for use during error reporting.
 //
-// Phase 2  — Requires: Phases 1a–1e complete. Guarantees: all value
+// Value Collection — Requires: all type sub-phases (Type-Name Registration
+//             through Encoding Finalization) complete. Guarantees: all value
 //             signatures (types) registered in env; bodies deferred to
 //             elaborate_item_bodies.
 //
@@ -46,18 +48,20 @@
 //
 // ## Module Structure
 //
-// - types.tg:  Phase 1c type body elaboration (ADTs, records, aliases)
-// - values.tg: Phase 2 value signature collection
+// - types.tg:  Type-Body Collection type body elaboration (ADTs, records, aliases)
+// - values.tg: Value Collection (value signature collection)
 
+pub mod positivity;
 pub mod types;
 pub mod values;
 
 // Submodule items are accessible via elab::items::collect::types::* and ::values::*
 use elab::items::collect::types::{
-    preregister_type_vars, collect_phase_1c,
-    collect_phase_1c_records_only, collect_phase_1c_aliases_only
+    preregister_type_vars, collect_type_bodies,
+    collect_type_bodies_records_only, collect_type_bodies_aliases_only
 };
-use elab::items::collect::values::collect_phase_2;
+use elab::items::collect::values::collect_values;
+use elab::items::collect::positivity::positivity_begin_pass;
 
 use lexer::span::Span;
 use parser::ast::{
@@ -93,54 +97,81 @@ use elab::error::elab_error_duplicate;
 
 /// Run the full collection phase on a list of items.
 /// Returns the updated context with all types and value signatures collected.
+///
+/// **This pass REGISTERS the strict-positivity environment but does not CHECK
+/// it.** Registration happens during Type-Body Collection, where the per-field
+/// handles are still separate; the check is the caller's, because the combined
+/// Signature-Collection pass discards its errors and would pay for a
+/// whole-program analysis nobody reads (ADR 18.8.26b P3).
+///
+/// So a caller that wants the gate calls `check_positivity_pass` afterwards,
+/// and a caller that deliberately does not calls
+/// [`collect_items_without_soundness_check`] instead — a name, so that omitting
+/// the gate is a decision in the source rather than the absence of a line.
 pub fn collect_items(ctx: ElabContext, items: List<Item>) -> CollectResult {
-    // Phase 1a: Register type names as stubs
-    let ctx1 = collect_phase_1a(ctx, items);
+    let _ = positivity_begin_pass();
+
+    // Type-Name Registration: Register type names as stubs
+    let ctx1 = collect_type_names(ctx, items);
     
-    // Phase 1b: Process imports
-    let ctx2 = collect_phase_1b(ctx1, items);
+    // Import Resolution: Process imports
+    let ctx2 = collect_imports(ctx1, items);
     
-    // Phase 1c: Elaborate type bodies
+    // Type-Body Collection: Elaborate type bodies
     // First, pre-register μ-variable placeholders for ALL types so that
     // forward references and self-references can resolve during body elaboration.
     let ctx2b = preregister_type_vars(ctx2, items);
-    let ctx3 = collect_phase_1c(ctx2b, items);
+    let ctx3 = collect_type_bodies(ctx2b, items);
     
-    // Phase 1c fixup 1: Re-elaborate type alias bodies FIRST.
+    // Type-Body Collection fixup 1: Re-elaborate type alias bodies FIRST.
     // Aliases like VisibilityEntry = (A, B, Option<C>) may have partial encodings
     // because Option hadn't been fully elaborated on the first pass.
     // Aliases must be fixed before records because record fields may reference aliases.
-    let ctx3b = collect_phase_1c_aliases_only(ctx3, items);
+    let ctx3b = collect_type_bodies_aliases_only(ctx3, items);
     
-    // Phase 1c fixup 2: Re-elaborate record type bodies.
+    // Type-Body Collection fixup 2: Re-elaborate record type bodies.
     // Record fields may reference type aliases that were just fixed in the alias pass.
     // This pass ensures record encodings use the correct alias encodings.
-    let ctx3c = collect_phase_1c_records_only(ctx3b, items);
+    let ctx3c = collect_type_bodies_records_only(ctx3b, items);
     
-    // Phase 1d: Resolve deferred type references
-    let ctx4 = collect_phase_1d(ctx3c);
+    // Deferred-TyVar Resolution: Resolve deferred type references
+    let ctx4 = collect_deferred_tyvars(ctx3c);
     
-    // Phase 1e: Cache type encodings
-    let ctx5 = collect_phase_1e(ctx4);
+    // Encoding Finalization: Cache type encodings
+    let ctx5 = finalize_encodings(ctx4);
     
-    // Phase 2: Collect value signatures
-    let ctx6 = collect_phase_2(ctx5, items);
+    // Value Collection: collect value signatures
+    let ctx6 = collect_values(ctx5, items);
     
     CollectOk(ctx6)
 }
 
+/// The collection pass for a caller that deliberately runs NO soundness gate.
+///
+/// Identical to [`collect_items`] — the point is the name. Signature Collection
+/// discards its errors, so a positivity violation raised there would reach
+/// nobody and the analysis producing it would be pure cost. Spelling that out
+/// keeps "no check here" distinguishable from "someone forgot the check", which
+/// a bare `collect_items` call cannot be.
+pub fn collect_items_without_soundness_check(
+    ctx: ElabContext,
+    items: List<Item>
+) -> CollectResult {
+    collect_items(ctx, items)
+}
+
 // ===========================================================================
-// PHASE 1a: REGISTER TYPE NAMES
+// TYPE-NAME REGISTRATION: REGISTER TYPE NAMES
 // ===========================================================================
 
 /// Register all type names as stubs (with arity but no body).
 /// This allows imports and forward references to resolve type names.
-fn collect_phase_1a(ctx: ElabContext, items: List<Item>) -> ElabContext {
+fn collect_type_names(ctx: ElabContext, items: List<Item>) -> ElabContext {
     match items {
         Nil() => ctx,
         Cons(item, rest) =>
             let ctx2 = register_type_name(ctx, item);
-            collect_phase_1a(ctx2, rest)
+            collect_type_names(ctx2, rest)
     }
 }
 
@@ -171,9 +202,9 @@ fn register_type_stub(
     // (from populate_module_info or seed_global_exports, ADR 5.5.26c)
     match env_lookup_type_def(ctx.env, type_name) {
         SomeTypeDef(existing) =>
-            // Always allow replacing — Phase B re-collects types that were
-            // seeded from Phase A.5 global exports. The re-registration is
-            // authoritative for this module. (L1 checks defining_module.is_none()
+            // Always allow replacing — Body Elaboration re-collects types that were
+            // seeded from Signature Collection global exports. The re-registration is
+            // authoritative for this module. (The bootstrap checks defining_module.is_none()
             // which has the same effect since seeded exports lack defining_module.)
             let core: TypeDefCore = { name: type_name, arity: arity, params: params };
             let meta: TypeDefMeta = { kind: INVALID_HANDLE, vis: vis, span: span, encoded_type: INVALID_HANDLE };
@@ -203,17 +234,17 @@ fn extract_type_param_names(params: List<TypeParam>) -> List<String> {
 }
 
 // ===========================================================================
-// PHASE 1b: PROCESS IMPORTS
+// IMPORT RESOLUTION: PROCESS IMPORTS
 // ===========================================================================
 
 /// Process all use declarations.
 /// Imports can now reference type names registered in phase 1a.
-fn collect_phase_1b(ctx: ElabContext, items: List<Item>) -> ElabContext {
+fn collect_imports(ctx: ElabContext, items: List<Item>) -> ElabContext {
     match items {
         Nil() => ctx,
         Cons(item, rest) =>
             let ctx2 = process_use_item(ctx, item);
-            collect_phase_1b(ctx2, rest)
+            collect_imports(ctx2, rest)
     }
 }
 
@@ -233,24 +264,24 @@ fn process_import(ctx: ElabContext, decl: UseDecl) -> ElabContext {
 }
 
 // ===========================================================================
-// PHASE 1d: RESOLVE DEFERRED TYPE REFERENCES
+// DEFERRED-TYVAR RESOLUTION: RESOLVE DEFERRED TYPE REFERENCES
 // ===========================================================================
 
 /// Resolve any deferred type references created during phase 1c.
 /// Forward references to types that came later in the file are now resolvable.
-fn collect_phase_1d(ctx: ElabContext) -> ElabContext {
+fn collect_deferred_tyvars(ctx: ElabContext) -> ElabContext {
     // TODO: Walk through all type encodings and resolve TyVar placeholders
     // For now, return ctx unchanged (most cases don't need this)
     ctx
 }
 
 // ===========================================================================
-// PHASE 1e: CACHE TYPE ENCODINGS
+// ENCODING FINALIZATION: CACHE TYPE ENCODINGS
 // ===========================================================================
 
 /// Cache type encodings for reverse lookup (type → name).
 /// This enables user-friendly error messages like "Color" instead of "μX.(1+1+1)".
-fn collect_phase_1e(ctx: ElabContext) -> ElabContext {
+fn finalize_encodings(ctx: ElabContext) -> ElabContext {
     // TODO: Build reverse mapping from encoded types to names
     // For now, return ctx unchanged
     ctx

@@ -117,6 +117,28 @@ pub extern "C" fn tg_term_nat_gt(a: Nat, b: Nat) -> Nat
 pub extern "C" fn tg_term_nat_ge(a: Nat, b: Nat) -> Nat
 
 // ============================================================================
+// Signed Integer Term Constructors (ADR 14.9.26c)
+// ============================================================================
+
+// Construct a signed literal. The parameter is declared `Nat` on purpose: the
+// compiler's own source stays Nat-only, and the two's-complement bits cross
+// the C ABI unchanged into the bootstrap's `i64`.
+pub extern "C" fn tg_term_int_lit(bits: Nat) -> Nat
+
+// Construct a signed binary operation; `op` is `IntBinOp::code`
+// (0 + 1 - 2 * 3 / 4 % 5 == 6 < 7 <= 8 > 9 >=)
+pub extern "C" fn tg_term_int_bin(op: Nat, a: Nat, b: Nat) -> Nat
+
+// Construct signed negation
+pub extern "C" fn tg_term_int_neg(a: Nat) -> Nat
+
+// Construct the Nat → Int bridge (`to_int`)
+pub extern "C" fn tg_term_nat_to_int(n: Nat) -> Nat
+
+// Construct the Int → Nat bridge (`from_int`)
+pub extern "C" fn tg_term_int_to_nat(i: Nat) -> Nat
+
+// ============================================================================
 // Boolean Term Constructors
 // ============================================================================
 
@@ -141,6 +163,10 @@ pub extern "C" fn tg_term_str_eq(a: Nat, b: Nat) -> Nat
 
 // Construct string length
 pub extern "C" fn tg_term_str_len(s: Nat) -> Nat
+
+// Construct a substring; the third argument is a LENGTH, not an end index
+// (ADR 20.8.26c)
+pub extern "C" fn tg_term_str_substring(s: Nat, start: Nat, len: Nat) -> Nat
 
 // Construct reflexivity proof
 pub extern "C" fn tg_term_refl(ty: Nat, term: Nat) -> Nat

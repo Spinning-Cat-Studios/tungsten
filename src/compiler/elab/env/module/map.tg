@@ -1,0 +1,77 @@
+// src/compiler/elab/env/module/map.tg
+// The path → contents module map.
+
+use elab::env::module::path::{ElabModulePath, elab_module_path_eq};
+use elab::env::module::contents::{ModuleContents};
+
+// ===========================================================================
+// MODULE MAP
+// ===========================================================================
+
+/// Map from module paths to module contents.
+pub type ModuleMap =
+    | ModuleMapNil
+    | ModuleMapCons(ElabModulePath, ModuleContents, ModuleMap)
+
+/// Create an empty module map.
+pub fn module_map_empty() -> ModuleMap {
+    ModuleMapNil
+}
+
+/// Add or update a module in the map.
+/// Removes any existing entry with the same path, then prepends the new one.
+pub fn module_map_insert(map: ModuleMap, path: ElabModulePath, contents: ModuleContents) -> ModuleMap {
+    ModuleMapCons(path, contents, module_map_remove(map, path))
+}
+
+/// Concatenate two module maps, `front` entries first. Lookups scan
+/// front-to-back, so on a path present in both, `front` shadows `back` — the
+/// same precedence `module_map_insert`'s prepend gives. `back` is shared
+/// structurally (not copied), so this is O(|front|). Used by the Phase-B walk
+/// to splice the shared, incrementally built prior-results map (`front`, full
+/// elaborated defs) in front of a per-module fresh env map (`back`, name-only
+/// stubs + seeded root globals), so completed modules' full defs shadow their
+/// stubs — instead of re-injecting all priors per module (ADR 23.7.26d — the
+/// O(M²)→O(M) re-injection fix).
+pub fn module_map_concat(front: ModuleMap, back: ModuleMap) -> ModuleMap {
+    match front {
+        ModuleMapNil() => back,
+        ModuleMapCons(p, c, rest) =>
+            ModuleMapCons(p, c, module_map_concat(rest, back))
+    }
+}
+
+/// Remove the first entry for a module from the map.
+/// Since module_map_insert always does remove-then-prepend, there is at most
+/// one entry per path. Stopping at the first match lets us share the tail of
+/// the list instead of copying every remaining node — critical for avoiding
+/// O(n*m) allocation when the map is updated frequently (ADR 6.5.26h).
+fn module_map_remove(map: ModuleMap, path: ElabModulePath) -> ModuleMap {
+    match map {
+        ModuleMapNil() => ModuleMapNil,
+        ModuleMapCons(p, c, rest) =>
+            if elab_module_path_eq(p, path) {
+                rest
+            } else {
+                ModuleMapCons(p, c, module_map_remove(rest, path))
+            }
+    }
+}
+
+/// Optional module contents.
+pub type MaybeModuleContents =
+    | NoModuleContents
+    | SomeModuleContents(ModuleContents)
+
+/// Look up a module by path.
+pub fn module_map_lookup(map: ModuleMap, path: ElabModulePath) -> MaybeModuleContents {
+    match map {
+        ModuleMapNil() => NoModuleContents,
+        ModuleMapCons(p, contents, rest) =>
+            if elab_module_path_eq(p, path) {
+                SomeModuleContents(contents)
+            } else {
+                module_map_lookup(rest, path)
+            }
+    }
+}

@@ -29,7 +29,8 @@ use elab::cir::{
     type_handle_to_codegen_type
 };
 use elab::exprs::{synth, check};
-use elab::exprs::blocks::tuple::{bind_tuple_pattern_to_env, build_tuple_projection_cir};
+use elab::exprs::blocks::tuple::bind_tuple_pattern_to_env;
+use elab::exprs::matches::patterns::wrap_product_projections_cir;
 
 /// Elaborate a list of statements just for environment updates.
 pub fn elab_stmts_for_env(env: Env, stmts: List<Stmt>, span: Span) -> ElabExprResult {
@@ -263,7 +264,7 @@ fn wrap_stmt_tuple_cir(
                 ElabExprErr(e) => ElabExprErr(e),
                 ElabExprOk(env2, term, ty, rhs_cir) =>
                     let tup_name = "__tup";
-                    let projected_cir = build_tuple_projection_cir(
+                    let projected_cir = wrap_product_projections_cir(
                         parts.sub_pats, ty, CIRVar(tup_name, type_handle_to_codegen_type(ty)), inner.cir
                     );
                     let outer_cir = CIRLet(tup_name, ct_unit(), rhs_cir, projected_cir);

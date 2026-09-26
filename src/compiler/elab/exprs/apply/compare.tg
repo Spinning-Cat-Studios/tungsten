@@ -1,0 +1,115 @@
+// src/compiler/elab/exprs/apply/compare.tg
+// Handler for the `compare(a, b)` structural-comparison intrinsic
+// (ADR 29.6.26f §T11.2a / P6′). The self-host port of the bootstrap's `elab_compare_poly`.
+//
+// Emits `App(App(TyApp(Global("__cmp"), T), a), b) : CompareResult` — the
+// deferred comparator reference resolved at instantiation (by the synthesizer).
+// The operand type T may be abstract (inside a generic `assert_eq<T>`); there is
+// no comparability gate here (rejection moves to instantiation). Uninstantiated
+// generics using this are skipped by codegen, so the self-compile stays green.
+
+use lexer::span::Span;
+use parser::ast::{Expr, Path, MkPath, Ident, TypeExpr, TyPath};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TypeHandle, TermHandle,
+    tg_term_global, tg_term_type_app, tg_term_app, tg_string_to_cstr
+};
+use elab::env::{Env};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error
+};
+use elab::exprs::{synth, check};
+use elab::cir::{
+    CodegenIR, CodegenType,
+    CIRApp, CIRGlobal, CIRTypeApp,
+    type_handle_to_codegen_type
+};
+use elab::types::{elab_type};
+use elab::types::result_types::{ElabTypeResult, ElabTypeOk, ElabTypeErr};
+
+/// One elaborated operand of `compare`: its Core term handle + parallel CIR.
+/// Grouping the two halves keeps `build_compare` within the parameter budget.
+type CmpHalf = { term: TermHandle, cir: CodegenIR }
+
+fn compare_arity_err(span: Span) -> ElabExprResult {
+    ElabExprErr(elab_expr_error("compare: expected exactly 2 arguments", span))
+}
+
+/// Handle a `compare(a, b)` call — the generic structural comparison intrinsic.
+/// Arg-arity is peeled one element per helper so each match stays flat (depth 1).
+pub fn handle_compare(env: Env, args: List<Expr>, span: Span) -> ElabExprResult {
+    match args {
+        Nil() => compare_arity_err(span),
+        Cons(left_expr, rest) => handle_compare_rest(env, left_expr, rest, span)
+    }
+}
+
+fn handle_compare_rest(env: Env, left_expr: Expr, rest: List<Expr>, span: Span) -> ElabExprResult {
+    match rest {
+        Nil() => compare_arity_err(span),
+        Cons(right_expr, rest2) => handle_compare_exact(env, left_expr, right_expr, rest2, span)
+    }
+}
+
+fn handle_compare_exact(env: Env, left_expr: Expr, right_expr: Expr, rest2: List<Expr>, span: Span) -> ElabExprResult {
+    match rest2 {
+        Nil() => handle_compare_synth(env, left_expr, right_expr, span),
+        _ => compare_arity_err(span)
+    }
+}
+
+/// Synthesize the left operand; the right must have the same type.
+fn handle_compare_synth(env: Env, left_expr: Expr, right_expr: Expr, span: Span) -> ElabExprResult {
+    match synth(env, left_expr) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, left_term, left_ty, left_cir) => {
+            let left: CmpHalf = { term: left_term, cir: left_cir };
+            handle_compare_checked(env2, left, left_ty, right_expr, span)
+        }
+    }
+}
+
+/// Check the right operand against the left's type, then build the call.
+fn handle_compare_checked(env: Env, left: CmpHalf, left_ty: TypeHandle, right_expr: Expr, span: Span) -> ElabExprResult {
+    match check(env, right_expr, left_ty) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, right_term, _right_ty, right_cir) => {
+            let right: CmpHalf = { term: right_term, cir: right_cir };
+            build_compare(env2, left, right, left_ty, span)
+        }
+    }
+}
+
+/// Build `App(App(TyApp(Global("__cmp"), T), a), b)` plus its CIR, typed
+/// `CompareResult`.
+fn build_compare(env: Env, left: CmpHalf, right: CmpHalf, operand_ty: TypeHandle, span: Span) -> ElabExprResult {
+    match resolve_compare_result(env, span) {
+        ElabTypeErr(_) => ElabExprErr(elab_expr_error(
+            "compare: cannot resolve `CompareResult` type (is it in scope?)", span)),
+        ElabTypeOk(result_ty, result_ct) => {
+            // Core term: App(App(TyApp(Global("__cmp"), T), a), b)
+            let cmp_global = tg_term_global(tg_string_to_cstr("__cmp"));
+            let cmp_tyapp = tg_term_type_app(cmp_global, operand_ty);
+            let cmp_app1 = tg_term_app(cmp_tyapp, left.term);
+            let cmp_app2 = tg_term_app(cmp_app1, right.term);
+            // CIR mirror. The intermediate result type (`T -> CompareResult`) is
+            // approximated by `result_ct`; this CIR is only emitted once the
+            // generic is instantiated (codegen resolution = ADR-P6′ step 2), and
+            // uninstantiated generics are skipped, so the approximation is inert
+            // for the self-compile.
+            let operand_ct = type_handle_to_codegen_type(operand_ty);
+            let cir_tyapp = CIRTypeApp(CIRGlobal("__cmp"), operand_ct);
+            let cir_app1 = CIRApp(cir_tyapp, left.cir, operand_ct, result_ct);
+            let cir_app2 = CIRApp(cir_app1, right.cir, operand_ct, result_ct);
+            ElabExprOk(env, cmp_app2, result_ty, cir_app2)
+        }
+    }
+}
+
+/// Resolve the named `CompareResult` type to its handle + codegen type.
+fn resolve_compare_result(env: Env, span: Span) -> ElabTypeResult {
+    let id: Ident = { name: "CompareResult", span: span };
+    let path: Path = MkPath(Cons(id, Nil()), span);
+    elab_type(env, TyPath(path))
+}

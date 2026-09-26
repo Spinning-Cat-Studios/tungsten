@@ -1,0 +1,21 @@
+// Store module: holds the generic instantiation in a stored (record field)
+// position, with the record and its consumers in the SAME module and only
+// the generic ADT imported — mirroring elab/env/module.tg (ModuleContents +
+// ctor_store_*) vs elab/env/strmap/ in the 21.7.26c failure. This exact
+// shape produced an identically-rendered E0010 before ADR 21.7.26e.
+
+use tree::{Tree, TreeLeaf, TreeNode, touch_tree};
+
+pub type Bucket = { count: Nat, label: String }
+
+pub type Store = { stored: Tree<Bucket> }
+
+pub fn project_stored(s: Store) -> Tree<Bucket> { s.stored }
+
+pub fn rebuild_store(fresh: Tree<Bucket>) -> Store {
+    { stored: fresh }
+}
+
+pub fn pass_stored_through_generic(s: Store) -> Store {
+    { stored: touch_tree(s.stored) }
+}

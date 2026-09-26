@@ -42,7 +42,7 @@ pub mod legacy;
 pub mod core_lets;
 
 // Re-export tuple ops needed by legacy module
-pub use elab::exprs::blocks::tuple::{bind_tuple_pattern_to_env, build_tuple_projection_cir};
+pub use elab::exprs::blocks::tuple::bind_tuple_pattern_to_env;
 
 // Re-export Core Let builder
 use elab::exprs::blocks::core_lets::{elab_block_with_lets, FinalMode, FinalSynth, FinalCheck};

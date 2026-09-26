@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn phase_a_collects_type_stubs() {
+fn stub_registration_collects_type_stubs() {
     let items = vec![Item::TypeDef(crate::ast::TypeDef {
         visibility: crate::ast::Visibility::Public,
         name: crate::ast::Ident {
@@ -64,7 +64,7 @@ fn phase_a_collects_type_stubs() {
 }
 
 #[test]
-fn phase_a_recurses_into_submodules() {
+fn stub_registration_recurses_into_submodules() {
     let child = ParsedModule {
         path: std::path::PathBuf::from("child.tg"),
         source_file: crate::ast::SourceFile {
@@ -116,7 +116,7 @@ fn phase_a_recurses_into_submodules() {
 fn merge_exports_overwrites_stubs() {
     let mut acc = ModuleTreeAccumulator::new();
 
-    // Phase A: add a stub with placeholder constructors
+    // Stub Registration: add a stub with placeholder constructors
     acc.exports.types.push((
         "Foo".to_string(),
         TypeDef {
@@ -137,7 +137,7 @@ fn merge_exports_overwrites_stubs() {
         },
     ));
 
-    // Phase B: merge real type with proper field types
+    // Body Elaboration: merge real type with proper field types
     let real_exports = ModuleExports {
         types: vec![(
             "Foo".to_string(),
@@ -164,7 +164,7 @@ fn merge_exports_overwrites_stubs() {
 
     acc.merge_exports(real_exports);
 
-    // Real type should replace Phase A stub
+    // Real type should replace Stub Registration stub
     assert_eq!(acc.exports.types.len(), 1);
     assert!(matches!(acc.exports.types[0].1.kind, TypeDefKind::ADT(_)));
     // Check it's the real one (has encoded_type)
@@ -172,7 +172,7 @@ fn merge_exports_overwrites_stubs() {
 }
 
 #[test]
-fn phase_a_alias_resolves_builtins() {
+fn stub_registration_alias_resolves_builtins() {
     let make_alias = |name: &str, target: &str| {
         Item::TypeAlias(crate::ast::TypeAlias {
             visibility: crate::ast::Visibility::Public,
@@ -214,7 +214,7 @@ fn phase_a_alias_resolves_builtins() {
 }
 
 #[test]
-fn phase_a_alias_complex_stays_stub() {
+fn stub_registration_alias_complex_stays_stub() {
     // Parameterized alias: `type Wrapper<T> = T` → should get TypeDefKind::Stub
     let module = make_parsed_module(vec![Item::TypeAlias(crate::ast::TypeAlias {
         visibility: crate::ast::Visibility::Public,
@@ -249,7 +249,7 @@ fn phase_a_alias_complex_stays_stub() {
 fn merge_exports_overwrites_values() {
     let mut acc = ModuleTreeAccumulator::new();
 
-    // Phase A.5: pre-register a value stub
+    // Signature Collection: pre-register a value stub
     acc.exports.values.push((
         "my_fn".to_string(),
         ValueDef {
@@ -260,7 +260,7 @@ fn merge_exports_overwrites_values() {
         },
     ));
 
-    // Phase B: merge real value with proper type
+    // Body Elaboration: merge real value with proper type
     let real_exports = ModuleExports {
         types: vec![],
         values: vec![(
@@ -277,7 +277,7 @@ fn merge_exports_overwrites_values() {
 
     acc.merge_exports(real_exports);
 
-    // Real value should replace Phase A.5 stub
+    // Real value should replace Signature Collection stub
     assert_eq!(acc.exports.values.len(), 1);
     assert_eq!(acc.exports.values[0].0, "my_fn");
     assert!(matches!(acc.exports.values[0].1.ty, Type::Arrow(_, _)));

@@ -13,7 +13,7 @@ use elab::env::{
     TypeDefInfo, ValueDefInfo, ConstructorInfo,
     module_map_lookup, MaybeModuleContents, SomeModuleContents, NoModuleContents,
     type_def_list_lookup, value_def_list_lookup, constructor_list_lookup,
-    import_list_lookup, MaybeImport, SomeImport, NoImport
+    module_contents_lookup_import, MaybeImport, SomeImport, NoImport
 };
 
 /// Check if module contents contain a name in any namespace.
@@ -21,8 +21,8 @@ use elab::env::{
 fn contents_has_name(contents: ModuleContents, name: String) -> Bool {
     let NoTypeDef() = type_def_list_lookup(contents.types, name) else { return true };
     let NoValueDef() = value_def_list_lookup(contents.values, name) else { return true };
-    let NoConstructor() = constructor_list_lookup(contents.constructors, name) else { return true };
-    let NoImport() = import_list_lookup(contents.imports, name) else { return true };
+    let NoConstructor() = constructor_list_lookup(contents.constructors.all, name) else { return true };
+    let NoImport() = module_contents_lookup_import(contents, name) else { return true };
     false
 }
 
@@ -43,7 +43,7 @@ pub fn get_module_public_items(env: Env, path: ElabModulePath) -> List<String> {
         SomeModuleContents(contents) =>
             let type_names = get_public_type_names(contents.types);
             let value_names = get_public_value_names(contents.values);
-            let ctor_names = get_public_constructor_names(contents.constructors);
+            let ctor_names = get_public_constructor_names(contents.constructors.all);
             list_append(type_names, list_append(value_names, ctor_names))
     }
 }

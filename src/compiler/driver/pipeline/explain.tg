@@ -75,6 +75,20 @@ fn explain_flag(name: String) -> Unit {
         println("");
         println("  Example:");
         println("    tungsten1 check file.tg --max-errors 0")
+    } else if string_eq(name, "--require-tests") {
+        println("--require-tests");
+        println("");
+        println("  Fail when `test` discovers zero RUNNABLE tests, instead of");
+        println("  reporting a passing run. Functions skipped by the signature");
+        println("  filter — those taking parameters or not returning Unit — do");
+        println("  NOT count: a file whose every test_* is skipped has zero");
+        println("  runnable tests and fails.");
+        println("");
+        println("  Without it, a rename sweep or a --filter typo that drops every");
+        println("  test reads as success (ADR 2.7.26b, 7.8.26a).");
+        println("");
+        println("  Example:");
+        println("    tungsten1 test file.tg --require-tests")
     } else {
         println("Unknown flag. Available flags:");
         println("  --dump-core PATTERN");
@@ -82,6 +96,7 @@ fn explain_flag(name: String) -> Unit {
         println("  --emit-llvm");
         println("  --verbose / -v");
         println("  --max-errors N");
+        println("  --require-tests");
         println("  -o / --output PATH")
     }
 }

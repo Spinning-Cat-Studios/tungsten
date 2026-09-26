@@ -96,9 +96,13 @@ impl<'a> Elaborator<'a> {
                     .collect(),
             ),
             // Base types - return as-is
-            Type::Unit | Type::Void | Type::Bool | Type::Nat | Type::String | Type::Prop => {
-                field_ty.clone()
-            }
+            Type::Unit
+            | Type::Void
+            | Type::Bool
+            | Type::Nat
+            | Type::Int
+            | Type::String
+            | Type::Prop => field_ty.clone(),
             Type::Error => Type::Error,
         }
     }
@@ -106,8 +110,14 @@ impl<'a> Elaborator<'a> {
     /// Normalize a TyVar field - substitute if we have a binding, or normalize if external.
     fn normalize_field_tyvar(&self, v: &str, field_ty: &Type, ctx: &mut NormFieldCtx) -> Type {
         if let Some(&replacement) = ctx.subst.get(v) {
-            // Recursively process the substituted type (but don't expand ADTs)
-            self.normalize_field_for_adt(replacement, ctx)
+            // A substituted type parameter is *argument* territory, not field
+            // territory: normalize it as an independent type. Re-walking it
+            // with the field rules wrongly collapsed a same-name sibling
+            // instantiation (e.g. `List<Bucket>` substituted for `T` inside
+            // `List<T>`'s encoding) to the μ-variable — the canonical encoder
+            // substitutes AFTER self-reference replacement, so arguments are
+            // never subject to the self-reference collapse (ADR 21.7.26e).
+            self.normalize_for_comparison_impl(replacement, ctx.in_progress)
         } else if ctx.is_recursive && v == ctx.adt_name {
             // Self-reference in non-App form (rare but possible)
             Type::TyVar(ctx.mu_var.to_string())

@@ -5,7 +5,7 @@
 use parser::ast::{
     Ident, ident_name,
     Path, MkPath,
-    ident_list_len,
+    ident_list_len, ident_list_is_empty,
     VisPrivate, VisCrate, VisPublic
 };
 use driver::ffi::{List, Nil, Cons};
@@ -223,7 +223,7 @@ fn resolve_value_in_module(env: Env, contents: ModuleContents, value_name: Strin
 }
 
 fn resolve_constructor_in_module(env: Env, contents: ModuleContents, value_name: String, module_path: ElabModulePath, span: Span) -> ValuePathResult {
-    match constructor_list_lookup(contents.constructors, value_name) {
+    match constructor_list_lookup(contents.constructors.all, value_name) {
         SomeConstructor(info) =>
             if env_check_visibility(env, info.visibility, module_path) {
                 ValuePathOk(ResolvedConstructor(info))
@@ -264,13 +264,6 @@ fn ident_list_to_string_list_init(list: List<Ident>) -> List<String> {
     }
 }
 
-fn ident_list_is_empty(list: List<Ident>) -> Bool {
-    match list {
-        Nil() => true,
-        Cons(_, _) => false
-    }
-}
-
 /// Helper: get last name from ident list.
 fn ident_list_last_name(list: List<Ident>) -> String {
     match list {
@@ -289,5 +282,5 @@ fn ident_list_last_name(list: List<Ident>) -> String {
 /// across elaboration phases (ADR 7.5.26a, reinstated by 10.5.26e).
 pub fn env_count_constructors(env: Env, parent_type: String) -> Nat {
     let contents = env_current_module_contents(env);
-    constructor_list_max_index_plus_one(contents.constructors, parent_type)
+    constructor_list_max_index_plus_one(contents.constructors.all, parent_type)
 }

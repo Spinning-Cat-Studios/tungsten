@@ -1,0 +1,31 @@
+// The `mod.tg` half of the regression pin for ADR 4.9.26f.
+//
+// This directory is a FIXTURE, not part of the self-hosted compiler: nothing in
+// `main.tg` reaches it, and its only consumer is `test_module_cycles.tg` beside
+// it. It reproduces, at the smallest size that still asks the question, the
+// shape the file-split convention produces — a recursive driver in `mod.tg`, its
+// per-case helper in a sibling, and the helper calling back into the driver.
+//
+// The names carry a `cycle_`/`Cycle` prefix so that this fixture can never
+// collide with a self-host definition if the two ever share a module tree; both
+// compilers key values on the bare name (E0016).
+
+pub mod steps;
+
+use module_cycles::steps::cycle_classify;
+
+pub type CycleFuel = CycleMore(CycleFuel) | CycleEmpty
+pub type CycleStep = CycleGo | CycleStop
+
+/// Count the links of a `CycleFuel`, asking the sibling module at every step
+/// whether to continue. The descent is on `rest`, a strict subterm of `f`, so
+/// the cycle costs no `#[partial]`.
+pub fn cycle_run(f: CycleFuel) -> Nat {
+    match f {
+        CycleMore(rest) => match cycle_classify(rest) {
+            CycleGo => 1 + cycle_run(rest),
+            CycleStop => 1
+        },
+        CycleEmpty => 0
+    }
+}

@@ -5,7 +5,8 @@ use driver::util::{Result, Ok, Err};
 // Refactored into submodules:
 // - result.tg: Parse result types and ItemList
 // - shared/: Visibility, type params, and params (shared helpers)
-// - dispatch.tg: Main item dispatch (parse_items, parse_item)
+// - dispatch.tg: Single-item dispatch (parse_item). The item LOOP is
+//   parse_items_with_recovery in parser/lib.tg, not here.
 // - decls/: Function, extern, and theorem parsing
 // - types.tg: Type definition parsing (ADT, record, alias)
 // - use_decl.tg: Module and use declaration parsing
@@ -28,6 +29,6 @@ pub use parser::items::shared::type_params::{parse_type_params, parse_optional_t
 
 pub use parser::items::shared::params::parse_params;
 
-pub use parser::items::dispatch::{parse_items, parse_item};
+pub use parser::items::dispatch::{parse_item};
 
 pub use parser::items::recovery::synchronize;

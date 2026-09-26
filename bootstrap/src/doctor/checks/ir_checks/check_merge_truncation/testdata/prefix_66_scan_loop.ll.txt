@@ -1,0 +1,271 @@
+; ModuleID = 'classp_sret_match_order_run__scan_loop'
+source_filename = "classp_sret_match_order_run__scan_loop"
+target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128"
+target triple = "arm64-apple-darwin23.6.0"
+
+declare i32 @printf(ptr, ...)
+
+declare ptr @malloc(i64)
+
+declare ptr @memcpy(ptr, ptr, i64)
+
+declare i32 @memcmp(ptr, ptr, i64)
+
+declare { ptr, i64 } @tg_string_concat({ ptr, i64 }, { ptr, i64 })
+
+declare { ptr, i64 } @tg_string_concat_owned({ ptr, i64 }, { ptr, i64 })
+
+define { ptr, ptr } @scan_loop(ptr %0, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %1) {
+entry:
+  %env_alloc = call ptr @malloc(i64 48)
+  %lex_store = getelementptr inbounds { { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, ptr %env_alloc, i32 0, i32 0
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %1, ptr %lex_store, align 16
+  %closure_env = insertvalue { ptr, ptr } { ptr @__classp_sret_match_order_run__scan_loop_lambda_1, ptr null }, ptr %env_alloc, 1
+  ret { ptr, ptr } %closure_env
+}
+
+define { ptr, ptr } @"scan_loop$direct"(ptr %0, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %1, ptr %2, i64 %3) {
+entry:
+  %sret_buf = alloca { ptr, ptr }, align 8
+  %indirect_buf.0 = alloca { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, align 8
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %1, ptr %indirect_buf.0, align 8
+  call void @"scan_loop$direct_mt"(ptr %sret_buf, ptr %indirect_buf.0, ptr %0, ptr %2, i64 %3)
+  %sret_load = load { ptr, ptr }, ptr %sret_buf, align 8
+  ret { ptr, ptr } %sret_load
+}
+
+define void @"scan_loop$direct_mt"(ptr %0, ptr %1, ptr %2, ptr %3, i64 %4) {
+entry:
+  %lex.indirect.load = load { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %1, align 8
+  %nat_gt = icmp ugt i64 %4, 100000
+  br i1 %nat_gt, label %then, label %else
+
+then:                                             ; preds = %entry
+  %pair_alloca = alloca { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, align 16
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %lex.indirect.load, ptr %pair_alloca, align 16
+  %snd_ptr = getelementptr inbounds { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %pair_alloca, i32 0, i32 1
+  %snd = load { i64, { { ptr, i64 }, ptr } }, ptr %snd_ptr, align 16
+  %pair_alloca1 = alloca { i64, { { ptr, i64 }, ptr } }, align 16
+  store { i64, { { ptr, i64 }, ptr } } %snd, ptr %pair_alloca1, align 16
+  %snd_ptr2 = getelementptr inbounds { i64, { { ptr, i64 }, ptr } }, ptr %pair_alloca1, i32 0, i32 1
+  %snd3 = load { { ptr, i64 }, ptr }, ptr %snd_ptr2, align 16
+  %pair_alloca4 = alloca { { ptr, i64 }, ptr }, align 16
+  store { { ptr, i64 }, ptr } %snd3, ptr %pair_alloca4, align 16
+  %snd_ptr5 = getelementptr inbounds { { ptr, i64 }, ptr }, ptr %pair_alloca4, i32 0, i32 1
+  %snd6 = load ptr, ptr %snd_ptr5, align 16
+  %pair_fst = insertvalue { ptr, ptr } zeroinitializer, ptr %3, 0
+  %pair_snd = insertvalue { ptr, ptr } %pair_fst, ptr %snd6, 1
+  br label %merge
+
+else:                                             ; preds = %entry
+  %call = call { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } @scan_one(ptr null, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %lex.indirect.load)
+  %call_result_alloca = alloca { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, align 16
+  store { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } %call, ptr %call_result_alloca, align 16
+  %call_result_loaded = load { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, ptr %call_result_alloca, align 16
+  %pair_alloca7 = alloca { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, align 16
+  store { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } %call_result_loaded, ptr %pair_alloca7, align 16
+  %fst_ptr = getelementptr inbounds { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, ptr %pair_alloca7, i32 0, i32 0
+  %fst = load { i32, [48 x i8] }, ptr %fst_ptr, align 16
+  %pair_alloca8 = alloca { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, align 16
+  store { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } %call_result_loaded, ptr %pair_alloca8, align 16
+  %snd_ptr9 = getelementptr inbounds { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, ptr %pair_alloca8, i32 0, i32 1
+  %snd10 = load { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %snd_ptr9, align 16
+  %pair_fst11 = insertvalue { { i32, [48 x i8] }, ptr } zeroinitializer, { i32, [48 x i8] } %fst, 0
+  %pair_snd12 = insertvalue { { i32, [48 x i8] }, ptr } %pair_fst11, ptr %3, 1
+  %sum_alloca = alloca { i32, [64 x i8] }, align 16
+  %tag_ptr = getelementptr inbounds { i32, [64 x i8] }, ptr %sum_alloca, i32 0, i32 0
+  store i32 1, ptr %tag_ptr, align 4
+  %data_ptr = getelementptr inbounds { i32, [64 x i8] }, ptr %sum_alloca, i32 0, i32 1
+  store { { i32, [48 x i8] }, ptr } %pair_snd12, ptr %data_ptr, align 4
+  %sum_val = load { i32, [64 x i8] }, ptr %sum_alloca, align 16
+  %mu_alloc = call ptr @malloc(i64 68)
+  store { i32, [64 x i8] } %sum_val, ptr %mu_alloc, align 16
+  %adt_scrut_ptr = alloca { i32, [48 x i8] }, align 16
+  store { i32, [48 x i8] } %fst, ptr %adt_scrut_ptr, align 16
+  %tag_ptr13 = getelementptr inbounds { i32, [48 x i8] }, ptr %adt_scrut_ptr, i32 0, i32 0
+  %tag = load i32, ptr %tag_ptr13, align 4
+  %data_ptr14 = getelementptr inbounds { i32, [48 x i8] }, ptr %adt_scrut_ptr, i32 0, i32 1
+  switch i32 %tag, label %adt_unreachable [
+    i32 0, label %adt_case_0
+    i32 1, label %adt_case_1
+    i32 2, label %adt_case_2
+  ]
+
+merge:                                            ; preds = %adt_merge, %then
+  %if_result = phi { ptr, ptr } [ %pair_snd, %then ], [ %casted31, %adt_merge ]
+  store { ptr, ptr } %if_result, ptr %0, align 8
+  ret void
+
+adt_merge:                                        ; preds = %adt_case_2, %musttail_decomposed_dead16, %musttail_decomposed_dead
+  %adt_result = phi i1 [ false, %musttail_decomposed_dead ], [ false, %musttail_decomposed_dead16 ], [ %casted, %adt_case_2 ]
+  %cast_temp28 = alloca { ptr, ptr }, align 16
+  store { ptr, ptr } zeroinitializer, ptr %cast_temp28, align 16
+  %src_temp29 = alloca i1, align 16
+  store i1 %adt_result, ptr %src_temp29, align 16
+  %memcpy_cast30 = call ptr @memcpy(ptr %cast_temp28, ptr %src_temp29, i64 1)
+  %casted31 = load { ptr, ptr }, ptr %cast_temp28, align 16
+  br label %merge
+
+adt_unreachable:                                  ; preds = %else
+  unreachable
+
+adt_case_0:                                       ; preds = %else
+  %payload_0 = load { { ptr, i64 }, { i64, { i64, { i64, i64 } } } }, ptr %data_ptr14, align 4
+  %nat_add = add i64 %4, 1
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %snd10, ptr %1, align 8
+  musttail call void @"scan_loop$direct_mt"(ptr %0, ptr %1, ptr null, ptr %mu_alloc, i64 %nat_add)
+  ret void
+
+adt_case_1:                                       ; preds = %else
+  %payload_1 = load { i64, { i64, { i64, { i64, i64 } } } }, ptr %data_ptr14, align 4
+  %nat_add15 = add i64 %4, 1
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %snd10, ptr %1, align 8
+  musttail call void @"scan_loop$direct_mt"(ptr %0, ptr %1, ptr null, ptr %mu_alloc, i64 %nat_add15)
+  ret void
+
+adt_case_2:                                       ; preds = %else
+  %payload_2 = load { i64, { i64, { i64, i64 } } }, ptr %data_ptr14, align 4
+  %pair_alloca17 = alloca { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, align 16
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %snd10, ptr %pair_alloca17, align 16
+  %snd_ptr18 = getelementptr inbounds { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %pair_alloca17, i32 0, i32 1
+  %snd19 = load { i64, { { ptr, i64 }, ptr } }, ptr %snd_ptr18, align 16
+  %pair_alloca20 = alloca { i64, { { ptr, i64 }, ptr } }, align 16
+  store { i64, { { ptr, i64 }, ptr } } %snd19, ptr %pair_alloca20, align 16
+  %snd_ptr21 = getelementptr inbounds { i64, { { ptr, i64 }, ptr } }, ptr %pair_alloca20, i32 0, i32 1
+  %snd22 = load { { ptr, i64 }, ptr }, ptr %snd_ptr21, align 16
+  %pair_alloca23 = alloca { { ptr, i64 }, ptr }, align 16
+  store { { ptr, i64 }, ptr } %snd22, ptr %pair_alloca23, align 16
+  %snd_ptr24 = getelementptr inbounds { { ptr, i64 }, ptr }, ptr %pair_alloca23, i32 0, i32 1
+  %snd25 = load ptr, ptr %snd_ptr24, align 16
+  %pair_fst26 = insertvalue { ptr, ptr } zeroinitializer, ptr %mu_alloc, 0
+  %pair_snd27 = insertvalue { ptr, ptr } %pair_fst26, ptr %snd25, 1
+  %cast_temp = alloca i1, align 16
+  %src_temp = alloca { ptr, ptr }, align 16
+  store { ptr, ptr } %pair_snd27, ptr %src_temp, align 16
+  %memcpy_cast = call ptr @memcpy(ptr %cast_temp, ptr %src_temp, i64 1)
+  %casted = load i1, ptr %cast_temp, align 16
+  br label %adt_merge
+
+musttail_decomposed_dead:                         ; No predecessors!
+  br label %adt_merge
+
+musttail_decomposed_dead16:                       ; No predecessors!
+  br label %adt_merge
+}
+
+declare { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } @scan_one(ptr, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } })
+
+define { ptr, ptr } @__classp_sret_match_order_run__scan_loop_lambda_1(ptr %0, ptr %1) {
+entry:
+  %lex_ptr = getelementptr inbounds { { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, ptr %0, i32 0, i32 0
+  %lex = load { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %lex_ptr, align 16
+  %env_alloc = call ptr @malloc(i64 56)
+  %lex_store = getelementptr inbounds { { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr }, ptr %env_alloc, i32 0, i32 0
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %lex, ptr %lex_store, align 16
+  %toks_store = getelementptr inbounds { { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr }, ptr %env_alloc, i32 0, i32 1
+  store ptr %1, ptr %toks_store, align 16
+  %closure_env = insertvalue { ptr, ptr } { ptr @__classp_sret_match_order_run__scan_loop_lambda_2, ptr null }, ptr %env_alloc, 1
+  ret { ptr, ptr } %closure_env
+}
+
+define { ptr, ptr } @__classp_sret_match_order_run__scan_loop_lambda_2(ptr %0, i64 %1) {
+entry:
+  %lex_ptr = getelementptr inbounds { { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr }, ptr %0, i32 0, i32 0
+  %lex = load { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %lex_ptr, align 16
+  %toks_ptr = getelementptr inbounds { { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr }, ptr %0, i32 0, i32 1
+  %toks = load ptr, ptr %toks_ptr, align 16
+  %nat_gt = icmp ugt i64 %1, 100000
+  br i1 %nat_gt, label %then, label %else
+
+then:                                             ; preds = %entry
+  %pair_alloca = alloca { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, align 16
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %lex, ptr %pair_alloca, align 16
+  %snd_ptr = getelementptr inbounds { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %pair_alloca, i32 0, i32 1
+  %snd = load { i64, { { ptr, i64 }, ptr } }, ptr %snd_ptr, align 16
+  %pair_alloca1 = alloca { i64, { { ptr, i64 }, ptr } }, align 16
+  store { i64, { { ptr, i64 }, ptr } } %snd, ptr %pair_alloca1, align 16
+  %snd_ptr2 = getelementptr inbounds { i64, { { ptr, i64 }, ptr } }, ptr %pair_alloca1, i32 0, i32 1
+  %snd3 = load { { ptr, i64 }, ptr }, ptr %snd_ptr2, align 16
+  %pair_alloca4 = alloca { { ptr, i64 }, ptr }, align 16
+  store { { ptr, i64 }, ptr } %snd3, ptr %pair_alloca4, align 16
+  %snd_ptr5 = getelementptr inbounds { { ptr, i64 }, ptr }, ptr %pair_alloca4, i32 0, i32 1
+  %snd6 = load ptr, ptr %snd_ptr5, align 16
+  %pair_fst = insertvalue { ptr, ptr } zeroinitializer, ptr %toks, 0
+  %pair_snd = insertvalue { ptr, ptr } %pair_fst, ptr %snd6, 1
+  br label %merge
+
+else:                                             ; preds = %entry
+  %call = call { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } @scan_one(ptr null, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %lex)
+  %call_result_alloca = alloca { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, align 16
+  store { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } %call, ptr %call_result_alloca, align 16
+  %call_result_loaded = load { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, ptr %call_result_alloca, align 16
+  %pair_alloca7 = alloca { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, align 16
+  store { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } %call_result_loaded, ptr %pair_alloca7, align 16
+  %fst_ptr = getelementptr inbounds { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, ptr %pair_alloca7, i32 0, i32 0
+  %fst = load { i32, [48 x i8] }, ptr %fst_ptr, align 16
+  %pair_alloca8 = alloca { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, align 16
+  store { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } } %call_result_loaded, ptr %pair_alloca8, align 16
+  %snd_ptr9 = getelementptr inbounds { { i32, [48 x i8] }, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } }, ptr %pair_alloca8, i32 0, i32 1
+  %snd10 = load { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %snd_ptr9, align 16
+  %pair_fst11 = insertvalue { { i32, [48 x i8] }, ptr } zeroinitializer, { i32, [48 x i8] } %fst, 0
+  %pair_snd12 = insertvalue { { i32, [48 x i8] }, ptr } %pair_fst11, ptr %toks, 1
+  %sum_alloca = alloca { i32, [64 x i8] }, align 16
+  %tag_ptr = getelementptr inbounds { i32, [64 x i8] }, ptr %sum_alloca, i32 0, i32 0
+  store i32 1, ptr %tag_ptr, align 4
+  %data_ptr = getelementptr inbounds { i32, [64 x i8] }, ptr %sum_alloca, i32 0, i32 1
+  store { { i32, [48 x i8] }, ptr } %pair_snd12, ptr %data_ptr, align 4
+  %sum_val = load { i32, [64 x i8] }, ptr %sum_alloca, align 16
+  %mu_alloc = call ptr @malloc(i64 68)
+  store { i32, [64 x i8] } %sum_val, ptr %mu_alloc, align 16
+  %adt_scrut_ptr = alloca { i32, [48 x i8] }, align 16
+  store { i32, [48 x i8] } %fst, ptr %adt_scrut_ptr, align 16
+  %tag_ptr13 = getelementptr inbounds { i32, [48 x i8] }, ptr %adt_scrut_ptr, i32 0, i32 0
+  %tag = load i32, ptr %tag_ptr13, align 4
+  %data_ptr14 = getelementptr inbounds { i32, [48 x i8] }, ptr %adt_scrut_ptr, i32 0, i32 1
+  switch i32 %tag, label %adt_unreachable [
+    i32 0, label %adt_case_0
+    i32 1, label %adt_case_1
+    i32 2, label %adt_case_2
+  ]
+
+merge:                                            ; preds = %adt_merge, %then
+  %if_result = phi { ptr, ptr } [ %pair_snd, %then ], [ %adt_result, %adt_merge ]
+  ret { ptr, ptr } %if_result
+
+adt_merge:                                        ; preds = %adt_case_2, %adt_case_1, %adt_case_0
+  %adt_result = phi { ptr, ptr } [ %direct_call, %adt_case_0 ], [ %direct_call16, %adt_case_1 ], [ %pair_snd27, %adt_case_2 ]
+  br label %merge
+
+adt_unreachable:                                  ; preds = %else
+  unreachable
+
+adt_case_0:                                       ; preds = %else
+  %payload_0 = load { { ptr, i64 }, { i64, { i64, { i64, i64 } } } }, ptr %data_ptr14, align 4
+  %nat_add = add i64 %1, 1
+  %direct_call = call { ptr, ptr } @"scan_loop$direct"(ptr null, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %snd10, ptr %mu_alloc, i64 %nat_add)
+  br label %adt_merge
+
+adt_case_1:                                       ; preds = %else
+  %payload_1 = load { i64, { i64, { i64, { i64, i64 } } } }, ptr %data_ptr14, align 4
+  %nat_add15 = add i64 %1, 1
+  %direct_call16 = call { ptr, ptr } @"scan_loop$direct"(ptr null, { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %snd10, ptr %mu_alloc, i64 %nat_add15)
+  br label %adt_merge
+
+adt_case_2:                                       ; preds = %else
+  %payload_2 = load { i64, { i64, { i64, i64 } } }, ptr %data_ptr14, align 4
+  %pair_alloca17 = alloca { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, align 16
+  store { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } } %snd10, ptr %pair_alloca17, align 16
+  %snd_ptr18 = getelementptr inbounds { { ptr, i64 }, { i64, { { ptr, i64 }, ptr } } }, ptr %pair_alloca17, i32 0, i32 1
+  %snd19 = load { i64, { { ptr, i64 }, ptr } }, ptr %snd_ptr18, align 16
+  %pair_alloca20 = alloca { i64, { { ptr, i64 }, ptr } }, align 16
+  store { i64, { { ptr, i64 }, ptr } } %snd19, ptr %pair_alloca20, align 16
+  %snd_ptr21 = getelementptr inbounds { i64, { { ptr, i64 }, ptr } }, ptr %pair_alloca20, i32 0, i32 1
+  %snd22 = load { { ptr, i64 }, ptr }, ptr %snd_ptr21, align 16
+  %pair_alloca23 = alloca { { ptr, i64 }, ptr }, align 16
+  store { { ptr, i64 }, ptr } %snd22, ptr %pair_alloca23, align 16
+  %snd_ptr24 = getelementptr inbounds { { ptr, i64 }, ptr }, ptr %pair_alloca23, i32 0, i32 1
+  %snd25 = load ptr, ptr %snd_ptr24, align 16
+  %pair_fst26 = insertvalue { ptr, ptr } zeroinitializer, ptr %mu_alloc, 0
+  %pair_snd27 = insertvalue { ptr, ptr } %pair_fst26, ptr %snd25, 1
+  br label %adt_merge
+}

@@ -3,6 +3,7 @@
 //! Builds the injection chain (inl/inr) for constructor values.
 
 use crate::elaborate::error::{ElabError, ElabErrorKind};
+use crate::elaborate::exprs::adt_match::ResidualMuChain;
 use crate::elaborate::{ElabResult, Elaborator};
 use crate::span::Span;
 use tungsten_core::{Term, Type};
@@ -28,9 +29,10 @@ impl<'a> Elaborator<'a> {
         adt_type: &Type,
     ) -> ElabResult<Term> {
         if num_ctors == 0 {
-            return Err(ElabError::new(
+            // A resolved constructor implies its ADT has at least one.
+            return Err(ElabError::internal(
                 Span::new(0, 0),
-                ElabErrorKind::Other("cannot build injection for empty ADT".to_string()),
+                "cannot build injection for empty ADT",
             ));
         }
 
@@ -48,13 +50,22 @@ impl<'a> Elaborator<'a> {
         // leaking TyVar("α_Name") into codegen)
         let mut sum_type = match &normalized_adt {
             Type::Mu(var, body) => body.substitute(var, &normalized_adt),
+            // Poison transit (ADR 15.8.26d): a healthy constructor checked
+            // against a poisoned type — `None` where a poisoned field is
+            // expected — has no sum to inject into. The fault is reported
+            // at the type's span; the value stands as it is.
+            Type::Error => return Ok(value),
             _ => normalized_adt.clone(),
         };
 
         // Handle nested Mu from mutual recursion (ADR 18.4.26i).
         // Mutually recursive types have nested Mu binders for each group member.
-        // Resolve each by substituting with its cached encoding.
-        sum_type = self.unfold_inner_mu_layers(sum_type);
+        // Resolve each by substituting with its cached encoding. A chain that
+        // will not flatten is a nested inductive family — E0064 rather than the
+        // unbounded peel this used to inherit (ADR 11.8.26c).
+        sum_type = self
+            .unfold_inner_mu_layers(ResidualMuChain::after_outer_unfold(sum_type))
+            .map_err(|unflattened| self.nested_family_error(&unflattened, Span::new(0, 0)))?;
 
         // Build from inside out for right-nested sum: A + (B + (C + D))
         // index 0 (A): inl(value)                            at type A + (B + (C + D))
@@ -75,11 +86,11 @@ impl<'a> Elaborator<'a> {
             current = match &current {
                 Type::Sum(_, right) => (**right).clone(),
                 _ => {
-                    return Err(ElabError::new(
+                    // The encoder guarantees a right-nested sum deep enough
+                    // for every constructor index.
+                    return Err(ElabError::internal(
                         Span::new(0, 0),
-                        ElabErrorKind::Other(
-                            "expected sum type in constructor injection".to_string(),
-                        ),
+                        "expected sum type in constructor injection",
                     ));
                 }
             };

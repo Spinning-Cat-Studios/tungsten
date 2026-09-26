@@ -1,0 +1,11 @@
+// SUBJECT — arity 3, product tail (ADR 4.9.26c). This is ADR 4.9.26b §1.3's
+// `subject_tail` as a runnable program: the correct term is `snd (snd r)` and
+// the spine-reading walk built `fst (snd (snd r))`.
+
+type TripleTail = { head: Nat, mid: Nat, tail: (Nat, Nat) }
+
+pub fn main() -> Nat {
+    let r: TripleTail = { head: 1, mid: 2, tail: (3, 4) };
+    let (a, b) = r.tail;
+    r.head * 1000 + r.mid * 100 + a * 10 + b
+}

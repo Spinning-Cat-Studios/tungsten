@@ -124,6 +124,14 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Internal implementation of resolve_type_apps with cycle detection.
+    ///
+    /// Deliberately NOT folded into the unified walker
+    /// (`Elaborator::walk_type_refs`, `types/ref_walk.rs` — ADR 23.7.26a
+    /// §2.3): this traversal is genuinely different, not a drifted twin. It
+    /// expands `App` heads only — `TyVar`s are never resolved, and `Eq` /
+    /// `Adt` nodes fall to the leaf arm without recursion into their
+    /// children. Routing it through `map_children` would change all three
+    /// behaviours.
     pub(crate) fn resolve_type_apps_impl(
         &mut self,
         ty: &Type,
@@ -206,6 +214,8 @@ impl<'a> Elaborator<'a> {
         )
     }
 }
+
+pub(in crate::elaborate::exprs) mod poison;
 
 #[cfg(test)]
 mod tests;

@@ -12,6 +12,9 @@
 // Construct Nat type
 pub extern "C" fn tg_type_nat() -> Nat
 
+// Construct Int type (ADR 14.9.26c)
+pub extern "C" fn tg_type_int() -> Nat
+
 // Construct Bool type
 pub extern "C" fn tg_type_bool() -> Nat
 
@@ -63,9 +66,12 @@ pub extern "C" fn tg_type_eq(ty: Nat, lhs: Nat, rhs: Nat) -> Nat
 // ============================================================================
 
 // Return a numeric tag identifying the type variant.
-// 0=Nat, 1=Bool, 2=String, 3=Unit, 4=Void, 5=Prop,
-// 6=Arrow, 7=Product, 8=Sum, 9=TyVar, 10=Forall,
-// 11=Mu, 12=Eq, 13=Ref, 14=Ptr, 15=App, 99=unknown
+//
+// The tag table is NOT transcribed here. Its authority is the `match` in
+// `tungsten_core/src/ffi/types/predicates/mod.rs`, whose own doc comment carries
+// only in-source enumeration and is reconciled against those arms by a test
+// (ADR 13.8.26a). The copy that used to sit here stopped at 15 and omitted
+// `Adt`, and a reader who cross-checked it wrote a sixth copy rather than a fix.
 pub extern "C" fn tg_type_tag(ty: Nat) -> Nat
 
 // ============================================================================

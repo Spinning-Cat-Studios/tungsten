@@ -303,10 +303,7 @@ impl<'a> Elaborator<'a> {
                 let name = type_path.item_name().name.clone();
 
                 // Skip built-in types
-                if matches!(
-                    name.as_str(),
-                    "Nat" | "Bool" | "Unit" | "Void" | "Prop" | "String"
-                ) {
+                if tungsten_core::Type::primitive_by_name(&name).is_some() {
                     return None;
                 }
 

@@ -28,11 +28,25 @@ impl CodeGen<'_> {
 
     /// Generate a unique lambda function name.
     ///
-    /// When `named_lambdas` is enabled and a binding name is available,
-    /// uses the source-level name (module-qualified to avoid collisions).
-    /// Otherwise, falls back to `__lambda_N` (or `__<prefix>_lambda_N` if
-    /// a module prefix is set).
+    /// Inside a synthesized def (ADR 12.7.26c P6/D7), names are forced to the
+    /// deterministic `<def-symbol>$l<index>` scheme regardless of
+    /// `named_lambdas`, so a codegen error in a synthesized comparator body
+    /// names the comparator it belongs to. When `named_lambdas` is enabled and
+    /// a binding name is available, uses the source-level name (module-qualified
+    /// to avoid collisions). Otherwise, falls back to `__lambda_N` (or
+    /// `__<prefix>_lambda_N` if a module prefix is set).
     pub(crate) fn fresh_lambda_name(&mut self) -> String {
+        if let Some(binding) = self.naming.synthesized_def_binding.clone() {
+            let ir_name = format!("{binding}$l{}", self.naming.synthesized_lambda_index);
+            self.naming.synthesized_lambda_index += 1;
+            self.naming.symbol_map.push(SymbolEntry {
+                ir_name: ir_name.clone(),
+                source_name: Some(binding),
+                file: None,
+                line: None,
+            });
+            return ir_name;
+        }
         self.naming.lambda_counter += 1;
         let ir_name = if self.naming.named_lambdas {
             if let Some(ref binding) = self.naming.current_binding_name {

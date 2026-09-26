@@ -7,3 +7,5 @@ pub mod operators;
 pub mod equality;
 pub mod expect_type;
 pub mod expect_error;
+pub mod compare;
+pub mod substring;

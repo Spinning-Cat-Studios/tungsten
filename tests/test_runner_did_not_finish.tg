@@ -1,0 +1,33 @@
+// Fixture for ADR 6.8.26b D7 — partial vacuity, the case the COUNT cannot see.
+//
+// The first of three assertions executes, then a `let` binds a Stuck
+// sub-expression. `let` is strict, so the body stops there and the second and
+// third assertions never run — but the counter reads 1, not 0, so
+// `AssertedNothing` does not fire and the run would otherwise be green on a
+// body that is two thirds imaginary. The residual check is what catches it:
+// every `test_*` is declared `-> Unit`, so a body that reduces to anything else
+// stopped early.
+//
+// Ordering is load-bearing and this file is the half that proves it. Its twin,
+// `test_runner_asserted_nothing.tg`, arrives with count 0 AND a residual;
+// checking the residual first would report that one `DID NOT FINISH` too and
+// bury the more useful diagnosis. Count first, residual second — one fixture
+// each.
+//
+// `tg_never_executable_probe` must stay absent from EXECUTABLE_EXTERNS; see the
+// twin's header.
+//
+// Expected: DID NOT FINISH (after 1 assertion), `1 did not finish`, exit 1.
+
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+extern "C" fn tg_never_executable_probe(x: Nat) -> Nat
+
+fn assert_eq_nat(a: Nat, b: Nat) -> Unit { tg_assert_eq_nat(a, b) }
+fn stuck_value() -> Nat { tg_never_executable_probe(1) }
+
+pub fn test_stops_after_the_first_of_three() -> Unit {
+    let _first = assert_eq_nat(1, 1);
+    let _stuck = stuck_value();
+    let _second = assert_eq_nat(2, 2);
+    assert_eq_nat(3, 3)
+}

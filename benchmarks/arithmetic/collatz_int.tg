@@ -1,0 +1,45 @@
+// Benchmark: numeric Collatz sequence length on the signed `Int` primitive
+// (ADR 14.9.26c AC 9)
+//
+// Tests: checked `* +`, guarded `/ %` (the zero-divisor and `MIN / -1`
+// branches sit on every division) and signed comparison, in a tail-style
+// recursion with an accumulator. No allocation, so no speed-up over the
+// Peano twin is the point — that twin allocates a cell per `Succ` and this one
+// allocates nothing; the interesting number is how much the four guards cost
+// per step next to a `Nat` loop with none.
+// Default: 100000 iterations of collatz(27) for a comparable runtime.
+// Usage: ./collatz_int [iterations]  (default: 100000)
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+#[partial]
+fn collatz_length(n: Int, steps: Int) -> Int {
+  if n <= 1 {
+    steps
+  } else if n % 2 == 0 {
+    collatz_length(n / 2, steps + 1)
+  } else {
+    collatz_length(3 * n + 1, steps + 1)
+  }
+}
+
+fn run_once() -> Int {
+  collatz_length(27, 0)
+}
+
+#[partial]
+fn repeat_bench(n: Nat, acc: Int) -> Int {
+  if n == 0 { acc } else { repeat_bench(n - 1, acc + run_once()) }
+}
+
+fn get_iterations() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 100000 }
+}
+
+fn main() -> Int {
+  // Default: 100000 iterations of collatz(27), each = 111 steps
+  // Total: 100000 * 111 = 11100000
+  repeat_bench(get_iterations(), 0)
+}

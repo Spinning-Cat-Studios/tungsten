@@ -14,7 +14,7 @@ use crate::elaborate::Elaborator;
 
 impl<'a> Elaborator<'a> {
     pub(super) fn collect_function(&mut self, func: &ast::FunctionDef) -> ElabResult<()> {
-        // Check for duplicate (allow overwrite if Phase A stub, ADR 5.5.26c)
+        // Check for duplicate (allow overwrite if Stub Registration stub, ADR 5.5.26c)
         if self.env.has_value(&func.name.name) && !self.allow_value_overwrite {
             return Err(ElabError::duplicate(func.name.span, &func.name.name));
         }
@@ -33,13 +33,10 @@ impl<'a> Elaborator<'a> {
     }
 
     pub(super) fn collect_type_def(&mut self, type_def: &ast::TypeDef) -> ElabResult<()> {
-        // Check for duplicate (but allow replacing stubs from Phase 1a
-        // and Phase A placeholders from per-module elaboration, ADR 5.5.26c)
+        // Check for duplicate (but allow replacing stubs from Type-Name Registration
+        // and Stub Registration placeholders from per-module elaboration, ADR 5.5.26c)
         if let Some(existing) = self.env.lookup_type(&type_def.name.name) {
-            let is_overwritable = matches!(existing.kind, TypeDefKind::Stub)
-                || existing.encoded_type.is_none()
-                || existing.defining_module.is_none();
-            if !is_overwritable {
+            if !existing.is_overwritable_by_collection() {
                 return Err(ElabError::duplicate(
                     type_def.name.span,
                     &type_def.name.name,
@@ -122,13 +119,10 @@ impl<'a> Elaborator<'a> {
     }
 
     pub(super) fn collect_type_alias(&mut self, alias: &ast::TypeAlias) -> ElabResult<()> {
-        // Check for duplicate (but allow replacing stubs from Phase 1a
-        // and Phase A placeholders from per-module elaboration, ADR 5.5.26c)
+        // Check for duplicate (but allow replacing stubs from Type-Name Registration
+        // and Stub Registration placeholders from per-module elaboration, ADR 5.5.26c)
         if let Some(existing) = self.env.lookup_type(&alias.name.name) {
-            let is_overwritable = matches!(existing.kind, TypeDefKind::Stub)
-                || existing.encoded_type.is_none()
-                || existing.defining_module.is_none();
-            if !is_overwritable {
+            if !existing.is_overwritable_by_collection() {
                 return Err(ElabError::duplicate(alias.name.span, &alias.name.name));
             }
         }
@@ -179,7 +173,7 @@ impl<'a> Elaborator<'a> {
     }
 
     pub(super) fn collect_theorem(&mut self, thm: &ast::TheoremDef) -> ElabResult<()> {
-        // Check for duplicate (allow overwrite if Phase A stub, ADR 5.5.26c)
+        // Check for duplicate (allow overwrite if Stub Registration stub, ADR 5.5.26c)
         if self.env.has_value(&thm.name.name) && !self.allow_value_overwrite {
             return Err(ElabError::duplicate(thm.name.span, &thm.name.name));
         }
@@ -198,7 +192,7 @@ impl<'a> Elaborator<'a> {
     }
 
     pub(super) fn collect_axiom(&mut self, axiom: &ast::AxiomDef) -> ElabResult<()> {
-        // Check for duplicate (allow overwrite if Phase A stub, ADR 5.5.26c)
+        // Check for duplicate (allow overwrite if Stub Registration stub, ADR 5.5.26c)
         if self.env.has_value(&axiom.name.name) && !self.allow_value_overwrite {
             return Err(ElabError::duplicate(axiom.name.span, &axiom.name.name));
         }

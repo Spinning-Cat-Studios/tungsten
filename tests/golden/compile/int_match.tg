@@ -1,0 +1,25 @@
+// Golden test (ADR 18.9.26e): integer match, compiled natively - the twin of
+// run/int_match.tg, so the conditional chain LLVM turns into a `switch`
+// selects the same arms the evaluator does. Each digit is one arm selection.
+// 123467.
+fn classify(n: Int) -> Nat {
+    match n {
+        -1 => 1,
+        0 | 7 => 2,
+        x if x > 0 => 3,
+        _ => 4
+    }
+}
+
+fn small(n: Nat) -> Nat {
+    match n {
+        0 => 5,
+        1 | 2 => 6,
+        _ => 7
+    }
+}
+
+fn main() -> Nat {
+    classify(-1) * 100000 + classify(7) * 10000 + classify(3) * 1000
+        + classify(-9) * 100 + small(2) * 10 + small(9)
+}

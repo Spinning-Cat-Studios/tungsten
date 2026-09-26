@@ -1,0 +1,299 @@
+// src/compiler/elab/exprs/matches/int_match/mod.tg
+// Integer `match` — a `match` on a `Nat` or `Int` scrutinee (ADR 18.9.26e),
+// the self-host mirror of the bootstrap's `elaborate/exprs/int_match/`.
+//
+// No new Core or CIR node: the arms lower to a chain of conditionals over the
+// existing equality primitives (`NatEq`; `IntBin` op code 5) against a
+// let-bound scrutinee:
+//
+//     let _int_scrut = scrutinee in
+//       if c1 then b1 else if c2 then b2 … else catch_all
+//
+// An or-of-literals tests `if eq1 then true else eq2`; a guard is
+// `if test then guard else false`; a variable arm binds the scrutinee for its
+// own guard and body only, so it never shadows a name a later arm uses. The
+// unguarded catch-all `plan.tg` requires is the chain's floor.
+//
+// The fixed scrutinee name is safe under nesting: each chain's `let` scopes
+// only that chain, as `_rest` does in `multi_arm.tg`.
+
+pub mod plan;
+
+use lexer::span::Span;
+use parser::ast::{Expr, MatchArm, MaybeExpr, NoExpr, SomeExpr, expr_span};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
+use elab::ffi::{
+    TypeHandle,
+    tg_term_if, tg_term_let, tg_term_var_named, tg_term_true, tg_term_false,
+    tg_term_nat_eq, tg_term_int_bin,
+    tg_type_bool, tg_type_nat, tg_type_int, tg_types_equal,
+    tg_string_to_cstr
+};
+use elab::env::{Env, env_bind_local, env_push_scope, env_pop_scope};
+use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr, add_expected_because};
+use elab::error::ExpMatchBranch;
+use elab::cir::{
+    CIRIf, CIRLet, CIRVar, CIRNatEq, CIRIntBin, CIRTrue, CIRFalse,
+    type_handle_to_codegen_type
+};
+use elab::exprs::{synth, check};
+use elab::exprs::matches::{ScrutInfo};
+use elab::exprs::matches::int_match::plan::{
+    TermCir, IntArmLiteral, IntArmTest, IntArmOneOf, IntArmCatchAll,
+    PlannedArm, IntPlanResult, IntPlanOk, IntPlanErr,
+    plan_int_match, missing_catch_all
+};
+
+/// The let-bound scrutinee every arm tests.
+type IntScrutinee = { ty: TypeHandle, is_int: Bool, var: TermCir }
+
+/// Where the match's result type comes from: nowhere yet, the context, or
+/// the first arm's body (whose span then explains a later arm's mismatch).
+type IntResultOrigin =
+    | IntResultUnknown
+    | IntResultExpected(TypeHandle)
+    | IntResultFromArm(TypeHandle, Span)
+
+type IntChainCtx = { scrut: IntScrutinee, origin: IntResultOrigin, span: Span }
+
+type MaybePatternTest = | NoPatternTest | SomePatternTest(TermCir)
+
+// ===========================================================================
+// ENTRY POINTS
+// ===========================================================================
+
+/// Is this scrutinee type one an integer match takes?
+pub fn is_integer_type(ty: TypeHandle) -> Bool {
+    tg_types_equal(ty, tg_type_nat()) || tg_types_equal(ty, tg_type_int())
+}
+
+pub fn elab_int_match(env: Env, scrut: ScrutInfo, arms: List<MatchArm>, span: Span) -> ElabExprResult {
+    elab_int_match_from(env, scrut, arms, IntResultUnknown, span)
+}
+
+pub fn elab_int_match_checked(env: Env, scrut: ScrutInfo, arms: List<MatchArm>, expected: TypeHandle, span: Span) -> ElabExprResult {
+    elab_int_match_from(env, scrut, arms, IntResultExpected(expected), span)
+}
+
+fn elab_int_match_from(env: Env, scrut: ScrutInfo, arms: List<MatchArm>, origin: IntResultOrigin, span: Span) -> ElabExprResult {
+    let is_int = tg_types_equal(scrut.ty, tg_type_int());
+    match plan_int_match(env, arms, is_int, span) {
+        IntPlanErr(e) => ElabExprErr(e),
+        IntPlanOk(planned) =>
+            let name = "_int_scrut";
+            let var: TermCir = {
+                term: tg_term_var_named(tg_string_to_cstr(name)),
+                cir: CIRVar(name, type_handle_to_codegen_type(scrut.ty))
+            };
+            let int_scrut: IntScrutinee = { ty: scrut.ty, is_int: is_int, var: var };
+            let ctx: IntChainCtx = { scrut: int_scrut, origin: origin, span: span };
+            let bound: TermCir = { term: scrut.term, cir: scrut.cir };
+            wrap_in_let(elab_int_chain(env, ctx, planned), name, scrut.ty, bound)
+    }
+}
+
+/// `let name = bound in <result>`, on the term and the CIR alike.
+fn wrap_in_let(result: ElabExprResult, name: String, ty: TypeHandle, bound: TermCir) -> ElabExprResult {
+    match result {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, result_ty, cir) =>
+            let ct = type_handle_to_codegen_type(ty);
+            ElabExprOk(env2, tg_term_let(tg_string_to_cstr(name), ty, bound.term, term), result_ty,
+                CIRLet(name, ct, bound.cir, cir))
+    }
+}
+
+// ===========================================================================
+// THE CHAIN: `if cond then body else <rest>`, front to back
+// ===========================================================================
+
+// The chain recurses on the arm list through three continuation helpers, so
+// no single parameter is a structural descent root: `#[partial]` throughout.
+#[partial]
+fn elab_int_chain(env: Env, ctx: IntChainCtx, planned: List<PlannedArm>) -> ElabExprResult {
+    match planned {
+        // Defensive: `plan_int_match` refuses a plan without its catch-all.
+        Nil() => ElabExprErr(missing_catch_all(ctx.span)),
+        Cons(arm, rest) => elab_int_link(env, ctx, arm, rest)
+    }
+}
+
+#[partial]
+fn elab_int_link(env: Env, ctx: IntChainCtx, arm: PlannedArm, rest: List<PlannedArm>) -> ElabExprResult {
+    match rest {
+        Nil() => elab_arm_body(env, ctx, arm),
+        Cons(_, _) => link_after_condition(elab_arm_condition(env, ctx.scrut, arm), ctx, arm, rest)
+    }
+}
+
+#[partial]
+fn link_after_condition(condition: ElabExprResult, ctx: IntChainCtx, arm: PlannedArm, rest: List<PlannedArm>) -> ElabExprResult {
+    match condition {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, cond_term, _, cond_cir) =>
+            let cond: TermCir = { term: cond_term, cir: cond_cir };
+            link_after_body(elab_arm_body(env2, ctx, arm), cond, ctx, arm, rest)
+    }
+}
+
+#[partial]
+fn link_after_body(body: ElabExprResult, cond: TermCir, ctx: IntChainCtx, arm: PlannedArm, rest: List<PlannedArm>) -> ElabExprResult {
+    match body {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env3, body_term, body_ty, body_cir) =>
+            let fixed: IntChainCtx = { scrut: ctx.scrut, origin: fix_result_type(ctx.origin, body_ty, arm.arm.body), span: ctx.span };
+            let then_branch: TermCir = { term: body_term, cir: body_cir };
+            finish_link(elab_int_chain(env3, fixed, rest), cond, then_branch)
+    }
+}
+
+/// The first arm's body fixes the result type when the context did not.
+fn fix_result_type(origin: IntResultOrigin, body_ty: TypeHandle, body: Expr) -> IntResultOrigin {
+    match origin {
+        IntResultUnknown() => IntResultFromArm(body_ty, expr_span(body)),
+        _ => origin
+    }
+}
+
+fn finish_link(rest: ElabExprResult, cond: TermCir, then_branch: TermCir) -> ElabExprResult {
+    match rest {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env4, else_term, result_ty, else_cir) =>
+            ElabExprOk(env4, tg_term_if(cond.term, then_branch.term, else_term), result_ty,
+                CIRIf(cond.cir, then_branch.cir, else_cir))
+    }
+}
+
+// ===========================================================================
+// ONE ARM: its condition and its body, each in the arm's own scope
+// ===========================================================================
+
+fn arm_binder(test: IntArmTest) -> String {
+    match test {
+        IntArmCatchAll(name) => name,
+        IntArmOneOf(_) => "_"
+    }
+}
+
+/// Elaborate an arm's guard or body in a scope binding its variable, if it
+/// has one, and wrap the result in `let x = _int_scrut in …`.
+fn in_arm_scope(scrut: IntScrutinee, binder: String, result_of: ElabExprResult) -> ElabExprResult {
+    match result_of {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, ty, cir) =>
+            let env3 = env_pop_scope(env2);
+            if binder == "_" {
+                ElabExprOk(env3, term, ty, cir)
+            } else {
+                let ct = type_handle_to_codegen_type(scrut.ty);
+                ElabExprOk(env3, tg_term_let(tg_string_to_cstr(binder), scrut.ty, scrut.var.term, term), ty,
+                    CIRLet(binder, ct, scrut.var.cir, cir))
+            }
+    }
+}
+
+fn arm_scope(env: Env, scrut: IntScrutinee, binder: String) -> Env {
+    let scoped = env_push_scope(env);
+    if binder == "_" { scoped } else { env_bind_local(scoped, binder, scrut.ty) }
+}
+
+fn elab_arm_body(env: Env, ctx: IntChainCtx, arm: PlannedArm) -> ElabExprResult {
+    let binder = arm_binder(arm.test);
+    let scoped = arm_scope(env, ctx.scrut, binder);
+    in_arm_scope(ctx.scrut, binder, elab_body_expr(scoped, ctx.origin, arm.arm.body))
+}
+
+fn elab_body_expr(env: Env, origin: IntResultOrigin, body: Expr) -> ElabExprResult {
+    match origin {
+        IntResultUnknown() => synth(env, body),
+        IntResultExpected(ty) => check(env, body, ty),
+        IntResultFromArm(ty, first_span) => with_branch_context(check(env, body, ty), first_span)
+    }
+}
+
+fn with_branch_context(result: ElabExprResult, first_span: Span) -> ElabExprResult {
+    match result {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpMatchBranch(first_span))),
+        _ => result
+    }
+}
+
+/// The arm's pattern test, then its guard, short-circuit.
+fn elab_arm_condition(env: Env, scrut: IntScrutinee, arm: PlannedArm) -> ElabExprResult {
+    let test = pattern_test(scrut, arm.test);
+    match arm.arm.guard {
+        NoExpr() =>
+            let unguarded = test_or_true(test);
+            ElabExprOk(env, unguarded.term, tg_type_bool(), unguarded.cir),
+        SomeExpr(guard) => guard_after_test(elab_guard(env, scrut, arm.test, guard), test)
+    }
+}
+
+fn elab_guard(env: Env, scrut: IntScrutinee, test: IntArmTest, guard: Expr) -> ElabExprResult {
+    let binder = arm_binder(test);
+    in_arm_scope(scrut, binder, check(arm_scope(env, scrut, binder), guard, tg_type_bool()))
+}
+
+fn guard_after_test(guard: ElabExprResult, test: MaybePatternTest) -> ElabExprResult {
+    match guard {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, guard_term, ty, guard_cir) =>
+            let checked: TermCir = { term: guard_term, cir: guard_cir };
+            let combined = test_then(test, checked);
+            ElabExprOk(env2, combined.term, ty, combined.cir)
+    }
+}
+
+/// `if test then guard else false`, or the bare guard on a catch-all.
+fn test_then(test: MaybePatternTest, guard: TermCir) -> TermCir {
+    match test {
+        NoPatternTest() => guard,
+        SomePatternTest(t) =>
+            { term: tg_term_if(t.term, guard.term, tg_term_false()), cir: CIRIf(t.cir, guard.cir, CIRFalse()) }
+    }
+}
+
+fn test_or_true(test: MaybePatternTest) -> TermCir {
+    match test {
+        // Defensive: an unguarded catch-all is the floor, never a link.
+        NoPatternTest() => { term: tg_term_true(), cir: CIRTrue() },
+        SomePatternTest(t) => t
+    }
+}
+
+fn pattern_test(scrut: IntScrutinee, test: IntArmTest) -> MaybePatternTest {
+    match test {
+        IntArmCatchAll(_) => NoPatternTest,
+        IntArmOneOf(literals) => SomePatternTest(any_literal_equals(scrut, literals))
+    }
+}
+
+/// `s == l1 || s == l2 …`, as `if eq1 then true else …`.
+fn any_literal_equals(scrut: IntScrutinee, literals: List<IntArmLiteral>) -> TermCir {
+    match literals {
+        // Defensive: an or-pattern holds at least one literal.
+        Nil() => { term: tg_term_false(), cir: CIRFalse() },
+        Cons(literal, rest) =>
+            or_else_equals(literal_equals(scrut, literal), list_is_empty(rest), any_literal_equals(scrut, rest))
+    }
+}
+
+/// The last literal is its own test; any other is `if eq then true else <tail>`.
+fn or_else_equals(equality: TermCir, is_last: Bool, tail: TermCir) -> TermCir {
+    if is_last {
+        equality
+    } else {
+        { term: tg_term_if(equality.term, tg_term_true(), tail.term), cir: CIRIf(equality.cir, CIRTrue(), tail.cir) }
+    }
+}
+
+/// `scrutinee == literal` on the scrutinee's own equality primitive.
+fn literal_equals(scrut: IntScrutinee, literal: IntArmLiteral) -> TermCir {
+    if scrut.is_int {
+        // ADR 14.9.26c: `IntBin(Eq)` — op code 5.
+        { term: tg_term_int_bin(5, scrut.var.term, literal.value.term), cir: CIRIntBin(5, scrut.var.cir, literal.value.cir) }
+    } else {
+        { term: tg_term_nat_eq(scrut.var.term, literal.value.term), cir: CIRNatEq(scrut.var.cir, literal.value.cir) }
+    }
+}

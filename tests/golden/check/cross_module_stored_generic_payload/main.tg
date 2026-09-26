@@ -1,0 +1,19 @@
+// Regression test for ADR 21.7.26e wall 1 (cross-module axis):
+// a generic instantiation stored in a constructor payload must normalize
+// equal to a fresh spelling of the same type, with the generic ADT (Tree,
+// the k=2 StrMap shape) defined in another module. Before the fix,
+// construction failed with an identically-rendered E0010.
+
+pub mod tree;
+pub mod holder;
+
+use tree::{Tree, TreeLeaf};
+use holder::{Bucket, Holder, HolderEmpty, HolderFull, hold_through_generic};
+
+fn main() -> Nat {
+    let empty: Tree<Bucket> = TreeLeaf;
+    match hold_through_generic(HolderEmpty, empty) {
+        HolderFull(_) => 1,
+        HolderEmpty() => 0
+    }
+}

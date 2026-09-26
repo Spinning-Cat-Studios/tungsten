@@ -1,0 +1,123 @@
+// String comparison: equality, lexicographic order, prefix and suffix tests.
+//
+// Every loop here walks a `Nat` index toward a length, so none of them is
+// structurally recursive; each carries the `#[partial]` that ADR 11.8.26b's
+// annotation pass added, with the same justification.
+
+use driver::ffi::{string_len, string_char_at_internal};
+
+/// Check if two strings are equal.
+pub fn string_eq(a: String, b: String) -> Bool {
+    let len_a = string_len(a);
+    let len_b = string_len(b);
+    if len_a != len_b {
+        false
+    } else {
+        string_eq_loop(a, b, 0, len_a)
+    }
+}
+
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
+fn string_eq_loop(a: String, b: String, i: Nat, len: Nat) -> Bool {
+    if i >= len {
+        true
+    } else {
+        let ca = string_char_at_internal(a, i);
+        let cb = string_char_at_internal(b, i);
+        if ca != cb {
+            false
+        } else {
+            string_eq_loop(a, b, i + 1, len)
+        }
+    }
+}
+
+/// Lexicographic less-than comparison.
+pub fn string_lt(a: String, b: String) -> Bool {
+    let len_a = string_len(a);
+    let len_b = string_len(b);
+    let min_len = if len_a < len_b { len_a } else { len_b };
+    let ctx: StringCmpCtx = { a: a, b: b, min_len: min_len, len_a: len_a, len_b: len_b };
+    string_lt_loop(ctx, 0)
+}
+
+/// Loop-invariant context for lexicographic string comparison.
+pub type StringCmpCtx = { a: String, b: String, min_len: Nat, len_a: Nat, len_b: Nat }
+
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
+fn string_lt_loop(ctx: StringCmpCtx, i: Nat) -> Bool {
+    if i >= ctx.min_len {
+        ctx.len_a < ctx.len_b
+    } else {
+        let ca = string_char_at_internal(ctx.a, i);
+        let cb = string_char_at_internal(ctx.b, i);
+        if ca < cb { true }
+        else if ca > cb { false }
+        else { string_lt_loop(ctx, i + 1) }
+    }
+}
+
+/// Check if string starts with prefix.
+pub fn starts_with(s: String, prefix: String) -> Bool {
+    let s_len = string_len(s);
+    let p_len = string_len(prefix);
+    if p_len > s_len {
+        false
+    } else {
+        starts_with_loop(s, prefix, 0, p_len)
+    }
+}
+
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
+fn starts_with_loop(s: String, prefix: String, i: Nat, p_len: Nat) -> Bool {
+    if i >= p_len {
+        true
+    } else {
+        let cs = string_char_at_internal(s, i);
+        let cp = string_char_at_internal(prefix, i);
+        if cs != cp {
+            false
+        } else {
+            starts_with_loop(s, prefix, i + 1, p_len)
+        }
+    }
+}
+
+/// Check if string ends with suffix.
+pub fn ends_with(s: String, suffix: String) -> Bool {
+    let s_len = string_len(s);
+    let suf_len = string_len(suffix);
+    if suf_len > s_len {
+        false
+    } else {
+        let offset = s_len - suf_len;
+        ends_with_loop(s, suffix, 0, suf_len, offset)
+    }
+}
+
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
+fn ends_with_loop(s: String, suffix: String, i: Nat, suf_len: Nat, offset: Nat) -> Bool {
+    if i >= suf_len {
+        true
+    } else {
+        let cs = string_char_at_internal(s, offset + i);
+        let csuf = string_char_at_internal(suffix, i);
+        if cs != csuf {
+            false
+        } else {
+            ends_with_loop(s, suffix, i + 1, suf_len, offset)
+        }
+    }
+}

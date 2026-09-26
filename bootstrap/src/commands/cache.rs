@@ -1,40 +1,55 @@
-//! Cache command handlers: clean, clean-all, stats, prune.
+//! Cache command handlers: clean, clean-all, prune.
+//!
+//! `stats`/`status` lives in [`super::cache_stats`], where its rendering is
+//! expressed as pure functions so the gates can reach it (ADR 5.8.26d P3).
 
+use std::path::Path;
 use std::process::ExitCode;
 
-/// Clean command: clear the build cache for the current project.
-pub fn cmd_clean(verbose: bool) -> ExitCode {
-    use std::env;
-    use tungsten_bootstrap::cache::BuildCache;
+use tungsten_bootstrap::cache::{BuildCache, PruneStats};
 
-    let cwd = match env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: could not get current directory: {e}");
-            return ExitCode::from(3);
-        }
-    };
+use super::cache_outcome::CacheOutcome;
+use super::cache_root;
 
-    let mut cache = match BuildCache::new(&cwd, verbose) {
+/// Clear the build cache for `file`'s project (or `cwd`), reporting the root.
+///
+/// The root is reported for the same reason `cache status` reports it
+/// (ADR 5.8.26d D5): the writer resolves it from the ENTRY FILE's parent, so a
+/// bare run from the repo root clears the cwd — quite possibly nothing — while
+/// the project's cache sits elsewhere. Silently clearing the wrong cache is
+/// worse than silently reporting the wrong one, because the user then believes
+/// they have a cold tree.
+pub(crate) fn run_clean(verbose: bool, file: Option<&Path>, cwd: &Path) -> CacheOutcome {
+    if let Some(msg) = cache_root::operand_error(file) {
+        return CacheOutcome::Failed(msg);
+    }
+    let root = cache_root::resolve(file, cwd);
+
+    let mut cache = match BuildCache::new(&root.path, verbose) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: could not open cache: {e}");
-            return ExitCode::from(3);
-        }
+        Err(e) => return CacheOutcome::Failed(format!("could not open cache: {e}")),
     };
 
     match cache.clear() {
         Ok(()) => {
             // Also clean elaboration cache (ADR 10.5.26l)
             let _ = cache.clean_elab_cache();
-            println!("✓ Cache cleared");
-            ExitCode::SUCCESS
+            CacheOutcome::Reported(vec![format!("✓ Cache cleared ({})", root.path.display())])
         }
-        Err(e) => {
-            eprintln!("error: could not clear cache: {e}");
-            ExitCode::from(3)
-        }
+        Err(e) => CacheOutcome::Failed(format!("could not clear cache: {e}")),
     }
+}
+
+/// Clean command: clear the build cache for a project.
+pub fn cmd_clean(verbose: bool, file: Option<&Path>) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: could not get current directory: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    run_clean(verbose, file, &cwd).report()
 }
 
 /// Recursively find and remove all `.tungsten` directories under the current
@@ -124,142 +139,64 @@ fn collect_tungsten_dirs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf
     }
 }
 
-/// Cache stats command: show cache statistics.
-pub fn cmd_cache_stats(verbose: bool, json: bool) -> ExitCode {
-    use std::env;
-    use tungsten_bootstrap::cache::BuildCache;
-
-    let cwd = match env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: could not get current directory: {e}");
-            return ExitCode::from(3);
-        }
-    };
-
-    let cache = match BuildCache::new(&cwd, verbose) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: could not open cache: {e}");
-            return ExitCode::from(3);
-        }
-    };
-
-    let stats = match cache.stats() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: could not get cache stats: {e}");
-            return ExitCode::from(3);
-        }
-    };
-
-    let elab_stats = cache.elab_cache_stats().ok();
-
-    if json {
-        let oldest_ms = stats.oldest_accessed.map_or(0, |d| d.as_millis());
-        let newest_ms = stats.newest_accessed.map_or(0, |d| d.as_millis());
-        let elab_count = elab_stats.as_ref().map_or(0, |e| e.entry_count);
-        let elab_bytes = elab_stats.as_ref().map_or(0, |e| e.size_bytes);
-        println!(
-            r#"{{"size_bytes":{},"entry_count":{},"max_size_mb":{},"oldest_accessed_ms":{},"newest_accessed_ms":{},"elab_entry_count":{},"elab_size_bytes":{}}}"#,
-            stats.size_bytes,
-            stats.entry_count,
-            stats.max_size_mb,
-            oldest_ms,
-            newest_ms,
-            elab_count,
-            elab_bytes
-        );
+/// Render a completed prune, root first (ADR 5.8.26d D5).
+///
+/// Pure so the KB arithmetic and the empty-prune branch are assertable; the
+/// same operators inside a `println!` survived mutation testing on `cache status`.
+pub(crate) fn format_prune(stats: &PruneStats, root: &Path) -> Vec<String> {
+    let line = if stats.removed_count == 0 {
+        format!(
+            "✓ Cache already within limits ({} KB)",
+            stats.new_size_bytes / 1024
+        )
     } else {
-        let size_kb = stats.size_bytes / 1024;
-        let size_mb = stats.size_bytes / (1024 * 1024);
-
-        println!("Cache Statistics:");
-        println!("  AST entries:  {}", stats.entry_count);
-        if size_mb > 0 {
-            println!("  AST size:     {size_mb} MB ({size_kb} KB)");
-        } else {
-            println!("  AST size:     {size_kb} KB");
-        }
-        println!("  Max size:     {} MB", stats.max_size_mb);
-
-        if let Some(elab) = &elab_stats {
-            let elab_kb = elab.size_bytes / 1024;
-            println!("  Elab entries: {}", elab.entry_count);
-            println!("  Elab size:    {elab_kb} KB");
-            if elab.full_output_count > 0 {
-                let full_kb = elab.full_output_bytes / 1024;
-                let avg_kb = full_kb / elab.full_output_count as u64;
-                let compressed = if cfg!(feature = "compress") {
-                    " (zstd)"
-                } else {
-                    ""
-                };
-                println!(
-                    "  Full-output:  {} entries ({full_kb} KB, avg {avg_kb} KB/entry{compressed})",
-                    elab.full_output_count
-                );
-            }
-        }
-
-        if let Some(oldest) = stats.oldest_accessed {
-            println!("  Oldest:       {} ago", format_duration_ago(oldest));
-        }
-        if let Some(newest) = stats.newest_accessed {
-            println!("  Newest:       {} ago", format_duration_ago(newest));
-        }
-    }
-
-    ExitCode::SUCCESS
+        format!(
+            "✓ Pruned {} entries, freed {} KB (new size: {} KB)",
+            stats.removed_count,
+            stats.freed_bytes / 1024,
+            stats.new_size_bytes / 1024
+        )
+    };
+    vec![line, format!("  Root:         {}", root.display())]
 }
 
-/// Cache prune command: remove least recently used entries.
-pub fn cmd_cache_prune(verbose: bool, target_mb: Option<u64>) -> ExitCode {
-    use std::env;
-    use tungsten_bootstrap::cache::BuildCache;
+/// Prune `file`'s project cache (or `cwd`'s) to a target size.
+pub(crate) fn run_cache_prune(
+    verbose: bool,
+    target_mb: Option<u64>,
+    file: Option<&Path>,
+    cwd: &Path,
+) -> CacheOutcome {
+    if let Some(msg) = cache_root::operand_error(file) {
+        return CacheOutcome::Failed(msg);
+    }
+    let root = cache_root::resolve(file, cwd);
 
-    let cwd = match env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: could not get current directory: {e}");
-            return ExitCode::from(3);
-        }
-    };
-
-    let mut cache = match BuildCache::new(&cwd, verbose) {
+    let mut cache = match BuildCache::new(&root.path, verbose) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: could not open cache: {e}");
-            return ExitCode::from(3);
-        }
+        Err(e) => return CacheOutcome::Failed(format!("could not open cache: {e}")),
     };
 
     match cache.prune(target_mb) {
-        Ok(stats) => {
-            if stats.removed_count == 0 {
-                println!(
-                    "✓ Cache already within limits ({} KB)",
-                    stats.new_size_bytes / 1024
-                );
-            } else {
-                println!(
-                    "✓ Pruned {} entries, freed {} KB (new size: {} KB)",
-                    stats.removed_count,
-                    stats.freed_bytes / 1024,
-                    stats.new_size_bytes / 1024
-                );
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("error: could not prune cache: {e}");
-            ExitCode::from(3)
-        }
+        Ok(stats) => CacheOutcome::Reported(format_prune(&stats, &root.path)),
+        Err(e) => CacheOutcome::Failed(format!("could not prune cache: {e}")),
     }
 }
 
+/// Cache prune command: remove least recently used entries.
+pub fn cmd_cache_prune(verbose: bool, target_mb: Option<u64>, file: Option<&Path>) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: could not get current directory: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    run_cache_prune(verbose, target_mb, file, &cwd).report()
+}
+
 /// Format a duration as a human-readable "X ago" string.
-fn format_duration_ago(timestamp: std::time::Duration) -> String {
+pub(super) fn format_duration_ago(timestamp: std::time::Duration) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let now = SystemTime::now()
@@ -279,3 +216,8 @@ fn format_duration_ago(timestamp: std::time::Duration) -> String {
         format!("{}d", secs / 86400)
     }
 }
+
+// Tests: cache_tests.rs
+#[cfg(test)]
+#[path = "cache_tests.rs"]
+mod cache_tests;

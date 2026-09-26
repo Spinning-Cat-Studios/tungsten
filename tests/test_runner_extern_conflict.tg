@@ -1,0 +1,23 @@
+// A layout no harness can serve, so the runner must refuse it with ONE error.
+//
+// ADR 7.8.26b §2.2: standalone mode may declare the `tg_*` externs it needs,
+// but only those the program does not already declare. Here the program
+// declares `tg_println` with a DIFFERENT arity than the harness needs — so the
+// harness can neither re-declare it (a flat-name-table collision, §1.2) nor
+// reuse it (a type error one call later). Failing closed with a named symbol
+// is the correct answer; the status quo for the analogous tree-mode case was
+// 77 unactionable E0016s.
+//
+// Expected under `tungsten1 test`: exit 1, and exactly one line reading
+// `error: cannot generate a test harness for … : tg_println is declared at
+// root with 1 parameter(s); the harness needs 2`.
+//
+// The bootstrap runs this file normally — it is an evaluator and generates no
+// harness — so this is a deliberate, documented divergence from the outcome
+// conformance relation rather than a gap in it.
+
+extern "C" fn tg_println(s: Nat) -> Unit
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+fn assert_eq_nat(a: Nat, b: Nat) -> Unit { tg_assert_eq_nat(a, b) }
+
+pub fn test_conflicting_layout() -> Unit { assert_eq_nat(1, 1) }

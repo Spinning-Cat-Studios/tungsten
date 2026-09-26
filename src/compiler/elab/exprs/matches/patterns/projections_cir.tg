@@ -1,0 +1,108 @@
+// src/compiler/elab/exprs/matches/patterns/projections_cir.tg
+// The CIR half of the one projection builder (ADR 3.9.26g P2).
+//
+// A structural mirror of `projections.tg`: the same walk, the same pattern
+// arms, and — the point — the same `product_field_projection` chain per field.
+// Neither file states the nesting convention, so neither can state it wrongly;
+// `projection_path.tg` states it once and both fold the list it returns. That is
+// D3's "derives from" branch rather than its "asserted equal" fallback: there is
+// nothing left to compare, because there is only one sequence.
+//
+// The two sides differ where the two IRs differ and nowhere else. A CIR `let`
+// carries a `CodegenType`, and the backend re-derives a binding's type from the
+// value bound, so this side passes `ct_unit()` exactly as the builders it
+// replaces did.
+
+use parser::ast::{
+    Pattern, PatVar, PatWildcard, PatTuple,
+    Ident, ident_name
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_len;
+use elab::ffi::TypeHandle;
+use elab::cir::{CodegenIR, CIRLet, CIRFst, CIRSnd, ct_unit};
+use elab::exprs::matches::patterns::projection_path::{
+    ProjectionStep, StepFst, StepSnd,
+    product_field_projection, product_field_type
+};
+
+/// The product a run of CIR field projections comes out of.
+type CirProductSource = { ty: TypeHandle, src: CodegenIR, arity: Nat }
+
+/// Project each element of a right-nested product into CIR `let` bindings.
+///
+/// The mirror of `wrap_product_projections`, and the only CIR projection
+/// builder in the compiler.
+// Partial (ADR 3.9.26g): the entry hands `pats` to the indexed walk unchanged,
+// which is not a strict subterm of itself, and the walk descends on it from
+// there. Executable compiler code that no proof reaches; E0063 fires if that
+// ever changes.
+#[partial]
+pub fn wrap_product_projections_cir(
+    pats: List<Pattern>,
+    ty: TypeHandle,
+    src: CodegenIR,
+    body: CodegenIR
+) -> CodegenIR {
+    let product: CirProductSource = { ty: ty, src: src, arity: list_len(pats) };
+    wrap_cir_field_projections_from(pats, product, body, 0)
+}
+
+fn wrap_cir_field_projections_from(
+    pats: List<Pattern>,
+    product: CirProductSource,
+    body: CodegenIR,
+    index: Nat
+) -> CodegenIR {
+    match pats {
+        Nil() => body,
+        Cons(pat, rest) =>
+            let inner = wrap_cir_field_projections_from(rest, product, body, index + 1);
+            let steps = product_field_projection(index, product.arity);
+            wrap_cir_field_projection(
+                pat,
+                product_field_type(product.ty, steps),
+                project_cir_along_steps(product.src, steps),
+                inner
+            )
+    }
+}
+
+/// Bind one field, mirroring `wrap_field_projection`.
+///
+/// A wildcard binds nothing and emits no `let` — the same choice the term side
+/// makes. The builder this replaces emitted `let _ = <projection>`, a binding
+/// nothing can name and a projection with no effect to keep.
+fn wrap_cir_field_projection(
+    p: Pattern,
+    ty: TypeHandle,
+    src: CodegenIR,
+    body: CodegenIR
+) -> CodegenIR {
+    match p {
+        PatVar(id) =>
+            CIRLet(ident_name(id), ct_unit(), src, body),
+        PatWildcard(_) => body,
+        PatTuple(sub_pats, _) =>
+            wrap_product_projections_cir(sub_pats, ty, src, body),
+        _ => body
+    }
+}
+
+/// Fold a projection chain into `CIRFst`/`CIRSnd`, in application order.
+///
+/// Public for the same reason as its term-side twin (ADR 4.9.26b): record field
+/// access folds this chain too, and a second folder is a second convention.
+pub fn project_cir_along_steps(src: CodegenIR, steps: List<ProjectionStep>) -> CodegenIR {
+    match steps {
+        Nil() => src,
+        Cons(step, rest) => project_cir_along_steps(project_cir_one_step(src, step), rest)
+    }
+}
+
+fn project_cir_one_step(src: CodegenIR, step: ProjectionStep) -> CodegenIR {
+    match step {
+        StepFst() => CIRFst(src),
+        StepSnd() => CIRSnd(src)
+    }
+}

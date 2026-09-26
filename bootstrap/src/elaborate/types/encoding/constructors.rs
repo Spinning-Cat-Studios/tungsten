@@ -12,6 +12,84 @@ use crate::elaborate::ElabResult;
 use crate::elaborate::Elaborator;
 use tungsten_core::Type;
 
+/// Encode a constructor's field types as the canonical **right**-nested
+/// product (`(T1 × (T2 × T3))`) — the layout stored encodings and codegen
+/// consume.
+///
+/// Shared by the canonical encoder and `normalize_for_comparison`'s ADT
+/// expansion so the two spellings of the same ADT can never diverge on
+/// product associativity again (ADR 21.7.26e wall 1: the normalize-side
+/// copy diverged, so every ≥3-field constructor of a generic ADT failed
+/// `types_equal` against its own stored encoding).
+///
+/// # Why right, and why it changed (ADR 1.8.26b D1)
+///
+/// Until 1.8.26b this built *left*-nested, and was the only left-nested
+/// product in the language. Everything a value actually flows through is
+/// right-nested, so the type and the value disagreed at arity ≥ 3 — below
+/// three there is no nesting and the two coincide, which is why the defect
+/// class presents with an exact arity boundary rather than as a general
+/// breakage. Four independent witnesses, all measured, all agreeing that the
+/// *type* side was the outlier:
+///
+/// | Witness | Nesting |
+/// |---|---|
+/// | `build_product_value` (what `AdtConstruct` carries) | right |
+/// | tuple types (`parser::types`), values and projections | right |
+/// | `wrapping.rs`, the nested-pattern destructurer | right |
+/// | the **self-hosted** encoder (`elab/items/collect/types/helpers.tg`) | right |
+///
+/// The disagreement was not confined to the comparator: `match Box2 { B3(a,
+/// b, c) => … }` on a 3-field constructor projected `Fst(Fst(v))` into a
+/// right-nested value and went silently Stuck.
+pub(crate) fn ctor_fields_product(field_types: Vec<Type>) -> Type {
+    let mut fields = field_types.into_iter().rev();
+    let Some(last) = fields.next() else {
+        return Type::Unit;
+    };
+    fields.fold(last, |product, field_ty| Type::product(field_ty, product))
+}
+
+/// Build a sum type from encoded constructor payloads.
+///
+/// Policy (ADR 2.2.26):
+/// - 0 constructors → `Void`
+/// - 1 constructor → bare payload (no Sum wrapper)
+/// - 2 constructors → `Sum(ctor1, ctor2)`
+/// - 3+ constructors → `Adt(name, type_args, [(ctor_name, payload), ...])`
+///
+/// A **free function with no elaborator state**, because three producers now
+/// share it and only one of them has an `Elaborator`: the canonical stored
+/// encoder, `normalize_for_comparison`'s ADT expansion (ADR 21.7.26e wall 1 —
+/// its private copy built right-nested `Sum` chains for 3+ constructors,
+/// diverging from this policy), and comparator synthesis' instantiation
+/// expander (ADR 1.8.26c), which runs from a `ProjectOutput` at gate time and
+/// so cannot reach the elaborator at all.
+pub(crate) fn build_adt_sum_body(
+    constructor_types: Vec<Type>,
+    constructors: &[Constructor],
+    name: &str,
+    type_args: &[Type],
+) -> Type {
+    if constructor_types.is_empty() {
+        Type::Void
+    } else if constructor_types.len() == 1 {
+        constructor_types.into_iter().next().unwrap()
+    } else if constructor_types.len() == 2 {
+        let mut iter = constructor_types.into_iter();
+        let left = iter.next().unwrap();
+        let right = iter.next().unwrap();
+        Type::sum(left, right)
+    } else {
+        let variants: Vec<(String, Type)> = constructors
+            .iter()
+            .zip(constructor_types)
+            .map(|(ctor, ty)| (ctor.name.clone(), ty))
+            .collect();
+        Type::adt(name.to_string(), type_args.to_vec(), variants)
+    }
+}
+
 impl<'a> Elaborator<'a> {
     /// Encode all constructors of an ADT into their product types.
     pub(super) fn encode_constructors(
@@ -74,38 +152,6 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    /// Build a sum type from encoded constructor payloads.
-    ///
-    /// Policy (ADR 2.2.26):
-    /// - 0 constructors → `Void`
-    /// - 1 constructor → bare payload (no Sum wrapper)
-    /// - 2 constructors → `Sum(ctor1, ctor2)`
-    /// - 3+ constructors → `Adt(name, type_args, [(ctor_name, payload), ...])`
-    pub(super) fn build_adt_sum_body(
-        constructor_types: Vec<Type>,
-        constructors: &[Constructor],
-        name: &str,
-        type_args: &[Type],
-    ) -> Type {
-        if constructor_types.is_empty() {
-            Type::Void
-        } else if constructor_types.len() == 1 {
-            constructor_types.into_iter().next().unwrap()
-        } else if constructor_types.len() == 2 {
-            let mut iter = constructor_types.into_iter();
-            let left = iter.next().unwrap();
-            let right = iter.next().unwrap();
-            Type::sum(left, right)
-        } else {
-            let variants: Vec<(String, Type)> = constructors
-                .iter()
-                .zip(constructor_types)
-                .map(|(ctor, ty)| (ctor.name.clone(), ty))
-                .collect();
-            Type::adt(name.to_string(), type_args.to_vec(), variants)
-        }
-    }
-
     /// Record provenance for a μ-binder (ADR 13.4.26c §3).
     fn record_mu_provenance(
         &mut self,
@@ -149,20 +195,12 @@ impl<'a> Elaborator<'a> {
         ctx: &FieldSubstCtx,
         mu_encoding_stack: &mut HashSet<String>,
     ) -> Type {
-        if ctor.fields.is_empty() {
-            Type::Unit
-        } else if ctor.fields.len() == 1 {
-            self.substitute_in_field_impl(&ctor.fields[0], ctx, mu_encoding_stack)
-        } else {
-            let mut fields = ctor.fields.iter();
-            let mut product =
-                self.substitute_in_field_impl(fields.next().unwrap(), ctx, mu_encoding_stack);
-            for field in fields {
-                let field_ty = self.substitute_in_field_impl(field, ctx, mu_encoding_stack);
-                product = Type::product(product, field_ty);
-            }
-            product
-        }
+        let field_types: Vec<Type> = ctor
+            .fields
+            .iter()
+            .map(|field| self.substitute_in_field_impl(field, ctx, mu_encoding_stack))
+            .collect();
+        ctor_fields_product(field_types)
     }
 
     /// Substitute type parameters and self-references in a field type (with cycle detection).

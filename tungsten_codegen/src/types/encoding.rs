@@ -20,6 +20,18 @@ impl<'ctx> TypeLowering<'ctx> {
         self.type_size_fallback(ty)
     }
 
+    /// Get the ABI alignment of an LLVM type in bytes (ADR 1.7.26e §2.1 —
+    /// canonical `align` attribute on sret / indirect-param buffer slots).
+    /// Uses LLVM `TargetData` when available; falls back to 8 (the natural
+    /// alignment of every Tungsten scalar) when not.
+    #[must_use]
+    pub fn type_align(&self, ty: BasicTypeEnum<'ctx>) -> u32 {
+        if let Some(ref td) = self.target_data {
+            return td.get_abi_alignment(&ty);
+        }
+        8
+    }
+
     /// Fallback size calculation with conservative alignment padding.
     /// Used when `TargetData` is not available.
     fn type_size_fallback(&self, ty: BasicTypeEnum<'ctx>) -> u64 {
@@ -64,10 +76,37 @@ impl<'ctx> TypeLowering<'ctx> {
         max_size.max(1) // Minimum 1 byte for nullary variants
     }
 
+    /// THE tagged-union layout authority: `{ i32 tag, [N x i8] }`, where `N`
+    /// is the size of the largest variant payload (W5, ADR 11.4.26c).
+    ///
+    /// Every route that lowers a multi-constructor ADT or structural `Sum` —
+    /// `lower_sum_type`, `lower_adt`, `lower_nullary_adt`, `lower_app` — MUST
+    /// build the value type through here. Two routes with private layout rules
+    /// is how the W4/W5 split-brain miscompile class arises: a call result
+    /// typed by one route meets a construction typed by another in the same
+    /// merge, tripping the ADR 2.7.26b T2 hard error (or, pre-2.7.26b,
+    /// silently truncating). The opaque `[N x i8]` payload — never the typed
+    /// largest variant — is also what keeps register decomposition uniform on
+    /// ARM64 (W5's original rationale).
+    pub(super) fn tagged_union_blob_type(
+        &mut self,
+        variants: &[(String, Type)],
+    ) -> BasicTypeEnum<'ctx> {
+        let tag_type = self.context.i32_type();
+        let largest = self.compute_largest_payload_llvm_type(variants);
+        let data_size = self.type_size(largest);
+        let data_type = self.context.i8_type().array_type(data_size as u32);
+        self.context
+            .struct_type(&[tag_type.into(), data_type.into()], false)
+            .into()
+    }
+
     /// Compute the concrete LLVM type of the largest variant payload.
     ///
-    /// W4 (ADR 11.4.26c): Returns the actual LLVM type rather than a byte count,
-    /// so the struct definition carries type information for SROA.
+    /// Used by [`Self::tagged_union_blob_type`] to SIZE the `[N x i8]` payload
+    /// blob. Not a value layout by itself: the W4 experiment of using this
+    /// typed form directly as the payload field is ABI-unsafe (W5, ADR
+    /// 11.4.26c) and caused the named-vs-structural split-brain (16d2f4f1).
     /// Only safe for non-recursive ADTs (recursive ADTs use ptr indirection).
     pub(super) fn compute_largest_payload_llvm_type(
         &mut self,
@@ -100,7 +139,7 @@ impl<'ctx> TypeLowering<'ctx> {
             Type::Bool => 1,
 
             // Pointer-sized types (8 bytes)
-            Type::Nat | Type::Mu(_, _) | Type::Ptr(_) | Type::Ref(_) => 8,
+            Type::Nat | Type::Int | Type::Mu(_, _) | Type::Ptr(_) | Type::Ref(_) => 8,
 
             // Closure = 2 pointers
             Type::Arrow(_, _) => 16,
@@ -276,12 +315,14 @@ impl<'ctx> TypeLowering<'ctx> {
             return substituted.into_iter().next().unwrap();
         }
 
-        // Multiple fields: left-nested product to match bootstrap encoding
-        // [A, B, C] → ((A × B) × C)
-        let mut iter = substituted.into_iter();
+        // Multiple fields: right-nested product, matching the bootstrap
+        // encoder, the self-hosted encoder, and — critically — the value
+        // `AdtConstruct` actually carries (ADR 1.8.26b D1).
+        // [A, B, C] → (A × (B × C))
+        let mut iter = substituted.into_iter().rev();
         let mut product = iter.next().unwrap();
         for ty in iter {
-            product = Type::product(product, ty);
+            product = Type::product(ty, product);
         }
         product
     }
@@ -344,9 +385,13 @@ impl<'ctx> TypeLowering<'ctx> {
                 Type::Adt(name.clone(), new_args, new_variants)
             }
             // Primitive types don't need substitution
-            Type::Bool | Type::Nat | Type::Unit | Type::Void | Type::String | Type::Prop => {
-                ty.clone()
-            }
+            Type::Bool
+            | Type::Nat
+            | Type::Int
+            | Type::Unit
+            | Type::Void
+            | Type::String
+            | Type::Prop => ty.clone(),
             Type::Error => Type::Error,
         }
     }

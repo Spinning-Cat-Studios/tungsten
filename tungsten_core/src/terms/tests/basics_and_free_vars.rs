@@ -8,6 +8,19 @@ fn test_nat_literal() {
 }
 
 #[test]
+fn test_nat_smart_unary_threshold_boundary() {
+    // ADR 21.7.26e wall 2: unary encoding stops at 64 — a deeper Succ chain
+    // makes every derived recursive traversal (clone/strip_spans/Debug) a
+    // stack hazard. Pin both sides of the boundary so the threshold cannot
+    // silently drift back up.
+    assert_eq!(Term::nat_smart(64), Term::nat(64));
+    assert_eq!(Term::nat_smart(65), Term::NatLit(65));
+    // And the eval-side computed-result path applies the same policy.
+    assert_eq!(crate::eval::nat_to_term(64), Term::nat(64));
+    assert_eq!(crate::eval::nat_to_term(65), Term::NatLit(65));
+}
+
+#[test]
 fn test_is_value() {
     assert!(Term::lambda("x", Type::Nat, Term::var("x")).is_value());
     assert!(Term::True.is_value());

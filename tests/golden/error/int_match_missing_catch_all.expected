@@ -1,0 +1,13 @@
+[E0020] Error: non-exhaustive match patterns
+   ╭─[tests/golden/error/int_match_missing_catch_all.tg:5:5]
+   │
+ 5 │ ╭─▶     match 3 {
+   ┆ ┆   
+ 8 │ ├─▶     }
+   │ │           
+   │ ╰─────────── 
+   │     
+   │     Help: literal patterns cannot cover every integer; add an unguarded `_ =>` arm
+───╯
+
+error: aborting due to 1 error

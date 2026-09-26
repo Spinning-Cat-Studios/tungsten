@@ -1,0 +1,21 @@
+// The sibling half of the regression pin for ADR 4.9.26f.
+//
+// It names a TYPE (`CycleFuel`), its CONSTRUCTORS and a FUNCTION (`cycle_run`)
+// from the `mod.tg` that already imports this file — so the edge back into the
+// driver is a real call, not a re-export. If Import Resolution ever stops
+// accepting a cycle, this file is where it shows up first.
+
+use module_cycles::{CycleFuel, CycleMore, CycleEmpty, CycleStep, CycleGo, CycleStop, cycle_run};
+
+pub fn cycle_classify(f: CycleFuel) -> CycleStep {
+    match f {
+        CycleMore(_) => CycleGo,
+        CycleEmpty => CycleStop
+    }
+}
+
+/// The helper -> driver edge, spelled out: this is the call ADR 3.9.26h's
+/// restructure of `driver/cli/options.tg` existed to avoid.
+pub fn cycle_drain_from(f: CycleFuel) -> Nat {
+    cycle_run(f)
+}

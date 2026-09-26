@@ -1,0 +1,38 @@
+// Benchmark: numeric Fibonacci on the signed `Int` primitive (ADR 14.9.26c AC 9)
+//
+// Tests: checked `+ - <` on `Int` — every add is `llvm.sadd.with.overflow`
+// plus a branch into the trap block, so this measures what the overflow
+// check costs on the hottest arithmetic shape there is. No allocation:
+// `Int` is an `i64` in a register, the same word `Nat` already is, so no
+// speed-up over the `Nat` twin is claimed or expected — the comparison is
+// `Int` against `Int`-less code, not against Peano.
+// Default: 8 iterations of fib(30) for a comparable runtime to fibonacci.tg.
+// Usage: ./fibonacci_int [iterations]  (default: 8)
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+#[partial]
+fn fib(n: Int) -> Int {
+  if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn run_once() -> Int {
+  fib(30)
+}
+
+#[partial]
+fn repeat_bench(n: Nat, acc: Int) -> Int {
+  if n == 0 { acc } else { repeat_bench(n - 1, acc + run_once()) }
+}
+
+fn get_iterations() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 8 }
+}
+
+fn main() -> Int {
+  // Default: 8 iterations of fib(30) = 832040 each
+  // Total: 8 * 832040 = 6656320
+  repeat_bench(get_iterations(), 0)
+}

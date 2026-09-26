@@ -52,6 +52,19 @@ pub type VisibilityEntry = (ModulePath, Visibility, Option<ModulePath>)
 pub type ModuleFileEntry = (ModulePath, String)
 
 /// Item module entry: (item_name, module_path).
+///
+/// **Keyed on the BARE name, and the last writer wins.** Two items with the
+/// same name in different modules are one key here — the collision class ADR
+/// 7.8.26b turns on, and the reason an E0016 for a duplicate name is reported
+/// at a call site in the *other* module.
+///
+/// **The path recorded is where the name is REACHABLE, not where it is
+/// defined.** A glob re-export writes the re-exporting parent: `driver/ffi/mod.tg`
+/// does `pub use driver::ffi::test::*;`, so `test_begin` is recorded under
+/// `driver::ffi`, not `driver::ffi::test` where it is written. Code comparing
+/// against a defining path must therefore accept an ancestor — see
+/// `path_covers` in `driver/pipeline/test/mode/decide.tg`, which exists because
+/// assuming otherwise cost a round trip.
 pub type ItemModuleEntry = (String, ModulePath)
 
 /// Module registry entry: (module_path, contents).

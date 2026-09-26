@@ -1,0 +1,187 @@
+// Value-side ordering tests for the Phase-B module-map layering contract.
+//
+// ADR 5.8.26f hoisted the seeded base env out of the per-module loop, so the
+// env every module elaborates against is now built ONCE and shared rather than
+// reconstructed 249 times. That hoist is only sound if it leaves the two
+// ordering rules name resolution depends on exactly as they were:
+//
+//   (a) Within one ModuleContents, `value_def_list_lookup` returns the
+//       FRONT-MOST entry — the most recently added, since every writer
+//       prepends. This is the mechanism behind the 499 stub-over-real
+//       shadowings per check that ADR 5.8.26c §6.2 measured and found
+//       load-bearing today.
+//   (b) Across the splice, `module_map_concat(prior_map, env.modules)` lets
+//       the FRONT map win, so a completed module resolves to its full
+//       elaborated def rather than its name-only stub — else cross-module
+//       imports regress with E0202 (ADR 23.7.26d, which hit exactly this).
+//
+// ---------------------------------------------------------------------------
+// NON-VACUITY
+// ---------------------------------------------------------------------------
+//
+// Each expected value below was inverted and confirmed to turn the test RED
+// before being committed, and `tungsten test <this file> --assertion-census`
+// reports 1 executed assertion per test. Keep it that way: an assertion whose
+// operands go Stuck never runs, and before ADR 6.8.26b that was invisible.
+//
+// The lookups all query the ROOT path. That was originally a workaround — when
+// this file was written, `module_map_lookup` bottomed out in
+// `tg_string_char_at_internal` (via `elab_module_path_eq` → `list_eq_string` →
+// `string_eq`), which the evaluator could not execute, so comparing two EQUAL
+// non-empty paths went silently Stuck and the whole suite passed vacuously.
+// **ADR 6.8.26b registered that extern, so the constraint is gone** and a named
+// path would work fine now; the constructor-side twin in `test_ctor_store.tg`
+// that this file once had to route around executes its assertions today. The
+// root path is retained only because it is the path the shared base env
+// actually seeds into (`elaborate_single_module` never calls
+// `env_enter_module`), so these tests key on the real one.
+//
+// History: filed as a bug report — the module-map path tests had been vacuous.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_nat};
+use driver::ffi::{List, Nil, Cons};
+use lexer::span::{Span, span_new};
+use parser::ast::common::{Visibility, VisPublic};
+use elab::env::defs::{
+    ValueDefInfo, value_def_info_new,
+    MaybeValueDef, SomeValueDef, NoValueDef, value_def_list_lookup
+};
+use elab::env::module::{
+    ModuleContents, module_contents_empty, module_contents_add_value,
+    ElabModulePath, elab_module_path_root, elab_module_path_append,
+    ModuleMap, module_map_empty, module_map_insert, module_map_lookup,
+    module_map_concat, MaybeModuleContents, SomeModuleContents, NoModuleContents
+};
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+//
+// A name-only stub carries type handle 0 (what `populate_value_stubs` writes);
+// a fully elaborated def carries a real non-zero handle. ABSENT is what the
+// probes report when a lookup finds nothing, so "found a stub" (handle 0) and
+// "found nothing" stay distinguishable observations rather than colliding.
+
+fn ABSENT() -> Nat { 777 }
+
+/// A layer-2 name-only stub, as `populate_value_stubs` writes it.
+fn stub_def(name: String) -> ValueDefInfo {
+    value_def_info_new(name, 0, VisPublic, span_new(0, 0, ""))
+}
+
+/// A fully elaborated def carrying a real type handle.
+fn full_def(name: String, ty: Nat) -> ValueDefInfo {
+    value_def_info_new(name, ty, VisPublic, span_new(0, 0, ""))
+}
+
+/// Type handle `name` resolves to inside `contents` (ABSENT if not present).
+fn resolved_ty(contents: ModuleContents, name: String) -> Nat {
+    match value_def_list_lookup(contents.values, name) {
+        SomeValueDef(d) => d.ty,
+        NoValueDef() => ABSENT()
+    }
+}
+
+/// Type handle `name` resolves to in the slot `map` holds for `path`.
+fn resolved_ty_at(map: ModuleMap, path: ElabModulePath, name: String) -> Nat {
+    match module_map_lookup(map, path) {
+        SomeModuleContents(c) => resolved_ty(c, name),
+        NoModuleContents() => ABSENT()
+    }
+}
+
+/// A module slot holding exactly one value def.
+fn slot_with(path: ElabModulePath, def: ValueDefInfo) -> ModuleContents {
+    module_contents_add_value(module_contents_empty(path), def)
+}
+
+/// A single-entry map binding `path` to a slot holding just `def`.
+fn map_of(path: ElabModulePath, def: ValueDefInfo) -> ModuleMap {
+    module_map_insert(module_map_empty(), path, slot_with(path, def))
+}
+
+// ---------------------------------------------------------------------------
+// (a) Within one ModuleContents, the front-most (last-written) entry wins
+// ---------------------------------------------------------------------------
+
+/// The stub-over-real case ADR 5.8.26c §6.2 measured at 499 per check: a real
+/// def is written first, a name-only stub after it, and the STUB is what
+/// resolves. Load-bearing today — a change that reordered these writes would
+/// silently alter resolution, so this pins the direction as it stands rather
+/// than asserting that it is desirable.
+pub fn test_stub_written_last_shadows_real_def() -> Unit {
+    let root = elab_module_path_root();
+    let contents = module_contents_add_value(
+        module_contents_add_value(module_contents_empty(root), full_def("f", 42)),
+        stub_def("f")
+    );
+    assert_eq_nat(resolved_ty(contents, "f"), 0)
+}
+
+/// The converse ordering, which is what keeps the test above honest: with the
+/// writes swapped the REAL def resolves, so `resolved_ty` is reading the
+/// front-most entry rather than always reporting 0.
+pub fn test_real_def_written_last_shadows_stub() -> Unit {
+    let root = elab_module_path_root();
+    let contents = module_contents_add_value(
+        module_contents_add_value(module_contents_empty(root), stub_def("f")),
+        full_def("f", 42)
+    );
+    assert_eq_nat(resolved_ty(contents, "f"), 42)
+}
+
+/// A name that was never written resolves to nothing — so "found a stub"
+/// (handle 0) and "found nothing" are distinguishable.
+pub fn test_absent_name_resolves_to_nothing() -> Unit {
+    let root = elab_module_path_root();
+    assert_eq_nat(resolved_ty(slot_with(root, full_def("f", 42)), "g"), ABSENT())
+}
+
+// ---------------------------------------------------------------------------
+// (b) Across the splice, the FRONT map wins
+// ---------------------------------------------------------------------------
+
+/// `env_with_prior_map` concatenates the shared prior-results map in FRONT of
+/// the base env's own map. On a path present in both, the front slot's full
+/// def must win over the base env's name-only stub — the E0202 regression
+/// ADR 23.7.26d hit when the arguments were the other way round.
+pub fn test_prior_map_in_front_shadows_base_env_stub() -> Unit {
+    let root = elab_module_path_root();
+    let base_env_map = map_of(root, stub_def("f"));
+    let prior_map = map_of(root, full_def("f", 42));
+    assert_eq_nat(
+        resolved_ty_at(module_map_concat(prior_map, base_env_map), root, "f"), 42
+    )
+}
+
+/// The same splice with the arguments reversed resolves to the stub — the
+/// failure mode the ordering exists to prevent, asserted so the test above is
+/// known to be reading argument order rather than passing by luck.
+pub fn test_base_env_in_front_wrongly_shadows_full_def() -> Unit {
+    let root = elab_module_path_root();
+    let base_env_map = map_of(root, stub_def("f"));
+    let prior_map = map_of(root, full_def("f", 42));
+    assert_eq_nat(
+        resolved_ty_at(module_map_concat(base_env_map, prior_map), root, "f"), 0
+    )
+}
+
+/// A path absent from the front map still resolves through to the base env's
+/// slot — the splice must SHADOW, not replace. This is the property that lets
+/// ONE shared base env serve all 249 modules: a module the prior map has not
+/// yet seen is still found via its layer-2 stub.
+pub fn test_splice_falls_through_to_base_env_slot() -> Unit {
+    let root = elab_module_path_root();
+    // FRONT holds only `root::X`, a path the query deliberately does not match.
+    let other_module = elab_module_path_append(root, "X");
+    let prior_map = map_of(other_module, full_def("f", 42));
+    let base_env_map = map_of(root, stub_def("f"));
+    assert_eq_nat(
+        resolved_ty_at(module_map_concat(prior_map, base_env_map), root, "f"), 0
+    )
+}

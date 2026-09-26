@@ -9,6 +9,8 @@
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
+use crate::scratch::ScratchDir;
+
 /// Run pre-flight checks for self-compile readiness.
 pub fn cmd_check_self_compile_readiness(verbose: bool) -> ExitCode {
     let mut ok = true;
@@ -94,28 +96,30 @@ enum CaseSensitivity {
 fn check_case_sensitivity(_verbose: bool) -> CaseSensitivity {
     use std::fs;
 
-    let dir = std::env::temp_dir().join("tungsten_case_check");
-    if fs::create_dir_all(&dir).is_err() {
-        return CaseSensitivity::Unknown;
-    }
+    // ADR 29.8.26b: the probe used to name a FIXED directory and remove it by
+    // hand. Two concurrent `doctor` runs then shared one directory, so either
+    // one's cleanup could delete the other's fixture between the two writes and
+    // the read below — and the verdict that produces is `Sensitive` on a
+    // case-insensitive filesystem, which is silent and wrong. The guard is
+    // per-process and removes itself, including on the panic paths.
+    let scratch = ScratchDir::new("case-check");
+    let dir = scratch.path();
 
     let lower = dir.join("case_test_a");
     let upper = dir.join("case_test_A");
 
     // Write to lowercase
     if fs::write(&lower, "lower").is_err() {
-        let _ = fs::remove_dir_all(&dir);
         return CaseSensitivity::Unknown;
     }
 
     // Write to uppercase — if filesystem is case-insensitive, this overwrites
     if fs::write(&upper, "upper").is_err() {
-        let _ = fs::remove_dir_all(&dir);
         return CaseSensitivity::Unknown;
     }
 
     // Read lowercase — if it now says "upper", filesystem is case-insensitive
-    let result = match fs::read_to_string(&lower) {
+    match fs::read_to_string(&lower) {
         Ok(content) => {
             if content == "upper" {
                 CaseSensitivity::Insensitive
@@ -124,10 +128,7 @@ fn check_case_sensitivity(_verbose: bool) -> CaseSensitivity {
             }
         }
         Err(_) => CaseSensitivity::Unknown,
-    };
-
-    let _ = fs::remove_dir_all(&dir);
-    result
+    }
 }
 
 /// Check linker capabilities and warn about known issues.

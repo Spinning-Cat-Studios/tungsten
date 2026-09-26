@@ -1,0 +1,118 @@
+// Core FFI types, primitives, and memory management.
+
+// ===========================================================================
+// HANDLE TYPES
+// ===========================================================================
+
+pub fn invalid_handle() -> Nat { 18446744073709551615 }
+
+pub type Never = | Absurd
+
+// ===========================================================================
+// PRIMITIVE TYPES
+// ===========================================================================
+
+pub type CString = Nat
+pub type Ptr = Nat
+
+/// The boundary integer of the driver FFI — a C `int`, read as `Nat`.
+///
+/// Named `CInt` since ADR 14.9.26c, which made `Int` a builtin signed type:
+/// builtin lookup precedes user types, so an alias under that name would be
+/// unreachable (E0091). It stays `Nat` for now so every caller that counts,
+/// indexes and compares with it is byte-identical; retyping the C-`int`
+/// returns as a genuine signed `Int` is the alias's retirement, recorded in
+/// that ADR's outcome, not this rename.
+///
+/// What the unsignedness costs, so the next reader does not rediscover it: a
+/// Rust `extern "C"` that signals failure with `-1` — `tg_exec_process` does —
+/// does not deliver `-1` here. Two's complement widens it to
+/// `ffi_negative_one()`, so a caller that prints the value raw prints
+/// `18446744073709551615` and reads as a compiler crash (ADR 3.9.26b), while a
+/// caller that tests `code > 0` sees the largest number there is and calls the
+/// failure a failure by accident. Neither the alias nor the return type says
+/// any of this, which is why the sentinel below is named rather than spelled.
+///
+/// Compare against `ffi_negative_one()`, never against a literal, and never
+/// against `invalid_handle()` — that is the arena's "no such handle" and
+/// coincides with this only numerically (ADR 3.9.26s D2).
+pub type CInt = Nat
+
+/// A Rust-side `-1`, as it arrives through a `CInt` return.
+///
+/// One definition, so that the callers which must recognise the value stop
+/// borrowing a handle constant to name it. The number equals `invalid_handle()`
+/// and means something entirely different; a reader who follows that name ends
+/// up in the arena, which is the wrong place to reason about exit codes.
+pub fn ffi_negative_one() -> CInt { 18446744073709551615 }
+
+pub type FfiResult<T> =
+    | FfiOk(T)
+    | FfiErr(String)
+
+// ===========================================================================
+// LIST TYPE
+// ===========================================================================
+
+pub type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+pub fn ffi_list_reverse<T>(list: List<T>) -> List<T> {
+    ffi_list_reverse_acc(list, Nil)
+}
+
+fn ffi_list_reverse_acc<T>(list: List<T>, acc: List<T>) -> List<T> {
+    match list {
+        Nil() => acc,
+        Cons(x, xs) => ffi_list_reverse_acc(xs, Cons(x, acc))
+    }
+}
+
+// ===========================================================================
+// RAW FFI - MEMORY MANAGEMENT
+// ===========================================================================
+
+pub extern "C" fn tg_free_string(s: CString) -> Unit
+
+// ===========================================================================
+// STRING PRIMITIVES
+// ===========================================================================
+
+extern "C" fn tg_string_to_cstring(s: String) -> CString
+pub fn string_to_cstring(s: String) -> CString {
+    tg_string_to_cstring(s)
+}
+
+extern "C" fn tg_cstring_to_string(s: CString) -> String
+pub fn cstring_to_string(s: CString) -> String {
+    tg_cstring_to_string(s)
+}
+
+extern "C" fn tg_string_len_internal(s: String) -> Nat
+pub fn string_len(s: String) -> Nat {
+    tg_string_len_internal(s)
+}
+
+extern "C" fn tg_string_char_at_internal(s: String, i: Nat) -> Nat
+pub fn string_char_at_internal(s: String, i: Nat) -> Nat {
+    tg_string_char_at_internal(s, i)
+}
+
+pub extern "C" fn tg_string_append_char(s: String, c: Nat) -> String
+pub fn string_append_char(s: String, c: Nat) -> String {
+    tg_string_append_char(s, c)
+}
+
+/// Three-way byte-lexicographic string comparison (ADR 21.7.26c).
+/// Returns CMP_LT (0), CMP_EQ (1), or CMP_GT (2) — the named constants live
+/// in elab::env::defs::ctor_index beside their consumers; call sites should
+/// compare against those, never magic numbers.
+extern "C" fn tg_string_compare(a: String, b: String) -> Nat
+pub fn string_compare(a: String, b: String) -> Nat {
+    tg_string_compare(a, b)
+}
+
+pub fn cstring_is_null(s: CString) -> Bool {
+    s == 0
+}

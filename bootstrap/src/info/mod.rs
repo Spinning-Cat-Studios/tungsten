@@ -8,16 +8,30 @@
 //! Legacy flat paths (e.g., `info adt`) remain as hidden aliases for backward
 //! compatibility. See ADR 13.4.26d for original design rationale.
 
+pub(crate) mod builtins;
 pub(crate) mod cir_sites;
 #[cfg(feature = "codegen")]
 mod codegen;
-mod commands;
+// `pub(crate)` only so `test_runner`'s makefile drift guard can share the
+// `info pipeline` reconciler's makefile discovery instead of hand-rolling a
+// second copy (ADR 31.7.26c close-out). Binary-crate visibility: no public API.
+mod cli;
+pub(crate) mod commands;
 mod commands_detail;
+pub(crate) mod error_sites;
+mod eval;
 mod helpers;
 mod module;
+// Its only consumer (`info codegen symbols --by-function`) is codegen-gated,
+// but the module itself is pure string logic and deliberately is NOT — that is
+// what keeps it testable in the LLVM-free build and reachable by the
+// coverage/mutation diff gates (ADR 5.8.26b retrospective).
+#[cfg_attr(not(feature = "codegen"), allow(dead_code))]
+pub(crate) mod symbol_names;
 #[cfg(test)]
 mod tests;
 mod type_info;
+mod type_members;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,211 +39,14 @@ use std::process::ExitCode;
 use clap::Subcommand;
 use tungsten_bootstrap::driver;
 
+pub use cli::InfoCommands;
+pub use eval::InfoEvalCommands;
+pub use module::ModuleInfoCommands;
+
 #[cfg(feature = "codegen")]
 pub use codegen::{AbiArgs, InfoCodegenCommands};
-pub use type_info::{AdtArgs, InfoTypeCommands, TypeEncodingArgs};
-
-#[derive(Subcommand)]
-pub enum InfoCommands {
-    // ── Visible grouped sub-namespaces ──
-    /// Inspect types, ADTs, encodings, and constructors
-    ///
-    /// Sub-namespace for type system inspection commands.
-    /// See `tungsten info type --help` for details.
-    #[command(subcommand)]
-    Type(InfoTypeCommands),
-
-    /// Inspect codegen units, mono requests, ABI, and symbols
-    ///
-    /// Sub-namespace for codegen-related inspection commands.
-    /// See `tungsten info codegen --help` for details.
-    #[cfg(feature = "codegen")]
-    #[command(subcommand)]
-    Codegen(InfoCodegenCommands),
-
-    /// Visualize, inspect, and debug the module system
-    ///
-    /// Sub-namespace for module hierarchy, import resolution, and re-export
-    /// chain inspection. See `tungsten info module --help` for details.
-    #[command(subcommand)]
-    Module(ModuleInfoCommands),
-
-    /// Inspect CIR (Codegen IR) construction sites
-    ///
-    /// Sub-namespace for CIR variant inspection commands.
-    /// See `tungsten info cir --help` for details.
-    #[command(subcommand)]
-    Cir(CirInfoCommands),
-
-    /// Show definition type signature and Core IR
-    ///
-    /// Shows both semantic and structural types, plus the Core term.
-    ///
-    /// Examples:
-    ///   tungsten info def main examples/hello.tg
-    ///   tungsten info def `list_append` src/compiler/main.tg
-    Def {
-        /// Definition name (e.g., "main", "`list_append`")
-        name: String,
-
-        /// The source file containing the definition
-        file: PathBuf,
-
-        /// Show only parsed (surface) signature without elaboration (cost 2 instead of 3)
-        #[arg(long)]
-        no_elaborate: bool,
-    },
-
-    /// Explain the compiler pipeline phases
-    ///
-    /// Shows compiler stages, key types at each boundary,
-    /// and available diagnostic flags per stage.
-    Pipeline,
-
-    /// Show `?` operator desugaring for a definition (ADR 13.5.26e)
-    ///
-    /// Finds `?` desugaring patterns in the elaborated Core IR and
-    /// displays each one with its scrutinee, error branch, and success path.
-    ///
-    /// Examples:
-    ///   tungsten info try-desugar process examples/result.tg
-    ///   tungsten info try-desugar `handle_input` src/compiler/main.tg
-    TryDesugar {
-        /// Definition name (e.g., \"process\")
-        name: String,
-
-        /// The source file containing the definition
-        file: PathBuf,
-    },
-
-    /// Show cross-file diagnostic enrichment points (ADR 15.5.26a)
-    ///
-    /// Reports which function calls in a file would receive cross-file
-    /// diagnostic notes when type errors occur, and which public functions
-    /// defined here would enrich errors in other modules.
-    ///
-    /// Examples:
-    ///   tungsten info error-enrichment src/compiler/elab/exprs/mod.tg
-    ///   tungsten info error-enrichment `examples/module_example/main.tg`
-    #[command(
-        after_help = "See also: `tungsten info pipeline` for enrichment capabilities overview."
-    )]
-    ErrorEnrichment {
-        /// The source file to analyze
-        file: PathBuf,
-    },
-
-    // ── Hidden legacy aliases (ADR 12.5.26h §2.3) ──
-    // These preserve backward compatibility with the old flat paths.
-    // They share argument structs and dispatch to the same handlers
-    // as their grouped counterparts.
-    #[command(name = "types", hide = true)]
-    TypesLegacy { file: PathBuf },
-
-    #[command(name = "adt", hide = true)]
-    AdtLegacy(AdtArgs),
-
-    #[command(name = "encoding", hide = true)]
-    EncodingLegacy { name: String, file: PathBuf },
-
-    #[command(name = "type-encoding", hide = true)]
-    TypeEncodingLegacy(TypeEncodingArgs),
-
-    #[command(name = "constructors", hide = true)]
-    ConstructorsLegacy { name: String, file: PathBuf },
-
-    #[command(name = "mutual-recursion-groups", hide = true)]
-    MutualRecursionGroupsLegacy { file: PathBuf },
-
-    #[command(name = "field-type", hide = true)]
-    FieldTypeLegacy { field_path: String, file: PathBuf },
-
-    #[cfg(feature = "codegen")]
-    #[command(name = "symbols", hide = true)]
-    SymbolsLegacy { file: PathBuf },
-
-    #[cfg(feature = "codegen")]
-    #[command(name = "abi", hide = true)]
-    AbiLegacy(AbiArgs),
-
-    #[cfg(feature = "codegen")]
-    #[command(name = "codegen-units", hide = true)]
-    CodegenUnitsLegacy { file: PathBuf },
-
-    #[cfg(feature = "codegen")]
-    #[command(name = "mono", hide = true)]
-    MonoLegacy { file: PathBuf },
-}
-
-/// Module-related info subcommands (ADR 6.5.26a, 8.5.26f).
-///
-/// Grouped to keep the `info` namespace manageable. Accessed via
-/// `tungsten info module <subcommand>`.
-#[derive(Subcommand)]
-pub enum ModuleInfoCommands {
-    /// Visualize the module hierarchy, elaboration order, and cross-branch deps (ADR 6.5.26a)
-    ///
-    /// Shows the containment tree, dependency-sorted elaboration sequence,
-    /// and cross-branch import edges. Cost ≤ 2 (parse only).
-    ///
-    /// Examples:
-    ///   tungsten info module tree `examples/module_example/main.tg`
-    ///   tungsten info module tree src/compiler/main.tg
-    Tree {
-        /// The root source file of the project
-        file: PathBuf,
-    },
-
-    /// Show import resolution status for a module (ADR 6.5.26a)
-    ///
-    /// Lists each `use` declaration and whether imported names resolved
-    /// to full definitions or stubs after elaboration.
-    ///
-    /// Examples:
-    ///   tungsten info module imports `driver::ffi` src/compiler/main.tg
-    ///   tungsten info module imports parser `examples/module_example/main.tg`
-    Imports {
-        /// Fully qualified module path (e.g., "`driver::ffi`")
-        module: String,
-
-        /// The root source file of the project
-        file: PathBuf,
-    },
-
-    /// Trace re-export chain for a module's items (ADR 8.5.26f)
-    ///
-    /// Shows how items from a module propagate through `pub use`
-    /// declarations in the module tree.
-    ///
-    /// Examples:
-    ///   tungsten info module reexport-chain child `examples/module_example/main.tg`
-    ///   tungsten info module reexport-chain `elab::env` src/compiler/main.tg
-    ReexportChain {
-        /// Fully qualified module path (e.g., "child", "`elab::env`")
-        module: String,
-
-        /// The root source file of the project
-        file: PathBuf,
-    },
-
-    /// Show import alias mappings for a module (ADR 16.5.26b)
-    ///
-    /// Lists each aliased import (`use X as Y`) showing the local alias name,
-    /// the original name, and the source path. Aliased names suppress the
-    /// original in that module's scope. Cost ≤ 2 (parse only).
-    ///
-    /// Examples:
-    ///   tungsten info module alias-table math `tests/import_alias/main.tg`
-    ///   tungsten info module alias-table `driver::ffi` src/compiler/main.tg
-    #[command(name = "alias-table")]
-    AliasTable {
-        /// Fully qualified module path (e.g., "math", "`driver::ffi`")
-        module: String,
-
-        /// The root source file of the project
-        file: PathBuf,
-    },
-}
+pub use type_info::{AdtArgs, ConstructorsArgs, InfoTypeCommands, TypeEncodingArgs};
+pub use type_members::InfoTypeMembersCommands;
 
 /// CIR inspection subcommands (ADR 13.5.26k).
 ///
@@ -277,24 +94,37 @@ pub fn cmd_info(cmd: InfoCommands, verbose: bool, max_errors: usize) -> ExitCode
         InfoCommands::Type(sub) => type_info::dispatch_type_info(sub, verbose, max_errors),
         #[cfg(feature = "codegen")]
         InfoCommands::Codegen(sub) => codegen::dispatch_codegen_info(sub, verbose, max_errors),
+        #[cfg(not(feature = "codegen"))]
+        InfoCommands::CodegenUnavailable { args } => {
+            ExitCode::from(commands::cmd_info_codegen_unavailable(&args))
+        }
         InfoCommands::Module(sub) => module::dispatch_module_info(sub, verbose, max_errors),
         InfoCommands::Cir(sub) => dispatch_cir_info(sub),
-        InfoCommands::Pipeline => commands::cmd_info_pipeline(),
+        InfoCommands::Eval(sub) => eval::dispatch_eval_info(sub, verbose, max_errors),
+        InfoCommands::Pipeline { json } => commands::cmd_info_pipeline(json),
         InfoCommands::TryDesugar { name, file } => {
             commands::cmd_info_try_desugar(&name, &file, verbose, max_errors)
         }
         InfoCommands::ErrorEnrichment { file } => {
             commands::cmd_info_error_enrichment(&file, verbose, max_errors)
         }
+        InfoCommands::ErrorSites { code } => error_sites::run(&code),
+        InfoCommands::Builtins { name } => builtins::run(name.as_deref()),
         InfoCommands::Def {
             name,
             file,
             no_elaborate,
+            why_not_certified,
+            callers,
         } => {
             if no_elaborate {
                 commands::cmd_info_def_parsed(&name, &file)
             } else {
-                commands::cmd_info_def(&name, &file, verbose, max_errors)
+                let reports = commands::DefReports {
+                    why_not_certified,
+                    callers,
+                };
+                commands::cmd_info_def(&name, &file, verbose, max_errors, reports)
             }
         }
         // Legacy aliases delegate to same handlers (ADR 12.5.26h §2.3).
@@ -336,8 +166,8 @@ fn dispatch_legacy_info(cmd: InfoCommands, verbose: bool, max_errors: usize) -> 
             max_errors,
             args.show_raw,
         ),
-        InfoCommands::ConstructorsLegacy { name, file } => {
-            commands::cmd_info_constructors(&name, &file, verbose, max_errors)
+        InfoCommands::ConstructorsLegacy(args) => {
+            commands::cmd_info_constructors(&args.name, &args.file, verbose, max_errors, args.raw)
         }
         InfoCommands::MutualRecursionGroupsLegacy { file } => {
             commands::cmd_info_mutual_recursion_groups(&file, verbose, max_errors)
@@ -347,7 +177,7 @@ fn dispatch_legacy_info(cmd: InfoCommands, verbose: bool, max_errors: usize) -> 
         }
         #[cfg(feature = "codegen")]
         InfoCommands::SymbolsLegacy { file } => {
-            commands::cmd_info_symbols(&file, verbose, max_errors)
+            commands::cmd_info_symbols(&file, None, verbose, max_errors)
         }
         #[cfg(feature = "codegen")]
         InfoCommands::AbiLegacy(args) => crate::dump_abi::cmd_dump_abi(
@@ -377,6 +207,13 @@ pub(crate) fn elaborate_for_info(
     verbose: bool,
     max_errors: usize,
 ) -> Option<driver::ProjectOutput> {
+    // `info` is read-only inspection, so it forces `Report` enforcement for its
+    // own elaboration (ADR 12.8.26a) — the whole namespace, because none of
+    // these tools delivers the gate's verdict, so none has a reason to be
+    // blocked by it. Caught on `info def --why-not-certified`, added by that ADR
+    // to explain E0062 rejections and unable to run on a file that had one.
+    // `doctor tool-reachability` carries a row for it.
+    let _reporting = tungsten_bootstrap::elaborate::termination::ReportingOnly::begin();
     match driver::elaborate_project(file, verbose, max_errors, None) {
         Ok(output) => Some(output),
         Err(e) => {

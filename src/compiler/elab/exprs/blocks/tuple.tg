@@ -1,4 +1,11 @@
-// Tuple pattern binding and projection CIR generation for block statements.
+// Tuple pattern binding for block statements.
+//
+// The projection CIR that used to live here is gone (ADR 3.9.26g P2). It was
+// dead — `doctor audit-dead-definitions src/compiler/main.tg` reached neither
+// `build_tuple_projection_cir` nor its only caller — and it projected EVERY
+// element as `fst(snd^i)`, the last one included, so it disagreed with the type
+// walk immediately above it in this same file. `wrap_product_projections_cir`
+// is the one CIR builder now.
 
 use lexer::span::Span;
 use parser::ast::{
@@ -13,12 +20,6 @@ use elab::ffi::{
 };
 use elab::env::{Env, env_bind_local};
 use elab::exprs::forms::result::pattern_to_name;
-use elab::cir::{
-    CodegenIR, CodegenType,
-    CIRUnit, CIRLet, CIRVar, CIRFst, CIRSnd,
-    ct_unit,
-    type_handle_to_codegen_type
-};
 
 /// Bind variables from a tuple pattern to the environment.
 pub fn bind_tuple_pattern_to_env(env: Env, pats: List<Pattern>, ty: TypeHandle) -> Env {
@@ -54,92 +55,5 @@ fn bind_single_pattern_to_env(env: Env, p: Pattern, ty: TypeHandle) -> Env {
             bind_tuple_pattern_to_env(env, sub_pats, ty),
         _ =>
             env
-    }
-}
-
-/// Build CIR let chain for tuple pattern projections.
-pub fn build_tuple_projection_cir(
-    pats: List<Pattern>,
-    ty: TypeHandle,
-    base_cir: CodegenIR,
-    inner_cir: CodegenIR
-) -> CodegenIR {
-    build_tuple_projection_cir_aux(pats, ty, base_cir, inner_cir, 0)
-}
-
-fn build_tuple_projection_cir_aux(
-    pats: List<Pattern>,
-    ty: TypeHandle,
-    base_cir: CodegenIR,
-    inner_cir: CodegenIR,
-    depth: Nat
-) -> CodegenIR {
-    match pats {
-        Nil() => inner_cir,
-        Cons(p, rest) =>
-            let elem_ty = if tg_type_is_product(ty) {
-                tg_type_get_product_left(ty)
-            } else {
-                ty
-            };
-            let rest_ty = if tg_type_is_product(ty) {
-                tg_type_get_product_right(ty)
-            } else {
-                tg_type_unit()
-            };
-            let proj_cir = build_index_projection_cir(base_cir, depth);
-            let has_rest = match rest { Nil() => false, _ => true };
-            let next_base = if has_rest {
-                build_index_projection_cir_snd(base_cir, depth)
-            } else {
-                base_cir
-            };
-            let rest_cir = build_tuple_projection_cir_aux(rest, rest_ty, next_base, inner_cir, 0);
-            build_pattern_binding_cir(p, elem_ty, proj_cir, rest_cir)
-    }
-}
-
-fn build_pattern_binding_cir(
-    p: Pattern,
-    ty: TypeHandle,
-    value_cir: CodegenIR,
-    inner_cir: CodegenIR
-) -> CodegenIR {
-    match p {
-        PatVar(id) =>
-            let name = ident_name(id);
-            CIRLet(name, ct_unit(), value_cir, inner_cir),
-        PatWildcard(_) =>
-            CIRLet("_", ct_unit(), value_cir, inner_cir),
-        PatTuple(sub_pats, _) =>
-            let tup_name = "__tup_nested";
-            let projected = build_tuple_projection_cir(sub_pats, ty, CIRVar(tup_name, type_handle_to_codegen_type(ty)), inner_cir);
-            CIRLet(tup_name, ct_unit(), value_cir, projected),
-        _ =>
-            CIRLet("_", ct_unit(), value_cir, inner_cir)
-    }
-}
-
-fn build_index_projection_cir(base: CodegenIR, index: Nat) -> CodegenIR {
-    if index == 0 {
-        CIRFst(base)
-    } else {
-        CIRFst(build_snd_chain(base, index))
-    }
-}
-
-fn build_snd_chain(base: CodegenIR, count: Nat) -> CodegenIR {
-    if count == 0 {
-        base
-    } else {
-        build_snd_chain(CIRSnd(base), count - 1)
-    }
-}
-
-fn build_index_projection_cir_snd(base: CodegenIR, index: Nat) -> CodegenIR {
-    if index == 0 {
-        CIRSnd(base)
-    } else {
-        build_snd_chain(CIRSnd(base), index)
     }
 }

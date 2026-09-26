@@ -1,0 +1,21 @@
+// ADR 1.7.26b fixture — flattenable struct param → DECOMPOSE (EMIT-class).
+//
+// `scan` takes a `String` param (lowers to a flattenable `{ ptr, i64 }`) and
+// returns a scalar `Nat`. The base `$direct` entry cannot musttail (struct
+// param), but the decomposed `$direct_mt` entry flattens the struct and DOES
+// emit musttail → DECOMPOSE, achieving constant stack → LOW risk.
+
+// Partial (ADR 11.8.26b): a measure recursion, out of Phase 1's scope.
+// This fixture exercises musttail classification, not termination.
+#[partial]
+fn scan(s: String, n: Nat) -> Nat {
+    if n == 0 {
+        n
+    } else {
+        scan(s, n - 1)
+    }
+}
+
+fn main() -> Nat {
+    scan("hi", 3)
+}

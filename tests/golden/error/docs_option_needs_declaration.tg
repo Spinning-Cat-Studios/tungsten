@@ -1,0 +1,7 @@
+// `Option`, `Result` and `List` are conventions, not built-ins: a program that
+// uses one without declaring it is refused.
+fn first(o: Option<Nat>) -> Nat {
+    match o { None() => 0, Some(n) => n }
+}
+
+fn main() -> Nat { 0 }

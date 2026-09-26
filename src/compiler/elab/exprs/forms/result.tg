@@ -1,7 +1,7 @@
 // src/compiler/elab/exprs/result.tg
 // Result types and helper functions for expression elaboration.
 //
-// **Two error types exist in L2:**
+// **Two error types exist in the self-hosted compiler:**
 //   - `ElabExprError` (this file): lightweight record {message, span, expected_because, code}
 //     used for expression-level elaboration results. Propagated through ElabExprResult.
 //   - `ElabError` (elab/error/list.tg): structured diagnostic {kind: ElabErrorKind, span,

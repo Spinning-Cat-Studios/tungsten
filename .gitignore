@@ -1,6 +1,37 @@
 # Build outputs
 target/
 
+# hunk-edit's LMDB staging store (its clap default is `build/hunk-edit`).
+# Ignored because the tool is used mid-commit-split: an untracked directory
+# appearing in `git status` at the exact moment you are staging two commits is
+# noise where noise is most expensive. Override with HUNK_EDIT_STORE.
+#
+# `branch-merge`'s session store and conflict reports live here too
+# (`build/branch-merge/`, ADR 4.8.26d) for the same reason, one flow over: they
+# are written mid-integration, when a spurious "uncommitted changes" is most
+# expensive. That tool excludes its own state dir by pathspec regardless, so it
+# does not depend on this entry — a consumer repo without one still behaves.
+#
+# `action-batch`'s surface staging mirror is the third tenant
+# (`build/action-batch/surfaces/<task>/`, ADR 6.9.26a). A batch child stages
+# the intended bytes of an agent-instruction file it cannot write in place, and
+# the driver copies them over afterwards; those drafts are written mid-entry,
+# when a spurious delta path would land in someone's commit. It moved here from
+# under `.git/`, where a headless child's write is refused outright as a
+# sensitive file. Like `branch-merge` it carries its own `:!build/action-batch`
+# pathspec on every `git status` it runs, so this entry is the belt and not the
+# only strap.
+/build/
+
+# cargo-mutants output + transient diff (ADR 7.7.26f)
+mutants.out/
+mutants.out.old/
+.mutants.diff
+
+# cargo-llvm-cov coverage artifacts (ADR 7.7.26h)
+.coverage.lcov
+*.profraw
+
 # Tungsten build cache
 .tungsten/
 
@@ -45,6 +76,16 @@ libtungsten_core.dylib
 # Diagnostic swap backup (ADR 18.4.26f — self-compile-dev)
 *.tg.prod
 
+# Generated test harness from the self-host `test` verb (ADR 7.8.26a §2.3).
+# `compile_and_run_tests` writes a harness source and its binary beside the file
+# under test and removes neither — deleting them needs a `tg_remove_file` FFI
+# that does not exist yet (ADR 7.8.26b). The leading underscore is what keeps
+# them out of `make tg-test`'s `src/compiler/test_*.tg` glob; ignoring them here
+# keeps them out of `git status`, which is the other way a leftover goes
+# unnoticed. One pattern covers both artifacts: the source is
+# `_tgtest_<name>.tg` and the binary is the same path without the extension.
+_tgtest_*
+
 # Scripts
 scripts/*.py
 
@@ -56,3 +97,79 @@ examples/**/*
 
 # Static linking
 *.a
+
+# Claude
+!.claude/settings.local.json
+
+# Temp
+.tmp
+
+# Reports
+forbidden-actions-report.md
+ignore-access-report.md
+
+# Mutation-sweep litter at the repo root (ADR 17.7.26g close-out).
+# A sweep RUNS each mutant, including ones that corrupt a test's temp-dir
+# helper: `fn tmpdir() -> PathBuf` mutated to `Default::default()` returns an
+# EMPTY path, so every `dir.join(…)` in that test resolves against the process
+# CWD — the repo root under `cargo test`. The test then fails (the mutant is
+# correctly Caught), but only AFTER writing its fixtures here, so no assertion
+# inside the helper can prevent the files: the mutant skips the helper body
+# entirely and the CALLER does the writing.
+#
+# These are therefore unavoidable side effects of a healthy sweep, not a
+# defect to fix in the tests. Ignoring them by name stops the real harm —
+# commit f925b4b5 swept three of them into a commit, where two SHADOWED the
+# real 356-line and 24-line allowlists in tools/. Removing the cause would
+# mean either making the helpers return a type with no `Default` (so the
+# mutant is unviable and never runs) or running sweeps with CWD outside the
+# repo; both are crate-wide test-hygiene work, tracked separately.
+/allowlist.toml
+/baseline.toml
+/dateless.toml
+/mutation-baseline.toml
+/mutant-survivor-allowlist.toml
+/mutant-timeout-allowlist.toml
+/outcomes.json
+/caught.txt
+/missed.txt
+/missed_ids.txt
+/missed_allowlisted.txt
+/timeout.txt
+/unviable.txt
+/trivial.rs
+
+# Golden compile-artifact leak (ADR 31.7.26b D1).
+#
+# `tungsten compile tests/golden/run/foo.tg` emits the executable at
+# `tests/golden/run/foo` — an extensionless sibling of its own fixture. The
+# retired shell runner's `rm -f` cleanup ran only after a successful compare, so
+# a compile that produced a binary and then failed left it behind; five
+# devcontainer-built ELF aarch64 executables reached git that way.
+#
+# Expressed as "ignore anything with no extension" rather than an allowlist of
+# fixture suffixes: nothing tracked under tests/golden/ is extensionless, and an
+# allowlist would silently swallow a NEW fixture kind — the "green because it
+# never looked" shape this ADR exists to remove.
+tests/golden/**
+!tests/golden/**/
+!tests/golden/**/*.*
+# Re-ignore, because the directory negation above out-ranks the general rules
+# earlier in this file: without it, `.tungsten/` (line 14) stops being ignored
+# under tests/golden/ and every golden run leaves untracked elaboration cache.
+#
+# The trailing slash is load-bearing (it scopes the rule to directories), and it
+# makes `git check-ignore` misleading as a probe: on a path that does not exist
+# on disk git cannot tell it is a directory, so `git check-ignore -q
+# tests/golden/test/.tungsten` reports NOT-ignored even though the rule is
+# correct. Probe it with the directory actually present, or check a file inside
+# it — `git status` is the honest test.
+tests/golden/**/.tungsten/
+
+# Lane bookkeeping (ADR 4.8.26c D2). A lane worktree carries its own manifest at
+# `.lane/manifest.toml`, written by the `lane` tool rather than committed — it
+# lives and dies with the worktree, which is what makes it crash-consistent.
+# Ignored here so a lane cut from this branch reads clean under a hand-run
+# `git status`; `lane`'s own dirtiness check excludes it via pathspec regardless,
+# so a lane cut from an older branch still behaves.
+.lane/

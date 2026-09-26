@@ -1,0 +1,232 @@
+// src/compiler/driver/pipeline/test/discovery.tg
+// Test discovery: which `test_*` definitions are runnable, and what to do when
+// none is.
+//
+// Mirrors bootstrap/src/test_runner/discovery.rs arm for arm (ADR 7.8.26a D1).
+// The two binaries must agree on the *discovered count* exactly — 6.8.26d
+// §2.1.1's conformance relation — so a deviation here is a fresh divergence
+// rather than an improvement.
+//
+// The split between `classify_test_signature` (pure) and `find_test_defs` (FFI)
+// is forced, not stylistic (ADR 7.8.26a D2): the evaluator executes only the
+// externs in `tungsten info eval externs`, and `tg_type_tag` is NOT among them.
+// A test that reached the tag through the FFI would go silently Stuck, its
+// assertion would never run, and `tungsten test` would report `ok` — so the
+// verdict takes a plain `Nat` and nothing else, and only the verdict is tested.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{
+    string_is_empty, string_contains, starts_with, list_reverse
+};
+use elab::items::result::ElabDef;
+use elab::ffi::{tg_type_tag};
+
+// ===========================================================================
+// VERDICTS
+// ===========================================================================
+
+/// What the signature filter decided about one `test_*` candidate.
+pub type TestDiscoveryVerdict =
+    | Runnable
+    | SkipTakesParameters
+    | SkipReturnsNonUnit(Nat)     // the offending tag, for the message
+
+/// A candidate the signature filter rejected, and why.
+///
+/// Rejections are non-fatal skips with a warning, not errors — the bootstrap's
+/// contract (`discovery.rs:59-73`).
+pub type TestSkip = {
+    name: String,
+    reason: String
+}
+
+/// The partition of `test_*` candidates into what runs and what is skipped.
+///
+/// A named record rather than a 2-tuple: both are inside the return-arity cap,
+/// but this matches the `ReplaceLoopCtx` / `SubmoduleDirCtx` idiom already used
+/// in this subsystem, and the field names say which list is which.
+pub type TestDiscovery = {
+    tests: List<ElabDef>,
+    skips: List<TestSkip>
+}
+
+/// Classify one candidate from its type's tag. PURE — no FFI on this path.
+///
+/// `tag` is `tg_type_tag`'s discriminant. The full table is NOT transcribed
+/// here — its authority is the `match` in
+/// `tungsten_core/src/ffi/types/predicates/mod.rs` (ADR 13.8.26a). This function
+/// branches on two of the tags, and only those two are named below; the copy
+/// that used to spell out all seventeen was correct when written and had no
+/// mechanism keeping it so.
+///
+/// Tag **6** (arrow) is checked FIRST, matching the bootstrap's arm order, so a
+/// parameter-taking test reports "takes parameters" rather than "returns
+/// non-Unit". Tag **3** (unit) is the only runnable signature. Every other tag,
+/// the unknown/invalid-handle tag included, falls into `SkipReturnsNonUnit` and
+/// so **fails closed**: a def whose type cannot be read is not run.
+///
+/// One parameter, not two: `tg_type_is_arrow(ty)` *is* `tg_type_tag(ty) == 6`
+/// (both are one `matches!` on the same `TypeNode`), so passing both would
+/// admit unrepresentable states the test matrix could only cover meaninglessly.
+pub fn classify_test_signature(tag: Nat) -> TestDiscoveryVerdict {
+    if tag == 6 {
+        SkipTakesParameters
+    } else if tag == 3 {
+        Runnable
+    } else {
+        SkipReturnsNonUnit(tag)
+    }
+}
+
+/// Render a type tag the way the bootstrap's `Display` renders the type.
+///
+/// The bootstrap interpolates the type itself — `must return Unit, found {}`
+/// (`discovery.rs:70`) — while `SkipReturnsNonUnit` carries only a tag. For the
+/// primitive tags the real rejections hit, this reproduces the string exactly;
+/// for a composite type it cannot, and `<unknown>` is the honest answer rather
+/// than a plausible wrong one. That is ADR 7.8.26a §2.1's accepted divergence,
+/// and it is why the AC pins the skip *set* name-for-name but the reason
+/// strings only for primitive tags.
+///
+/// Tag 6 renders as `Arrow` for completeness; the arrow arm is checked first,
+/// so that string cannot reach a "found" message.
+///
+/// **The arm set is already maximal and cannot grow** (ADR 13.8.26a D4). Every
+/// tag above the primitives needs structure the bare `Nat` does not carry:
+/// `Product`/`Sum` need their components, `TyVar`/`Adt` need a name,
+/// `Forall`/`Mu` need a binder, `Eq` needs three, `App` needs both halves. So
+/// the renderable-from-tag-alone set is exactly the arms below, and everything
+/// above them — up to and including the highest tag `tg_type_tag` returns —
+/// falls to `<unknown>`. Adding a `"Product"` arm would not improve fidelity:
+/// the bootstrap's `Display` prints `(Nat × String)`, not `Product`, so it would
+/// replace an honest `<unknown>` with a plausible wrong answer and break the
+/// byte-identity 7.8.26a's AC1 pins. The `<unknown>` arm is lossy by necessity,
+/// not by omission.
+pub fn tag_type_name(tag: Nat) -> String {
+    if tag == 0 {
+        "Nat"
+    } else if tag == 1 {
+        "Bool"
+    } else if tag == 2 {
+        "String"
+    } else if tag == 3 {
+        "Unit"
+    } else if tag == 4 {
+        "Void"
+    } else if tag == 5 {
+        "Prop"
+    } else if tag == 6 {
+        "Arrow"
+    } else {
+        "<unknown>"
+    }
+}
+
+// ===========================================================================
+// EMPTY SUITE
+// ===========================================================================
+
+/// What to do when discovery yields no runnable tests.
+///
+/// Constructor order mirrors the bootstrap's declaration order
+/// (`discovery.rs:86-93`), not narrative order: the Sum-encoding index is
+/// load-bearing, and matching it costs nothing while removing a diff a future
+/// reader would have to explain.
+pub type EmptySuiteAction =
+    | FailRequireTests
+    | ReportNoTests
+    | Proceed
+
+/// Pure; mirrors `bootstrap/src/test_runner/discovery.rs:95` arm for arm.
+///
+/// `num_skipped` is present because the bootstrap's third arm consults it.
+/// Note the semantics the whole flag rests on: **skips do not satisfy
+/// `--require-tests`**. A file whose every `test_*` fails the signature filter
+/// has zero runnable tests and must fail — that is the regression ADR 2.7.26b
+/// closed on the bootstrap side.
+pub fn classify_empty_suite(num_tests: Nat, num_skipped: Nat, require: Bool) -> EmptySuiteAction {
+    if num_tests > 0 {
+        Proceed
+    } else if require {
+        FailRequireTests
+    } else if num_skipped == 0 {
+        ReportNoTests
+    } else {
+        Proceed
+    }
+}
+
+// ===========================================================================
+// DISCOVERY
+// ===========================================================================
+
+/// Whether a definition's name makes it a `test_*` candidate under `filter`.
+///
+/// An empty filter matches everything, mirroring the bootstrap's `Option<&str>`
+/// of `None`.
+fn name_is_candidate(name: String, filter: String) -> Bool {
+    if starts_with(name, "test_") {
+        if string_is_empty(filter) {
+            true
+        } else {
+            string_contains(name, filter)
+        }
+    } else {
+        false
+    }
+}
+
+/// Partition `test_*` definitions into runnable tests and skips, IN SOURCE
+/// ORDER.
+///
+/// The name/filter predicate is unchanged; what is new is the signature filter
+/// behind it. This is the one function on the path that touches FFI
+/// (`tg_type_tag`); everything it decides with is pure.
+///
+/// **The order is part of the contract** (ADR 7.8.26b): 6.8.26d §2.1.1's
+/// conformance relation requires the two runners to agree on the *ordered* list
+/// of test names, and `elab_result.defs` arrives in reverse source order — so
+/// the walk below, which preserves whatever order it is given, produced a
+/// harness that ran the last test first. Nobody could see it until this ADR
+/// made the harness run at all. The two reversals are applied once, here,
+/// rather than at the two call sites that would each have to remember.
+pub fn find_test_defs(defs: List<ElabDef>, filter: String) -> TestDiscovery {
+    let found: TestDiscovery = find_test_defs_in_def_order(defs, filter);
+    { tests: list_reverse(found.tests), skips: list_reverse(found.skips) } : TestDiscovery
+}
+
+fn find_test_defs_in_def_order(defs: List<ElabDef>, filter: String) -> TestDiscovery {
+    match defs {
+        Nil() => { tests: Nil, skips: Nil } : TestDiscovery,
+        Cons(def, rest) =>
+            let found: TestDiscovery = find_test_defs_in_def_order(rest, filter);
+            if name_is_candidate(def.name, filter) {
+                classify_into(def, tg_type_tag(def.ty), found)
+            } else {
+                found
+            }
+    }
+}
+
+/// Fold one classified candidate into the partition built from the rest.
+fn classify_into(def: ElabDef, tag: Nat, found: TestDiscovery) -> TestDiscovery {
+    match classify_test_signature(tag) {
+        Runnable() =>
+            { tests: Cons(def, found.tests), skips: found.skips } : TestDiscovery,
+        SkipTakesParameters() =>
+            { tests: found.tests,
+              skips: Cons(skip_of(def.name, "test function must take no parameters"),
+                          found.skips) } : TestDiscovery,
+        SkipReturnsNonUnit(tag2) =>
+            { tests: found.tests,
+              skips: Cons(skip_of(def.name,
+                                  "test function must return Unit, found " ++ tag_type_name(tag2)),
+                          found.skips) } : TestDiscovery
+    }
+}
+
+/// Build a skip record, so the two rejection arms above differ only in their
+/// reason string — which is the only thing that should differ between them.
+fn skip_of(name: String, reason: String) -> TestSkip {
+    { name: name, reason: reason } : TestSkip
+}

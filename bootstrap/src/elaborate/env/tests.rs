@@ -180,3 +180,77 @@ fn test_is_name_aliased_away_type_import() {
     // unrelated name should not be aliased away
     assert!(!env.is_name_aliased_away(&module, "Foo"));
 }
+
+/// `is_overwritable_by_collection` truth table (ADR 5.5.26c): overwritable iff
+/// the entry is a placeholder (Stub, or not-yet-encoded) OR a re-collectible
+/// local (`defining_module: None`); a finalized import (non-stub, encoded,
+/// `defining_module: Some`) is the only non-overwritable case.
+#[test]
+fn test_is_overwritable_by_collection() {
+    let build = |kind: TypeDefKind,
+                 encoded: Option<Type>,
+                 defining_module: Option<ModulePath>|
+     -> TypeDef {
+        TypeDef {
+            name: "T".to_string(),
+            params: vec![],
+            kind,
+            visibility: Visibility::Public,
+            span: Span::new(0, 0),
+            defining_module,
+            encoded_type: encoded,
+            field_visibilities: vec![],
+        }
+    };
+    let import = || Some(ModulePath::new(vec!["other".to_string()]));
+    let record = || TypeDefKind::Record(vec![]);
+
+    // Stub is overwritable even when otherwise "finalized".
+    assert!(build(TypeDefKind::Stub, Some(Type::Nat), import()).is_overwritable_by_collection());
+    // Not-yet-encoded is overwritable even as an import.
+    assert!(build(record(), None, import()).is_overwritable_by_collection());
+    // Locally defined (defining_module None) is overwritable even when encoded.
+    assert!(build(record(), Some(Type::Nat), None).is_overwritable_by_collection());
+    // The sole non-overwritable case: finalized import.
+    assert!(!build(record(), Some(Type::Nat), import()).is_overwritable_by_collection());
+}
+
+/// `is_poison` (ADR 15.8.26d) is exact: only the producer's `Some(Error)`
+/// counts. An unencoded stub is merely pending, and a healthy encoding that
+/// *contains* poison keeps its own field checks.
+#[test]
+fn test_is_poison_is_exactly_the_producers_residue() {
+    let mut def = TypeDef::test_stub("T", TypeDefKind::Stub);
+    assert!(
+        !def.is_poison(),
+        "an unencoded stub is pending, not poisoned"
+    );
+
+    def.encoded_type = Some(Type::Error);
+    assert!(def.is_poison(), "D3's producer leaves Some(Error)");
+
+    def.encoded_type = Some(Type::product(Type::Nat, Type::Error));
+    assert!(
+        !def.is_poison(),
+        "an encoding that merely contains poison is a healthy type"
+    );
+
+    def.encoded_type = Some(Type::Nat);
+    assert!(!def.is_poison());
+}
+
+/// Signature Collection withholds plain stubs (Stub Registration owns the
+/// placeholder) and exports everything else — plus the one stub that must
+/// travel: a poisoned one (ADR 15.8.26d).
+#[test]
+fn test_signature_collection_exports_poisoned_stubs_only() {
+    let plain_stub = TypeDef::test_stub("T", TypeDefKind::Stub);
+    assert!(!plain_stub.is_signature_collection_export());
+
+    let mut poisoned_stub = TypeDef::test_stub("T", TypeDefKind::Stub);
+    poisoned_stub.encoded_type = Some(Type::Error);
+    assert!(poisoned_stub.is_signature_collection_export());
+
+    let record = TypeDef::test_stub("T", TypeDefKind::Record(vec![]));
+    assert!(record.is_signature_collection_export());
+}

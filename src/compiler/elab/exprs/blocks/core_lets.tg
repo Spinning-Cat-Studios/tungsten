@@ -33,6 +33,7 @@ use elab::cir::{
 };
 use elab::exprs::{synth, check};
 use elab::exprs::blocks::tuple::bind_tuple_pattern_to_env;
+use elab::exprs::matches::patterns::projections::wrap_arm_payload_projections;
 use elab::exprs::bind::{LetBindingInfo};
 
 // ===========================================================================
@@ -195,10 +196,26 @@ fn elab_inferred_let(
 }
 
 // ===========================================================================
-// TUPLE LET (ENV-ONLY, NO CORE LET)
+// TUPLE LET
 // ===========================================================================
 
-/// Tuple destructuring: bind variables in env, continue without Core Let.
+/// The binder a block's tuple destructuring projects its elements out of.
+fn tuple_let_binder() -> String { "__tup" }
+
+/// Tuple destructuring: `let (a, b) = rhs;` becomes
+/// `let __tup = rhs in let a = fst __tup in let b = snd __tup in <rest>`.
+///
+/// Binding `a` and `b` in `env` alone type-checks the rest of the block and
+/// leaves both FREE in the emitted term, with the RHS dropped from it
+/// altogether — the same defect as an unprojected match arm, one path over,
+/// and the residue that kept 32 cursor-threading parser definitions rejected
+/// after the arm sites were fixed (ADR 21.8.26a).
+///
+/// The projections come from `wrap_arm_payload_projections`, which walks the
+/// product exactly as `bind_tuple_pattern_to_env` does, so the type each `let`
+/// carries and the type `env` recorded cannot disagree. **CIR is deliberately
+/// untouched**: the codegen path already rebuilds these bindings from the
+/// pattern and is correct today.
 fn elab_tuple_let_then_rest(
     env: Env,
     sub_pats: List<Pattern>,
@@ -214,10 +231,30 @@ fn elab_tuple_let_then_rest(
         NoTypeExpr() =>
             match synth(env, ctx.rhs) {
                 ElabExprErr(e) => ElabExprErr(e),
-                ElabExprOk(env2, _, ty, _) =>
+                ElabExprOk(env2, rhs_term, ty, _) =>
                     let env3 = bind_tuple_pattern_to_env(env2, sub_pats, ty);
-                    elab_block_with_lets(env3, ctx.bc.rest, ctx.bc.final_expr, ctx.bc.mode, ctx.bc.block_span)
+                    elab_tuple_let_body(env3, sub_pats, ty, rhs_term, ctx.bc)
             }
+    }
+}
+
+/// Elaborate the rest of the block and wrap it in the tuple's projections.
+fn elab_tuple_let_body(
+    env: Env,
+    sub_pats: List<Pattern>,
+    ty: TypeHandle,
+    rhs_term: TermHandle,
+    bc: BlockContext
+) -> ElabExprResult {
+    match elab_block_with_lets(env, bc.rest, bc.final_expr, bc.mode, bc.block_span) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, body_term, body_ty, body_cir) =>
+            let binder = tuple_let_binder();
+            let projected = wrap_arm_payload_projections(
+                PatTuple(sub_pats, bc.block_span), ty, binder, body_term
+            );
+            let let_term = tg_term_let(tg_string_to_cstr(binder), ty, rhs_term, projected);
+            ElabExprOk(env2, let_term, body_ty, body_cir)
     }
 }
 

@@ -1,0 +1,3 @@
+// A `type` under a builtin's name would be unreachable: E0091 (ADR 14.9.26c)
+type Int = Nat
+fn main() -> Nat { 0 }

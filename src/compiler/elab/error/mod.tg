@@ -4,12 +4,17 @@
 // This module re-exports all error-related types and functions.
 //
 // Structure:
-// - kinds.tg:    ElabErrorKind enum, error codes and messages
+// - kinds/:      ElabErrorKind enum, plus its code and message projections
 // - expected.tg: ExpectedBecause for bidirectional type checking context
 // - list.tg:     ElabError type, list operations, deduplication
 // - source.tg:   SourceInfo for line/column lookup
 // - format.tg:   Basic plain-text error formatting
 // - render.tg:   Rust-style diagnostic rendering with source context
+// - construct.tg: the `elab_error_*` constructors and decorators
+//
+// This file is the module FACE — what the elaborator may import. Building an
+// error is a separate concern and lives in `construct.tg`, which is where the
+// file was split when it passed the .tg size advisory.
 
 // Submodules are private - only re-exported items are accessible
 mod kinds;
@@ -18,23 +23,27 @@ mod list;
 mod source;
 mod format;
 mod render;
+mod construct;
 
 // Re-export from kinds
 pub use elab::error::kinds::{
     ElabErrorKind,
     ErrTypeMismatch, ErrArityMismatch, ErrNotAFunction, ErrNotAType,
-    ErrNotAnAdt, ErrNotASum, ErrNotAPair, ErrCannotInfer,
+    ErrNotAnAdt, ErrNotASum, ErrNotAPair, ErrCannotInfer, ErrIntLiteralOutOfRange,
     ErrUnresolvedType, ErrUnresolvedValue, ErrUnresolvedModule,
     ErrDuplicateDef, ErrDuplicateImport, ErrPrivateAccess, ErrAmbiguousName,
+    ErrBuiltinTypeRedefined,
     ErrMissingReturnType, ErrInvalidExtern, ErrImportNotFound,
     ErrGlobImportEmpty, ErrCyclicDependency, ErrInvalidVisibility, ErrMissingBody,
     ErrInexhaustiveMatch, ErrUnreachablePattern, ErrConstructorNotFound,
     ErrDuplicateField, ErrMissingField, ErrExtraField, ErrMultiArmMatch,
+    ErrUnsupportedPattern,
     ErrProofRequired, ErrSorryInProd, ErrInvalidRefl,
     ErrSubstExpectedEquality, ErrTransEndpointMismatch, ErrCongExpectedFunction,
     ErrMotiveNotPredicate, ErrMotiveDomainMismatch, ErrMotiveBodyNotType,
     ErrRefInPureContext, ErrCannotMutate,
     ErrNoReturnContext, ErrNoMainFunction, ErrInvalidMainSig,
+    ErrNonStrictlyPositive, ErrCannotProveTermination, ErrPartialInProof,
     ErrRecursionLimitExceeded, ErrPhase1Violation, ErrNotImplemented, ErrOther,
     error_kind_code, error_kind_message
 };
@@ -96,147 +105,5 @@ use lexer::span::Span;
 use driver::ffi::{List, Nil, Cons};
 use elab::ffi::{TypeHandle, INVALID_HANDLE};
 
-// ===========================================================================
-// ERROR CONSTRUCTORS
-// ===========================================================================
-
-/// Create a basic error with just kind and span.
-pub fn elab_error_new(kind: ElabErrorKind, span: Span) -> ElabError {
-    {
-        kind: kind,
-        span: span,
-        notes: Nil,
-        suggestions: Nil,
-        help: NoString,
-        expected_because: NoExpectedBecause
-    }
-}
-
-/// Create an error with a simple message.
-pub fn elab_error_simple(msg: String, span: Span) -> ElabError {
-    elab_error_new(ErrOther(msg), span)
-}
-
-/// Create a type mismatch error.
-pub fn elab_error_type_mismatch(expected: TypeHandle, actual: TypeHandle, span: Span) -> ElabError {
-    elab_error_new(ErrTypeMismatch(expected, actual), span)
-}
-
-/// Create an arity mismatch error.
-pub fn elab_error_arity_mismatch(expected: Nat, actual: Nat, span: Span) -> ElabError {
-    elab_error_new(ErrArityMismatch(expected, actual), span)
-}
-
-/// Create a "not a function" error.
-pub fn elab_error_not_a_function(ty: TypeHandle, span: Span) -> ElabError {
-    elab_error_new(ErrNotAFunction(ty), span)
-}
-
-/// Create an unresolved type error.
-pub fn elab_error_unresolved_type(name: String, span: Span) -> ElabError {
-    elab_error_new(ErrUnresolvedType(name), span)
-}
-
-/// Create an unresolved value error.
-pub fn elab_error_unresolved_value(name: String, span: Span) -> ElabError {
-    elab_error_new(ErrUnresolvedValue(name), span)
-}
-
-/// Create a duplicate definition error.
-pub fn elab_error_duplicate(name: String, span: Span) -> ElabError {
-    elab_error_new(ErrDuplicateDef(name), span)
-}
-
-/// Create a no-return-context error.
-pub fn elab_error_no_return_context(span: Span) -> ElabError {
-    let err = elab_error_new(ErrNoReturnContext, span);
-    elab_error_with_note(err, "return can only be used inside a function body")
-}
-
-/// Create an inexhaustive match error.
-pub fn elab_error_inexhaustive_match(missing: List<String>, span: Span) -> ElabError {
-    elab_error_new(ErrInexhaustiveMatch(missing), span)
-}
-
-/// Create a constructor not found error.
-pub fn elab_error_constructor_not_found(ctor: String, ty: String, span: Span) -> ElabError {
-    elab_error_new(ErrConstructorNotFound(ctor, ty), span)
-}
-
-/// Create a not-implemented error.
-pub fn elab_error_not_implemented(what: String, span: Span) -> ElabError {
-    elab_error_new(ErrNotImplemented(what), span)
-}
-
-// ===========================================================================
-// ERROR MODIFIERS (Builder pattern)
-// ===========================================================================
-
-/// Add expected-because context to an error.
-pub fn elab_error_with_context(err: ElabError, ctx: ExpectedBecause) -> ElabError {
-    {
-        kind: err.kind,
-        span: err.span,
-        notes: err.notes,
-        suggestions: err.suggestions,
-        help: err.help,
-        expected_because: SomeExpectedBecause(ctx)
-    }
-}
-
-/// Add a note to an error.
-pub fn elab_error_with_note(err: ElabError, note: String) -> ElabError {
-    {
-        kind: err.kind,
-        span: err.span,
-        notes: Cons(note, err.notes),
-        suggestions: err.suggestions,
-        help: err.help,
-        expected_because: err.expected_because
-    }
-}
-
-/// Add a suggestion to an error.
-pub fn elab_error_with_suggestion(err: ElabError, suggestion: Suggestion) -> ElabError {
-    {
-        kind: err.kind,
-        span: err.span,
-        notes: err.notes,
-        suggestions: Cons(suggestion, err.suggestions),
-        help: err.help,
-        expected_because: err.expected_because
-    }
-}
-
-/// Add help text to an error.
-pub fn elab_error_with_help(err: ElabError, help: String) -> ElabError {
-    {
-        kind: err.kind,
-        span: err.span,
-        notes: err.notes,
-        suggestions: err.suggestions,
-        help: SomeString(help),
-        expected_because: err.expected_because
-    }
-}
-
-/// Create a duplicate import error with both import locations.
-/// `name` is the local alias that clashed; `source_name` is the actual item
-/// name in the second module (may differ when `as` aliasing is used).
-pub fn elab_error_duplicate_import(
-    name: String,
-    source_name: String,
-    first_span: Span,
-    second_span: Span,
-    first_module: String,
-    second_module: String
-) -> ElabError {
-    let err = elab_error_new(
-        ErrDuplicateImport(name, first_span, second_span, first_module, second_module),
-        second_span
-    );
-    // Add help text suggesting `as` rename — use source_name for the path
-    // so `use b::Bar as Foo` suggests `use b::Bar as bar_alias`, not `use b::Foo ...`
-    let help_text = "use `as` to rename one import: `use " ++ second_module ++ "::" ++ source_name ++ " as " ++ source_name ++ "_alias;`";
-    elab_error_with_help(err, help_text)
-}
+// Re-export from construct
+pub use elab::error::construct::*;

@@ -1,0 +1,194 @@
+// src/compiler/parser/items/shared/attributes.tg
+// Attribute parsing for top-level items (ADR 12.8.26b P1).
+//
+// Grammar:
+//   Attributes = Attribute*
+//   Attribute  = "#" "[" IDENT ( "(" IDENT ")" )? "]"
+//
+// An UNRECOGNISED attribute name is an error, not a skip. That is the whole
+// point of the deliverable: the pre-ADR front end discarded `#[partial]`,
+// `#[partail]` and no annotation at all into the same silence, so a typo read
+// as success. The known set is deliberately closed and small — widening it is
+// a language change, not a parser repair.
+
+use lexer::token::{TokenKind, TokHash, TokLBracket, TokRBracket, TokLParen, TokRParen};
+use lexer::span::{Span, span_merge};
+use parser::error::{ParseError, parse_error_expected};
+use parser::cursor::{Cursor, cursor_peek_kind, cursor_peek_span, cursor_check, cursor_advance,
+    cursor_expect, cursor_eat_ident, token_kind_name,
+    EatIdentResult, SomeIdentResult, NoIdentResult};
+use parser::option::{Option, None, Some};
+use parser::ast::common::{Ident, ident_new, ident_name};
+use parser::ast::nodes::{Item, ItemFn, FunctionDef, Attribute, attribute_new, attribute_name};
+use parser::ast::nodes::items::{item_span};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Result, Ok, Err, list_reverse};
+
+// ===========================================================================
+// KNOWN ATTRIBUTES
+// ===========================================================================
+
+/// Whether `name` is an attribute this compiler understands.
+///
+/// `partial` opts a definition out of termination certification;
+/// `decreasing` names the descent parameter when the search is ambiguous.
+/// Both are ADR 29.6.26e / 11.8.26b constructs, and both are function-level.
+pub fn attribute_is_known(name: String) -> Bool {
+    name == "partial" || name == "decreasing"
+}
+
+/// Whether `name` takes a parenthesised identifier argument.
+pub fn attribute_takes_arg(name: String) -> Bool {
+    name == "decreasing"
+}
+
+// ===========================================================================
+// PARSING
+// ===========================================================================
+
+/// Parse zero or more `#[…]` attributes preceding an item.
+///
+/// Returns them in source order.
+pub fn parse_attributes(cur: Cursor) -> Result<(List<Attribute>, Cursor), ParseError> {
+    let (acc, cur2) = parse_attributes_acc(cur, Nil)?;
+    let ordered: List<Attribute> = list_reverse(acc);
+    Ok((ordered, cur2))
+}
+
+// Partial (ADR 11.8.26b): the recursive call rebuilds its accumulator rather
+// than passing a strict subterm of `cur` — a measure recursion over the token
+// stream, which Non-Goals defers to v2.1. Executable compiler code no proof
+// reaches; E0063 guards that.
+#[partial]
+fn parse_attributes_acc(cur: Cursor, acc: List<Attribute>) -> Result<(List<Attribute>, Cursor), ParseError> {
+    if cursor_check(cur, TokHash()) {
+        let (attr, cur2) = parse_attribute(cur)?;
+        parse_attributes_acc(cur2, Cons(attr, acc))
+    } else {
+        Ok((acc, cur))
+    }
+}
+
+/// Parse one `#[name]` or `#[name(arg)]`.
+fn parse_attribute(cur: Cursor) -> Result<(Attribute, Cursor), ParseError> {
+    let start_span = cursor_peek_span(cur);
+    let cur2 = cursor_advance(cur);              // consume '#'
+    let (_, cur3) = cursor_expect(cur2, TokLBracket())?;
+    match cursor_eat_ident(cur3) {
+        NoIdentResult() => {
+            let found = match cursor_peek_kind(cur3) {
+                None() => "end of file",
+                Some(k) => token_kind_name(k)
+            };
+            Err(parse_error_expected("attribute name", found, cursor_peek_span(cur3)))
+        },
+        SomeIdentResult(name, cur4) => {
+            let name_span = cursor_peek_span(cur3);
+            let name_id = ident_new(name, name_span);
+            parse_attribute_tail(cur4, name_id, start_span)
+        }
+    }
+}
+
+/// Parse the optional `(arg)` and the closing `]`, then validate the name.
+fn parse_attribute_tail(cur: Cursor, name: Ident, start_span: Span) -> Result<(Attribute, Cursor), ParseError> {
+    let (arg, cur2) = parse_attribute_arg(cur)?;
+    let end_span = cursor_peek_span(cur2);
+    let (_, cur3) = cursor_expect(cur2, TokRBracket())?;
+    let attr = attribute_new(name, arg, span_merge(start_span, end_span));
+    validate_attribute(attr, cur3)
+}
+
+/// Parse `(ident)` if present.
+fn parse_attribute_arg(cur: Cursor) -> Result<(Option<Ident>, Cursor), ParseError> {
+    if cursor_check(cur, TokLParen()) {
+        let cur2 = cursor_advance(cur);
+        match cursor_eat_ident(cur2) {
+            NoIdentResult() => {
+                let found = match cursor_peek_kind(cur2) {
+                    None() => "end of file",
+                    Some(k) => token_kind_name(k)
+                };
+                Err(parse_error_expected("attribute argument", found, cursor_peek_span(cur2)))
+            },
+            SomeIdentResult(arg, cur3) => {
+                let arg_span = cursor_peek_span(cur2);
+                let (_, cur4) = cursor_expect(cur3, TokRParen())?;
+                Ok((Some(ident_new(arg, arg_span)), cur4))
+            }
+        }
+    } else {
+        Ok((None, cur))
+    }
+}
+
+/// Reject an unknown attribute name, and an argument list that does not match
+/// the attribute's arity.
+///
+/// This is the criterion that pins the silent discard closed: before it,
+/// `#[partail]` and `#[partial]` produced identical output.
+fn validate_attribute(attr: Attribute, cur: Cursor) -> Result<(Attribute, Cursor), ParseError> {
+    let name = attribute_name(attr);
+    if attribute_is_known(name) == false {
+        Err(parse_error_expected("a known attribute", name, attr.span))
+    } else {
+        validate_attribute_arity(attr, cur, name)
+    }
+}
+
+fn validate_attribute_arity(attr: Attribute, cur: Cursor, name: String) -> Result<(Attribute, Cursor), ParseError> {
+    match attr.arg {
+        Some(_) =>
+            if attribute_takes_arg(name) {
+                Ok((attr, cur))
+            } else {
+                Err(parse_error_expected("no argument for this attribute", name, attr.span))
+            },
+        None() =>
+            if attribute_takes_arg(name) {
+                Err(parse_error_expected("an argument for this attribute", name, attr.span))
+            } else {
+                Ok((attr, cur))
+            }
+    }
+}
+
+// ===========================================================================
+// ATTACHMENT
+// ===========================================================================
+
+/// Attach a parsed attribute list to the item that followed it.
+///
+/// Attributes are function-level, so an annotated non-function is an error
+/// rather than a discard — the same rule as an unknown name, for the same
+/// reason. An empty list passes every item kind through untouched, which keeps
+/// the overwhelmingly common unannotated path free of any new failure mode.
+pub fn item_attach_attributes(item: Item, attrs: List<Attribute>) -> Result<Item, ParseError> {
+    match attrs {
+        Nil() => Ok(item),
+        Cons(first, _) => attach_to_fn(item, attrs, first)
+    }
+}
+
+fn attach_to_fn(item: Item, attrs: List<Attribute>, first: Attribute) -> Result<Item, ParseError> {
+    match item {
+        ItemFn(f) => {
+            let annotated: FunctionDef = {
+                vis: f.vis,
+                name: f.name,
+                type_params: f.type_params,
+                params: f.params,
+                return_type: f.return_type,
+                body: f.body,
+                attrs: attrs,
+                span: f.span
+            };
+            Ok(ItemFn(annotated))
+        },
+        _ => Err(parse_error_expected(
+            "a function definition after this attribute",
+            attribute_name(first),
+            item_span(item)
+        ))
+    }
+}

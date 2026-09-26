@@ -1,0 +1,37 @@
+// tests/int_overflow_trap_run.tg — ADR 14.9.26c AC 3: both sides trap
+//
+// Prints one line, then overflows `Int`. Natively the checked add branches
+// into `tg_int_trap`, which prints `error: integer overflow in +` and aborts;
+// on the evaluator the checked arm records `EvalStopped::IntTrap` and
+// `tungsten run` prints the same line and exits non-zero. `tungsten diff
+// exec` classifies two sides that both fail at runtime with equal stdout as
+// PARITY — so this fixture passes only if the trap fires on BOTH sides
+// *after* the print, and fails if either side wraps, saturates, or traps
+// before printing. stderr is reported but not compared by `diff exec`; the
+// byte-identity of the two lines is the golden test's job.
+//
+// The overflow is computed, not folded: `9223372036854775807 + 1` as a
+// literal expression would be rejected at elaboration on neither side (the
+// literal fits; the sum does not), and a constant fold in either backend
+// would hide the runtime trap this fixture exists to exercise.
+
+extern "C" fn tg_println(s: Nat, len: Nat) -> Unit
+extern "C" fn tg_string_to_cstring(s: String) -> Nat
+extern "C" fn tg_string_len_internal(s: String) -> Nat
+extern "C" fn tg_free_string(s: Nat) -> Unit
+
+pub fn println(s: String) -> Unit {
+    let c = tg_string_to_cstring(s);
+    let len = tg_string_len_internal(s);
+    tg_println(c, len);
+    tg_free_string(c)
+}
+
+fn signed_max() -> Int { 9223372036854775807 }
+
+fn main() -> Unit {
+    println("before overflow");
+    let overflowed = signed_max() + 1;
+    // Unreachable on both sides; a wrapping backend would print it.
+    if overflowed < 0 { println("wrapped") } else { println("after overflow") }
+}

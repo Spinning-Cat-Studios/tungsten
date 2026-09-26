@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["tungsten_runtime", "tungsten_core", "tungsten_codegen", "bootstrap"]
+members = ["tungsten_runtime", "tungsten_core", "tungsten_codegen", "bootstrap", "tools/tungsten-dev", "tools/golden"]
 default-members = ["tungsten_runtime", "tungsten_core", "tungsten_codegen", "bootstrap"]
 
 [workspace.package]
@@ -17,3 +17,47 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+# Stop `target/debug/deps` accumulating per-codegen-unit link temporaries
+# (ADR 8.8.26f Stage C). On Apple targets cargo's dev default is
+# `split-debuginfo = "unpacked"`: the `deps/*.rcgu.o` ARE the debug info, named
+# by absolute path from each binary's Mach-O debug map, so rustc never deletes
+# them and cargo has no GC for superseded generations. Measured here 2026-08-11:
+# 803,321 objects, 19,988 of them live — 30 GB, 97.6% orphaned, growing ~26k
+# entries/day.
+#
+# `packed` runs dsymutil per link into a `<bin>.dSYM` bundle and the objects
+# become deletable, so retention stops at source. Debuggability is preserved and
+# arguably improved — a self-contained `.dSYM` survives `deps/` churn — and the
+# bundles are BOUNDED: one per artifact, replaced on relink, 104 of them for the
+# whole workspace, where the objects they replace have no ceiling at all.
+#
+# Measured against this ADR's pre-registered veto bars, alternating conditions so
+# both arms share a load band (an unpaired first attempt read +29.98 s against a
+# >30 s bar purely because the load moved 88% between cells):
+#
+#   cold `cargo test --all --no-run`, fresh dir, median of 3:  43.43 s → 54.57 s
+#     = +11.14 s, against a > 30 s reject bar
+#   warm single-crate relink (`-p code-health`, one touch):      0.83 s →  2.02 s
+#     = +1.19 s, against a > 3 s reject bar
+#
+# `split-debuginfo = "off"` was measured and REJECTED: it is equally flat, but
+# leaves the debug map naming 255 objects rustc had already deleted — worse than
+# `debug = 0`, which at least leaves no dangling references. `debug = 0` itself
+# was measured only to establish the ceiling. Do not "simplify" this key to
+# either; `make check-profile-dev-split-debuginfo` guards both directions.
+[profile.dev]
+split-debuginfo = "packed"
+
+# Size-tuned profile for the `wasm32-unknown-unknown` playground artifact
+# (ADR 28.7.26a Phase 4). A *custom* profile rather than edits to
+# `[profile.release]`: artifact bytes are the gating constraint on exactly one
+# target, and trading the compiler's own throughput for them would be a poor
+# bargain everywhere else. `make playground-wasm` is the reproducible build.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"   # optimize for size, not speed — download time dominates
+lto = true        # cross-crate dead-code elimination across the front end
+codegen-units = 1 # more inlining/dedup opportunities for the size passes
+panic = "abort"   # no unwinding tables; a wasm panic aborts the instance anyway
+strip = true      # drop symbols — the browser has no use for them

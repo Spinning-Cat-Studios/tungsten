@@ -1,0 +1,12 @@
+warning: Signature Collection global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0091]: cannot redefine the builtin type `Int` — builtin lookup precedes user types, so this definition would be unreachable (at 83..86)
+  hint: run `tungsten doctor check module signature-collection <file>` for details
+[E0091] Error: cannot redefine the builtin type `Int` — builtin lookup precedes user types, so this definition would be unreachable
+   ╭─[tests/golden/error/int_builtin_redefined.tg:2:6]
+   │
+ 2 │ type Int = Nat
+   │      ─┬─  
+   │       ╰─── 
+───╯
+
+error: aborting due to 1 error

@@ -1,0 +1,98 @@
+// src/compiler/driver/ffi/builder/mod.tg
+// StringBuilder: an internally mutable byte buffer behind an opaque runtime
+// handle (ADR 14.9.26a, Mutable References Phase 1).
+//
+// WHAT THE HANDLE MEANS. The `Nat` inside `MkStringBuilder` is the ADDRESS of a
+// header the runtime owns — `{ ptr, len, cap, state }` in
+// `tungsten_core/src/ffi/driver/io/string_builder/` — marshalled the way
+// `tg_string_to_cstring` marshals a C-string address. It is wrapped in a
+// single-constructor ADT rather than aliased, because an alias is transparent:
+// `type StringBuilder = Nat` would let `sb + 1` type-check and would hand the
+// structural comparator a `nat_eq` leaf. The ADT costs one small allocation per
+// builder VALUE, negligible against the buffer it owns, and makes `assert_eq`
+// on two builders an explicit identity comparison; compare CONTENTS through
+// `to_string`.
+//
+// FOLD-THROUGH. Every push returns the same handle it was given, so a builder
+// threads through a fold as an accumulator (the design doc's Option C):
+//
+//     let sb = list_fold(parts, string_builder_new(), fn(acc, s) { push_str(acc, s) });
+//     to_string(sb)
+//
+// A CONSUMED BUILDER IS DEAD. `to_string` hands the buffer out as the `String`
+// WITHOUT copying and poisons the header; any later call on that handle writes
+// one line naming the builder and aborts the process. The poison is a state
+// word of its own, not a sentinel borrowed from `len` or `cap` — a sentinel is
+// named for what it means, never for what another module uses the number for.
+//
+// EVALUATOR. All six externs have arms in
+// `tungsten_core/src/eval/env/handlers/externs/builder/` and entries in the
+// registry, so `tungsten test` executes them — confirm with
+// `tungsten info eval reachable-externs push_str src/compiler/main.tg`.
+//
+// SELF-HOST. This module is IN the compiler's module tree (exported from
+// `driver::ffi` like its siblings) and deliberately UNREACHED from it: the
+// self-hosted compiler declares extern calls but cannot lower them yet, so
+// nothing reachable from `src/compiler/main.tg` may call a wrapper here until
+// that lands (B3/I3). `doctor audit-dead-definitions` lists these as unreached,
+// and that is the intended state.
+
+pub type StringBuilder = MkStringBuilder(Nat)
+
+// --- Raw FFI Declarations ---
+//
+// A `String` argument crosses as the by-value `{ ptr, len }` pair
+// (`tg_string_append_char` is the precedent); a `Nat` is a `u64`.
+
+extern "C" fn tg_string_builder_new() -> Nat
+extern "C" fn tg_string_builder_with_capacity(capacity: Nat) -> Nat
+extern "C" fn tg_string_builder_push_str(sb: Nat, s: String) -> Nat
+extern "C" fn tg_string_builder_push_char(sb: Nat, code: Nat) -> Nat
+extern "C" fn tg_string_builder_len(sb: Nat) -> Nat
+extern "C" fn tg_string_builder_to_string(sb: Nat) -> String
+
+// --- Safe Wrappers ---
+
+/// A new, empty builder.
+pub fn string_builder_new() -> StringBuilder {
+    MkStringBuilder(tg_string_builder_new())
+}
+
+/// A new builder whose buffer already holds `capacity` bytes, so that many
+/// bytes of pushes never regrow it. Capacity is deliberately not readable
+/// back — exposing it would fix the growth policy as API.
+pub fn string_builder_with_capacity(capacity: Nat) -> StringBuilder {
+    MkStringBuilder(tg_string_builder_with_capacity(capacity))
+}
+
+/// Append `s`. Returns the SAME builder, for threading through a fold.
+pub fn push_str(sb: StringBuilder, s: String) -> StringBuilder {
+    match sb {
+        MkStringBuilder(h) => MkStringBuilder(tg_string_builder_push_str(h, s))
+    }
+}
+
+/// Append one Unicode scalar value (`code` is the code point, not a byte) as
+/// UTF-8. Returns the same builder. A surrogate or a value above `0x10FFFF`
+/// aborts with a named line rather than being silently replaced.
+pub fn push_char(sb: StringBuilder, code: Nat) -> StringBuilder {
+    match sb {
+        MkStringBuilder(h) => MkStringBuilder(tg_string_builder_push_char(h, code))
+    }
+}
+
+/// Bytes pushed so far — BYTES, not characters, so a multi-byte scalar
+/// counts for more than one.
+pub fn string_builder_len(sb: StringBuilder) -> Nat {
+    match sb {
+        MkStringBuilder(h) => tg_string_builder_len(h)
+    }
+}
+
+/// Take the finished string out. CONSUMES the builder: the handle is dead
+/// afterwards and any further use aborts.
+pub fn to_string(sb: StringBuilder) -> String {
+    match sb {
+        MkStringBuilder(h) => tg_string_builder_to_string(h)
+    }
+}

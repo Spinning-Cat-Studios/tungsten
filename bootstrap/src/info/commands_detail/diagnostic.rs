@@ -16,7 +16,7 @@ use tungsten_bootstrap::elaborate::TypeProvenance;
 
 /// Display the μ-type encoding of a named type.
 ///
-/// Shows the raw Type tree from Phase 1e encoding cache, the structural
+/// Shows the raw Type tree from Encoding Finalization encoding cache, the structural
 /// display form, and mutual recursion group info if applicable.
 pub fn cmd_info_type_encoding(
     name: &str,
@@ -63,7 +63,7 @@ fn classify_type_kind(is_adt: bool, is_record: bool) -> &'static str {
     }
 }
 
-fn print_type_not_found(name: &str, project: &ProjectOutput) {
+pub(super) fn print_type_not_found(name: &str, project: &ProjectOutput) {
     eprintln!("Type not found: {name}");
     let mut available: Vec<&str> = project
         .adt_types
@@ -174,7 +174,7 @@ pub fn cmd_info_mutual_recursion_groups(
     };
 
     // Build type dependency graph and compute SCCs
-    let graph = TypeGraph::build(&project.adt_types);
+    let graph = TypeGraph::build_adt_only(&project.adt_types);
 
     if verbose {
         eprintln!(

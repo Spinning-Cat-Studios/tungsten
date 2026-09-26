@@ -1,0 +1,26 @@
+// ADR 29.6.26f P4 — stack-safety AC: a List<Nat> of length 100 000 compares
+// without stack overflow. The synthesized list comparator is a **tail-recursive
+// spine** (`compare_List_T_spine`), so the "heads equal ⇒ recurse on tails" call
+// is in tail position and musttail-eliminated (1.7.26a sret path) → O(1) native
+// stack for a spine of any length.
+//
+// This program must be **compiled** (codegen), not evaluated — the AC is about the
+// compiled comparator's stack usage. Verify:
+//   make tg-test-comparator-codegen   (compiles + runs; expect exit 0)
+// A regression (non-tail-recursive spine) overflows the 128 MB stack → exit 134.
+
+type List<T> = | Nil | Cons(T, List<T>)
+type PathSeg = | Field(String) | Pos(Nat) | Index(Nat) | Tag | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult = | Equal | NotEqual(CompareDiff)
+
+fn is_eq(r: CompareResult) -> Bool { match r { Equal() => true, NotEqual(_) => false } }
+fn build(n: Nat, acc: List<Nat>) -> List<Nat> {
+    if n == 0 { acc } else { build(n - 1, Cons(n - 1, acc)) }
+}
+fn main() -> Nat {
+    let xs: List<Nat> = build(100000, Nil);
+    let ys: List<Nat> = build(100000, Nil);
+    if is_eq(compare(xs, ys)) { 0 } else { 1 }
+}

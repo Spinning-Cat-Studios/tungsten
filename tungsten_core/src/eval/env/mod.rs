@@ -4,27 +4,53 @@
 //! global definitions. Lookups are memoized to provide call-by-need
 //! (lazy evaluation with sharing), avoiding exponential term blowup.
 
-mod handlers;
+mod comparator_stop;
+mod deadline;
+pub(crate) mod handlers;
 mod handlers_string;
 mod helpers;
+mod lookup;
+mod stopped;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
+
+pub use comparator_stop::{ComparatorFailure, ComparatorFailureKind};
+pub use deadline::eval_with_env_until;
+// The evaluator's executable-extern registry, surfaced for `tungsten info eval
+// externs` / `doctor check extern-coverage` (ADR 28.7.26a retrospective).
+pub use handlers::externs::registry as extern_registry;
+pub use stopped::{EvalStopped, GlobalLookup, IntTrapKind};
 
 use crate::terms::Term;
+use crate::types::Type;
 
 use super::StepResult;
 
-use handlers::{
-    step_adt_match_env, step_annot_env, step_app_env, step_case_env, step_fst_env, step_if_env,
-    step_let_env, step_natind_env, step_natrec_env, step_pair_env, step_snd_env,
-    step_str_char_at_env, step_str_concat_env, step_str_eq_env, step_str_len_env,
-    step_str_substring_env, step_subst_env, step_tyapp_env, step_unfold_env,
-};
-use helpers::{
-    step_binary_bool_env, step_binary_nat_env, step_binary_nat_to_bool_env, step_eval_then_env,
-    step_eval_to_value_env, step_nat_compare_env, step_unary_bool_env,
-};
+/// Lazy comparator synthesis callback (ADR 29.6.26f §T11.2a / P6′).
+///
+/// Given a concrete type `T`, returns `(top_symbol, defs)` where `top_symbol` is
+/// the comparator symbol for `T` and `defs` are all `(symbol, body)` comparators
+/// in its transitive closure (so sub-comparators resolve). Supplied by
+/// `bootstrap` (which owns the synthesis) so the evaluator can resolve
+/// `__cmp<T>` without depending on `bootstrap`.
+///
+/// The error side is a [`ComparatorFailure`], not a bare `None` (ADR 1.8.26b
+/// D3). The distinction is load-bearing: the pre-1.8.26b callback decided
+/// comparability by `closure.is_empty()`, and the D2 defect produces a
+/// **non-empty** closure whose body calls a symbol the closure never defines —
+/// so an emptiness predicate returned `Some`, the evaluator installed the defs,
+/// and the unbound recursive edge went Stuck exactly as if nothing had
+/// happened. The callback must therefore validate what it is about to hand
+/// back, and say *which* way it failed.
+pub type ComparatorSynth =
+    Rc<dyn Fn(&Type) -> Result<(String, Vec<(String, Term)>), ComparatorFailure>>;
+
+use handlers::dispatch::{step_arith_bool_env, step_core_env, step_return_env, step_string_env};
+use handlers::int_ops::step_int_env;
+use handlers::{step_adt_match_env, step_extern_call_env};
+use helpers::{step_eval_then_env, step_eval_to_value_env};
 
 // ============================================================================
 // EvalEnv
@@ -35,12 +61,50 @@ use helpers::{
 /// The environment provides call-by-need semantics: when a global is first
 /// looked up, its definition is evaluated to a value and cached. Subsequent
 /// lookups return the cached value directly.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EvalEnv {
     /// Map from global names to their unevaluated definitions
     globals: HashMap<String, Term>,
+    /// Comparators synthesized on demand (`__cmp<T>` resolution, ADR 29.6.26f).
+    dynamic: RefCell<HashMap<String, Term>>,
     /// Cache of already-evaluated values (for call-by-need)
     cache: RefCell<HashMap<String, Term>>,
+    /// Lazy comparator synthesis callback (`None` when not configured).
+    comparator_synth: Option<ComparatorSynth>,
+    /// Globals currently being forced, innermost last (ADR 22.7.26a / D1).
+    /// Ordered (not a set) so a detected cycle can be reported as a path.
+    forcing: RefCell<Vec<String>>,
+    /// The first detected black-hole cycle, if any (ADR 22.7.26a / D2).
+    black_hole: RefCell<Option<Vec<String>>>,
+    /// The first recorded stop, if any: a comparison that never ran (ADR
+    /// 1.8.26b / D3), a malformed elimination, or an `Int` trap (ADR
+    /// 14.9.26c). Rides the env for the same reason `black_hole` does:
+    /// interior stepping must keep returning `Stuck` so the loops terminate,
+    /// but the reporting boundary must not mistake the residual for a value.
+    recorded_stop: RefCell<Option<EvalStopped>>,
+    /// How many test assertions actually EXECUTED during this evaluation
+    /// (ADR 6.8.26b). Counted rather than inferred: a test that finishes with
+    /// zero here asserted nothing, whatever the reason, and reporting it `ok`
+    /// is the defect. Rides the env like `comparator_stop` because the
+    /// reporting boundary — not the stepping loop — is what needs the answer.
+    assertions_executed: Cell<u64>,
+    /// How many EFFECTFUL externs executed during this evaluation (ADR
+    /// 14.9.26a). `lookup` reads it around each forcing: a global whose body
+    /// performed an effect is a *call* natively — every reference runs it
+    /// again — so memoizing its value would share one effect across every
+    /// use. `string_builder_new` was the first case where that sharing is
+    /// observably wrong (one builder aliased by every `new`), but the class
+    /// is every nullary function with a side effect.
+    effects_performed: Cell<u64>,
+}
+
+impl std::fmt::Debug for EvalEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EvalEnv")
+            .field("globals", &self.globals.keys().collect::<Vec<_>>())
+            .field("comparator_synth", &self.comparator_synth.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl EvalEnv {
@@ -49,7 +113,14 @@ impl EvalEnv {
     pub fn new(globals: HashMap<String, Term>) -> Self {
         EvalEnv {
             globals,
+            dynamic: RefCell::new(HashMap::new()),
             cache: RefCell::new(HashMap::new()),
+            comparator_synth: None,
+            forcing: RefCell::new(Vec::new()),
+            black_hole: RefCell::new(None),
+            recorded_stop: RefCell::new(None),
+            assertions_executed: Cell::new(0),
+            effects_performed: Cell::new(0),
         }
     }
 
@@ -59,30 +130,119 @@ impl EvalEnv {
         EvalEnv::new(HashMap::new())
     }
 
-    /// Look up a global, evaluating and caching if necessary
-    pub fn lookup(&self, name: &str) -> Option<Term> {
-        if let Some(cached) = self.cache.borrow().get(name) {
-            return Some(cached.clone());
-        }
+    /// Install the lazy comparator synthesis callback (ADR 29.6.26f §T11.2a).
+    #[must_use]
+    pub fn with_comparator_synth(mut self, synth: ComparatorSynth) -> Self {
+        self.comparator_synth = Some(synth);
+        self
+    }
 
-        if let Some(def) = self.globals.get(name) {
-            let value = eval_with_env(def, self);
-            self.cache
-                .borrow_mut()
-                .insert(name.to_string(), value.clone());
-            Some(value)
-        } else {
-            None
+    /// The configured comparator synthesis callback, if any.
+    #[must_use]
+    pub fn comparator_synth(&self) -> Option<&ComparatorSynth> {
+        self.comparator_synth.as_ref()
+    }
+
+    /// Register on-demand synthesized comparator definitions (idempotent).
+    pub fn register_comparators(&self, defs: Vec<(String, Term)>) {
+        let mut dynamic = self.dynamic.borrow_mut();
+        for (name, body) in defs {
+            dynamic.entry(name).or_insert(body);
         }
     }
+
+    /// The names of comparators synthesized into this env so far.
+    ///
+    /// A caller diagnosing a stuck residual needs these: they are *defined*,
+    /// but they are not in the static def list, so a diagnosis that resolves
+    /// globals against that list alone reports them "never resolved" and sends
+    /// the reader after the wrong cause (measured during ADR 1.8.26b's D2
+    /// diagnosis, where it cost the session its first root-cause thesis).
+    #[must_use]
+    pub fn registered_comparators(&self) -> Vec<String> {
+        self.dynamic.borrow().keys().cloned().collect()
+    }
+
+    // `record_stop` / `recorded_stop` live in `stopped.rs`.
+
+    /// Record that one test assertion actually executed (ADR 6.8.26b).
+    ///
+    /// Called from the assertion dispatch in `handlers/externs/call.rs`, which
+    /// is the single funnel every `.tg` assertion reduces through — so this
+    /// counts the whole `assert_eq`/`assert_ne`/`assert`/`fail` surface
+    /// without knowing how many wrappers sit above it.
+    pub fn record_assertion_executed(&self) {
+        self.assertions_executed
+            .set(self.assertions_executed.get().saturating_add(1));
+    }
+
+    /// How many test assertions executed during this evaluation.
+    ///
+    /// **Zero means the test asserted nothing** — the outcome that used to be
+    /// reported `ok`, because an assertion that never runs never sets the
+    /// failure flag either.
+    /// (The runner builds a fresh env per test, so this needs no reset.)
+    #[must_use]
+    pub fn assertions_executed(&self) -> u64 {
+        self.assertions_executed.get()
+    }
+
+    /// Record that an effectful extern executed (ADR 14.9.26a).
+    ///
+    /// Called by the extern dispatcher for every claimed call whose registry
+    /// kind is not `Pure`; `lookup` compares the count before and after
+    /// forcing a global and refuses to memoize one that moved it.
+    pub fn record_effect_performed(&self) {
+        self.effects_performed
+            .set(self.effects_performed.get().saturating_add(1));
+    }
+
+    /// How many effectful externs have executed on this env so far.
+    #[must_use]
+    pub fn effects_performed(&self) -> u64 {
+        self.effects_performed.get()
+    }
+
+    // `lookup` (call-by-need forcing + black-hole detection) lives in
+    // `lookup.rs` (ADR 22.7.26a).
 }
 
 // ============================================================================
 // Environment-based evaluation
 // ============================================================================
 
-/// Evaluate a term to a value using the given environment
-pub fn eval_with_env(term: &Term, env: &EvalEnv) -> Term {
+/// Evaluate a term to a value using the given environment.
+///
+/// `Err(EvalStopped::BlackHole)` — the only stop this unbounded entry can
+/// produce — means a global re-entered its own forcing (ADR 22.7.26a); the
+/// term never had a value and no caller may treat the result as one.
+pub fn eval_with_env(term: &Term, env: &EvalEnv) -> Result<Term, EvalStopped> {
+    finished_or_black_hole(eval_term_loop(term, env), env)
+}
+
+/// Resolve a finished (value-or-stuck) term against the env's recorded stops:
+/// a black-hole cycle (ADR 22.7.26a / D2) or a comparison that never ran (ADR
+/// 1.8.26b / D3) wins over the surface term, which is a poisoned partial
+/// result whenever either was detected.
+///
+/// Black holes are consulted first only to preserve the pre-1.8.26b diagnosis
+/// on a term that manages to hit both; the two are independent.
+pub(super) fn finished_or_black_hole(finished: Term, env: &EvalEnv) -> Result<Term, EvalStopped> {
+    if let Some(cycle) = env.black_hole_cycle() {
+        return Err(EvalStopped::BlackHole { cycle });
+    }
+    match env.recorded_stop() {
+        Some(stop) => Err(stop),
+        None => Ok(finished),
+    }
+}
+
+/// The raw stepping loop shared by the entry points and `EvalEnv::lookup`.
+///
+/// Interior-only: a black hole surfaces here as an ordinary stuck term (the
+/// loop must terminate), and the recorded cycle rides the env — callers other
+/// than `lookup` must check it, which the `eval_with_env*` entries do.
+fn eval_term_loop(term: &Term, env: &EvalEnv) -> Term {
     let mut current = term.strip_spans();
     loop {
         match step_with_env(&current, env) {
@@ -92,18 +252,33 @@ pub fn eval_with_env(term: &Term, env: &EvalEnv) -> Term {
     }
 }
 
-/// Evaluate with environment and step limit
+/// Evaluate with environment and step limit.
 ///
-/// Returns `None` if the step limit is exceeded.
-pub fn eval_with_env_and_limit(term: &Term, env: &EvalEnv, limit: usize) -> Option<Term> {
+/// `Err(EvalStopped::StepLimit)` replaces the old `None`; a black hole
+/// detected below the limit reports as `BlackHole`, never as `StepLimit` —
+/// the exhaustion is a consequence, not the diagnosis.
+pub fn eval_with_env_and_limit(
+    term: &Term,
+    env: &EvalEnv,
+    limit: usize,
+) -> Result<Term, EvalStopped> {
     let mut current = term.strip_spans();
     for _ in 0..limit {
         match step_with_env(&current, env) {
             StepResult::Stepped(next) => current = next,
-            StepResult::Value | StepResult::Stuck => return Some(current),
+            StepResult::Value | StepResult::Stuck => {
+                return finished_or_black_hole(current, env);
+            }
         }
     }
-    None
+    // Limit exhausted; a recorded stop (poisoned env) is the truer diagnosis.
+    if let Some(cycle) = env.black_hole_cycle() {
+        return Err(EvalStopped::BlackHole { cycle });
+    }
+    if let Some(stop) = env.recorded_stop() {
+        return Err(stop);
+    }
+    Err(EvalStopped::StepLimit { limit })
 }
 
 // ============================================================================
@@ -124,20 +299,24 @@ pub fn step_with_env(term: &Term, env: &EvalEnv) -> StepResult {
         | Term::Unit
         | Term::Zero
         | Term::NatLit(_)
+        | Term::IntLit(_)
         | Term::StringLit(_) => StepResult::Value,
 
-        // Stuck terms
-        Term::Var(_)
-        | Term::Sorry
-        | Term::ExternCall(_, _)
-        | Term::RefNew(_)
-        | Term::RefGet(_)
-        | Term::RefSet(_, _) => StepResult::Stuck,
+        // Test-assertion FFIs execute; other extern calls stay stuck.
+        Term::ExternCall(name, args) => step_extern_call_env(name, args, env),
 
-        // Global lookup
+        // Stuck terms
+        Term::Var(_) | Term::Sorry | Term::RefNew(_) | Term::RefGet(_) | Term::RefSet(_, _) => {
+            StepResult::Stuck
+        }
+
+        // Global lookup. A black hole is stuck *interiorly* (the loop must
+        // terminate) but never at the reporting boundary: the cycle rides the
+        // env and the `eval_with_env*` entries return it as a distinct
+        // outcome (ADR 22.7.26a / D2).
         Term::Global(name) => match env.lookup(name) {
-            Some(value) => StepResult::Stepped(value),
-            None => StepResult::Stuck,
+            GlobalLookup::Value(value) => StepResult::Stepped(value),
+            GlobalLookup::Unbound | GlobalLookup::BlackHole => StepResult::Stuck,
         },
 
         // Evaluate-to-value wrappers
@@ -193,6 +372,11 @@ pub fn step_with_env(term: &Term, env: &EvalEnv) -> StepResult {
         | Term::BoolOr(..)
         | Term::BoolNot(_) => step_arith_bool_env(term, env),
 
+        // Signed integers: checked, trapping (ADR 14.9.26c)
+        Term::IntBin(..) | Term::IntNeg(_) | Term::NatToInt(_) | Term::IntToNat(_) => {
+            step_int_env(term, env)
+        }
+
         // ADT match
         Term::AdtMatch(scrut, arms) => step_adt_match_env(scrut, arms, env),
 
@@ -204,98 +388,6 @@ pub fn step_with_env(term: &Term, env: &EvalEnv) -> StepResult {
     }
 }
 
-/// Step a Return term with environment: strip the wrapper when the inner value is ready.
-fn step_return_env(t: &Term, env: &EvalEnv) -> StepResult {
-    if t.is_value() {
-        return StepResult::Stepped(t.clone());
-    }
-    match step_with_env(t, env) {
-        StepResult::Stepped(t_new) => StepResult::Stepped(Term::early_return(t_new)),
-        other => other,
-    }
-}
-
-/// Core term forms with environment: application, let, if, fix, products, sums, proof/recursion.
-fn step_core_env(term: &Term, env: &EvalEnv) -> StepResult {
-    match term {
-        Term::App(t1, t2) => step_app_env(t1, t2, env),
-        Term::Let(x, ty, def, body) => step_let_env(x, ty, def, body, env),
-        Term::If(cond, then_, else_) => step_if_env(cond, then_, else_, env),
-        Term::TyApp(t, ty) => step_tyapp_env(t, ty, env),
-        Term::Annot(t, ty) => step_annot_env(t, ty, env),
-        Term::Fix(f, ty, body) => {
-            let unfolded =
-                body.substitute(f, &Term::fix(f.clone(), ty.clone(), body.as_ref().clone()));
-            StepResult::Stepped(unfolded)
-        }
-        Term::Pair(t1, t2) => step_pair_env(t1, t2, env),
-        Term::Fst(t) => step_fst_env(t, env),
-        Term::Snd(t) => step_snd_env(t, env),
-        Term::Case(scrut, x, left, y, right) => {
-            use handlers::CaseArm;
-            step_case_env(
-                scrut,
-                &CaseArm { var: x, body: left },
-                &CaseArm {
-                    var: y,
-                    body: right,
-                },
-                env,
-            )
-        }
-        Term::NatRec(ty, z, s, n) => step_natrec_env(ty, z, s, n, env),
-        Term::NatInd(m, z, s, n) => step_natind_env(m, z, s, n, env),
-        Term::Subst(ty, motive, eq, proof) => step_subst_env(ty, motive, eq, proof, env),
-        Term::Unfold(ty, t) => step_unfold_env(t, ty, env),
-        _ => unreachable!("step_core_env called with non-core term"),
-    }
-}
-
-/// String operation steps with environment.
-fn step_string_env(term: &Term, env: &EvalEnv) -> StepResult {
-    match term {
-        Term::StrConcat(t1, t2) => step_str_concat_env(t1, t2, env),
-        Term::StrLen(t) => step_str_len_env(t, env),
-        Term::StrEq(t1, t2) => step_str_eq_env(t1, t2, env),
-        Term::StrCharAt(s, n) => step_str_char_at_env(s, n, env),
-        Term::StrSubstring(s, start, len) => step_str_substring_env(s, start, len, env),
-        _ => unreachable!("step_string_env called with non-string term"),
-    }
-}
-
-/// Arithmetic and boolean operation steps with environment.
-fn step_arith_bool_env(term: &Term, env: &EvalEnv) -> StepResult {
-    match term {
-        Term::NatLt(a, b) => step_nat_compare_env(a, b, |x, y| x < y, Term::nat_lt, env),
-        Term::NatLe(a, b) => step_nat_compare_env(a, b, |x, y| x <= y, Term::nat_le, env),
-        Term::NatGt(a, b) => step_nat_compare_env(a, b, |x, y| x > y, Term::nat_gt, env),
-        Term::NatGe(a, b) => step_nat_compare_env(a, b, |x, y| x >= y, Term::nat_ge, env),
-        Term::NatAdd(a, b) => step_binary_nat_env(a, b, usize::saturating_add, Term::nat_add, env),
-        Term::NatSub(a, b) => step_binary_nat_env(a, b, usize::saturating_sub, Term::nat_sub, env),
-        Term::NatMul(a, b) => step_binary_nat_env(a, b, usize::saturating_mul, Term::nat_mul, env),
-        Term::NatDiv(a, b) => step_binary_nat_env(
-            a,
-            b,
-            |x, y| if y == 0 { 0 } else { x / y },
-            Term::nat_div,
-            env,
-        ),
-        Term::NatMod(a, b) => step_binary_nat_env(
-            a,
-            b,
-            |x, y| if y == 0 { 0 } else { x % y },
-            Term::nat_mod,
-            env,
-        ),
-        Term::NatEq(a, b) => step_binary_nat_to_bool_env(a, b, |x, y| x == y, Term::nat_eq, env),
-        Term::BoolAnd(a, b) => step_binary_bool_env(a, b, |x, y| x && y, Term::bool_and, env),
-        Term::BoolOr(a, b) => step_binary_bool_env(a, b, |x, y| x || y, Term::bool_or, env),
-        Term::BoolNot(a) => step_unary_bool_env(a, |x| !x, Term::bool_not, env),
-        _ => unreachable!("step_arith_bool_env called with non-arith/bool term"),
-    }
-}
-
 // Tests
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;

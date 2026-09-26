@@ -83,6 +83,9 @@ fn parse_fn_body(cur: Cursor, fp: FnParts,
         params: params,
         return_type: ret_type,
         body: body,
+        // `parse_item` attaches the real list after dispatch (ADR 12.8.26b P1);
+        // the item parsers themselves never see attributes.
+        attrs: Nil,
         span: span_merge(fp.start_span, expr_span(body))
     };
     Ok((ItemFn(fn_def), cur2))

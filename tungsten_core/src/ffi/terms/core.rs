@@ -2,13 +2,17 @@
 //!
 //! Structural/binding operations: var, lambda, app, let, if, annot, fix, global.
 //! Data constructors (zero, succ, pair, inl, inr, etc.) are in core_data.rs.
+//!
+//! All constructors are O(1) node pushes (ADR 2.7.26a §4): children stay
+//! handles, embedded types stay type-node handles.
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
-use crate::terms::Term;
-
+use super::nodes::TermNode;
+use super::{valid_terms, valid_types};
 use crate::ffi::{with_arena, TermHandle, TypeHandle, INVALID_HANDLE};
+
 // ============================================================================
 // Essential Term Constructors
 // ============================================================================
@@ -22,7 +26,7 @@ pub extern "C" fn tg_term_var(index: u64) -> TermHandle {
     with_arena!(|arena| {
         // Use de Bruijn-style naming: $0, $1, etc.
         let name = format!("${index}");
-        arena.alloc_term(Term::Var(name))
+        arena.alloc_term_node(TermNode::Var(name))
     })
 }
 
@@ -41,7 +45,7 @@ pub unsafe extern "C" fn tg_term_var_named(name: *const c_char) -> TermHandle {
         Ok(s) => s,
         Err(_) => return INVALID_HANDLE,
     };
-    with_arena!(|arena| arena.alloc_term(Term::Var(name_str.to_owned())))
+    with_arena!(|arena| arena.alloc_term_node(TermNode::Var(name_str.to_owned())))
 }
 
 /// Construct a lambda abstraction: λx:τ. body
@@ -63,15 +67,10 @@ pub unsafe extern "C" fn tg_term_lambda(
     };
 
     with_arena!(|arena| {
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let body = match arena.get_term(body) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::Lambda(name_str.to_owned(), ty, Box::new(body)))
+        if !valid_types(arena, &[ty]) || !valid_terms(arena, &[body]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Lambda(name_str.to_owned(), ty, body))
     })
 }
 
@@ -79,15 +78,10 @@ pub unsafe extern "C" fn tg_term_lambda(
 #[no_mangle]
 pub extern "C" fn tg_term_app(func: TermHandle, arg: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let func = match arena.get_term(func) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let arg = match arena.get_term(arg) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::App(Box::new(func), Box::new(arg)))
+        if !valid_terms(arena, &[func, arg]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::App(func, arg))
     })
 }
 
@@ -111,24 +105,10 @@ pub unsafe extern "C" fn tg_term_let(
     };
 
     with_arena!(|arena| {
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let def = match arena.get_term(def) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let body = match arena.get_term(body) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::Let(
-            name_str.to_owned(),
-            ty,
-            Box::new(def),
-            Box::new(body),
-        ))
+        if !valid_types(arena, &[ty]) || !valid_terms(arena, &[def, body]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Let(name_str.to_owned(), ty, def, body))
     })
 }
 
@@ -144,19 +124,10 @@ pub extern "C" fn tg_term_if(
     t_else: TermHandle,
 ) -> TermHandle {
     with_arena!(|arena| {
-        let cond = match arena.get_term(cond) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t_then = match arena.get_term(t_then) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t_else = match arena.get_term(t_else) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::If(Box::new(cond), Box::new(t_then), Box::new(t_else)))
+        if !valid_terms(arena, &[cond, t_then, t_else]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::If(cond, t_then, t_else))
     })
 }
 
@@ -164,15 +135,10 @@ pub extern "C" fn tg_term_if(
 #[no_mangle]
 pub extern "C" fn tg_term_annot(t: TermHandle, ty: TypeHandle) -> TermHandle {
     with_arena!(|arena| {
-        let t = match arena.get_term(t) {
-            Some(term) => term.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::Annot(Box::new(t), ty))
+        if !valid_terms(arena, &[t]) || !valid_types(arena, &[ty]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Annot(t, ty))
     })
 }
 
@@ -195,15 +161,10 @@ pub unsafe extern "C" fn tg_term_fix(
     };
 
     with_arena!(|arena| {
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let body = match arena.get_term(body) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::Fix(name_str.to_owned(), ty, Box::new(body)))
+        if !valid_types(arena, &[ty]) || !valid_terms(arena, &[body]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Fix(name_str.to_owned(), ty, body))
     })
 }
 
@@ -220,5 +181,5 @@ pub unsafe extern "C" fn tg_term_global(name: *const c_char) -> TermHandle {
         Ok(s) => s,
         Err(_) => return INVALID_HANDLE,
     };
-    with_arena!(|arena| arena.alloc_term(Term::Global(name_str.to_owned())))
+    with_arena!(|arena| arena.alloc_term_node(TermNode::Global(name_str.to_owned())))
 }

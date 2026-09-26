@@ -1,0 +1,161 @@
+// Semantics tests for the import index (ADR 5.8.26b):
+// (a) the index agrees with the linear reference scan it replaced,
+// (b) aliasing — the key is `local_name`, never `source_name`,
+// (c) a duplicate `local_name` resolves front-most / last-write-wins in BOTH,
+//     which is the property that makes the swap independent of the dedup guard,
+// (d) the ImportStore survives every ModuleContents builder.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_bool, assert_eq_nat};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_len};
+use lexer::span::{Span, span_new};
+use parser::ast::common::{Visibility, VisPublic};
+use elab::env::defs::{
+    ConstructorInfo, CtorIdentity, constructor_info_new,
+    TypeDefCore, TypeDefMeta, type_def_info_new, value_def_info_new
+};
+use elab::env::module::{
+    ModuleContents, module_contents_empty, module_contents_add_type,
+    module_contents_add_value, module_contents_add_constructor,
+    module_contents_add_import, module_contents_lookup_import,
+    elab_module_path_root, elab_module_path_append,
+    Import, import_new, import_list_lookup,
+    ImportStore, import_store_empty, import_store_add, import_store_lookup,
+    MaybeImport, NoImport, SomeImport
+};
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+fn mk_import(source_name: String, local_name: String) -> Import {
+    import_new(
+        elab_module_path_append(elab_module_path_root(), "src"),
+        source_name, local_name, VisPublic, span_new(0, 0, "")
+    )
+}
+
+/// The `source_name` a lookup resolved to, or "" when it found nothing.
+/// Collapses `MaybeImport` to a comparable String so the index and the
+/// reference scan can be asserted equal with the primitive assert helpers.
+fn resolved_source(found: MaybeImport) -> String {
+    match found {
+        NoImport() => "",
+        SomeImport(imp) => imp.source_name
+    }
+}
+
+/// Assert the index and the linear reference scan agree for `name`.
+fn assert_index_matches_scan(store: ImportStore, name: String) -> Unit {
+    let via_index = resolved_source(import_store_lookup(store, name));
+    let via_scan = resolved_source(import_list_lookup(store.all, name));
+    assert_eq_bool(via_index == via_scan, true)
+}
+
+fn three_imports() -> ImportStore {
+    let s1 = import_store_add(import_store_empty(), mk_import("alpha", "alpha"));
+    let s2 = import_store_add(s1, mk_import("beta", "beta"));
+    import_store_add(s2, mk_import("gamma", "gamma"))
+}
+
+// ---------------------------------------------------------------------------
+// (a) The index agrees with the scan it replaced
+// ---------------------------------------------------------------------------
+
+pub fn test_import_index_matches_linear_scan() -> Unit {
+    let store = three_imports();
+    assert_index_matches_scan(store, "alpha");
+    assert_index_matches_scan(store, "beta");
+    assert_index_matches_scan(store, "gamma");
+    // ...including on a miss, which must be NoImport in both.
+    assert_index_matches_scan(store, "delta")
+}
+
+pub fn test_import_index_empty_is_a_miss() -> Unit {
+    let empty = import_store_empty();
+    assert_eq_bool(resolved_source(import_store_lookup(empty, "alpha")) == "", true);
+    assert_index_matches_scan(empty, "alpha")
+}
+
+// ---------------------------------------------------------------------------
+// (b) Aliasing: the key is local_name, never source_name
+// ---------------------------------------------------------------------------
+
+pub fn test_import_index_keys_on_local_name() -> Unit {
+    // `use src::original as renamed`
+    let store = import_store_add(import_store_empty(), mk_import("original", "renamed"));
+    // Found under the local name...
+    assert_eq_bool(resolved_source(import_store_lookup(store, "renamed")) == "original", true);
+    // ...and NOT under the source name.
+    assert_eq_bool(resolved_source(import_store_lookup(store, "original")) == "", true);
+    assert_index_matches_scan(store, "renamed");
+    assert_index_matches_scan(store, "original")
+}
+
+// ---------------------------------------------------------------------------
+// (c) Duplicate local_name: front-most wins in the list, last-write in the
+//     index — the same entry. This is what makes the swap sound WITHOUT
+//     depending on the dedup guard in elab/items/imports/dedup.tg, which
+//     makes such a pair unreachable in production.
+// ---------------------------------------------------------------------------
+
+pub fn test_import_index_duplicate_local_name_agrees_with_scan() -> Unit {
+    let first = import_store_add(import_store_empty(), mk_import("old_source", "shared"));
+    let second = import_store_add(first, mk_import("new_source", "shared"));
+    // The newest wins in both structures.
+    assert_eq_bool(resolved_source(import_store_lookup(second, "shared")) == "new_source", true);
+    assert_eq_bool(resolved_source(import_list_lookup(second.all, "shared")) == "new_source", true);
+    assert_index_matches_scan(second, "shared");
+    // The list retains both entries; only the index collapses them.
+    assert_eq_nat(list_len(second.all), 2)
+}
+
+// ---------------------------------------------------------------------------
+// (d) Representation invariant across the ModuleContents builders
+// ---------------------------------------------------------------------------
+
+pub fn test_module_contents_import_lookup() -> Unit {
+    let empty = module_contents_empty(elab_module_path_root());
+    assert_eq_bool(resolved_source(module_contents_lookup_import(empty, "alpha")) == "", true);
+
+    let one = module_contents_add_import(empty, mk_import("alpha", "alpha"));
+    assert_eq_bool(resolved_source(module_contents_lookup_import(one, "alpha")) == "alpha", true);
+    assert_eq_nat(list_len(one.imports.all), 1)
+}
+
+/// A type/value/constructor addition must carry the import store through
+/// untouched — every builder threads it via the single `module_contents_with`
+/// literal, and a dropped thread is silent.
+pub fn test_import_index_survives_other_builders() -> Unit {
+    let base = module_contents_add_import(
+        module_contents_empty(elab_module_path_root()),
+        mk_import("alpha", "alpha")
+    );
+
+    let ty_meta: TypeDefMeta = { kind: 0, vis: VisPublic, span: span_new(0, 0, ""), encoded_type: 0 };
+    let with_type = module_contents_add_type(
+        base, type_def_info_new({ name: "Color", arity: 0, params: Nil }, ty_meta)
+    );
+    assert_eq_bool(resolved_source(module_contents_lookup_import(with_type, "alpha")) == "alpha", true);
+
+    let with_value = module_contents_add_value(
+        with_type, value_def_info_new("paint", 0, VisPublic, span_new(0, 0, ""))
+    );
+    assert_eq_bool(resolved_source(module_contents_lookup_import(with_value, "alpha")) == "alpha", true);
+
+    let with_ctor = module_contents_add_constructor(
+        with_value,
+        constructor_info_new(
+            { name: "Red", parent_type: "Color", index: 0, arity: 0 },
+            5, 0, VisPublic, span_new(0, 0, "")
+        )
+    );
+    assert_eq_bool(resolved_source(module_contents_lookup_import(with_ctor, "alpha")) == "alpha", true);
+    // The list survived too, so the two fields moved together.
+    assert_eq_nat(list_len(with_ctor.imports.all), 1)
+}

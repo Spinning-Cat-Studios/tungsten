@@ -109,3 +109,20 @@ pub struct ParsedModule {
     /// Submodules declared in this file
     pub submodules: Vec<ParsedModule>,
 }
+
+impl ParsedModule {
+    /// How many modules this tree contains, counting itself.
+    ///
+    /// The denominator for "how much of the project did the compiler actually
+    /// look at" (ADR 7.8.26d retrospective): body elaboration stops at the
+    /// first module that fails, so a diagnostic run can silently cover a
+    /// fraction of the tree.
+    #[must_use]
+    pub fn module_count(&self) -> usize {
+        1 + self
+            .submodules
+            .iter()
+            .map(ParsedModule::module_count)
+            .sum::<usize>()
+    }
+}

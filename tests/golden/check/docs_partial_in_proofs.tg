@@ -1,0 +1,13 @@
+// Rejected: a theorem that reaches a `#[partial]` function.
+// Accepted: the theorem is about a total function; the partial one
+// stays in executable code, where it is welcome.
+type Lst = Nil | Cons(Nat, Lst)
+
+#[partial]
+fn digits(n: Nat) -> Nat { if n < 10 { 1 } else { 1 + digits(n / 10) } }
+
+fn length(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => 1 + length(t) } }
+
+theorem measured(l: Lst): Nat { length(l) }
+
+fn main() -> Nat { digits(length(Cons(1, Nil)) * 100) }

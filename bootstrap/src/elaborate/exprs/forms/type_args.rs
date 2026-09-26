@@ -196,7 +196,7 @@ impl<'a> Elaborator<'a> {
             Type::Arrow(param, ret) => {
                 self.extract_binary_type_args(param, ret, ctx);
             }
-            Type::Nat | Type::Bool | Type::String => {
+            Type::Nat | Type::Int | Type::Bool | Type::String => {
                 Self::try_bind_first_unbound(ctx.type_params, ctx.subst, ty.clone());
             }
             Type::TyVar(name) => {

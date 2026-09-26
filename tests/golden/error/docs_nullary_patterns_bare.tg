@@ -1,0 +1,9 @@
+// Bare constructor names as patterns, on a type whose constructors all have
+// no payload, are refused with a misleading message.
+type Color = Red | Green | Blue
+
+fn warm(c: Color) -> Bool {
+    match c { Red => true, Green => true, Blue => false }
+}
+
+fn main() -> Bool { warm(Green) }

@@ -1,0 +1,131 @@
+// src/compiler/elab/exprs/apply/substring.tg
+// Handler for the `substring(s, start, len)` string builtin (ADR 20.8.26c).
+//
+// The self-host port of the bootstrap's `elab_substring`
+// (`bootstrap/src/elaborate/exprs/forms/builtins.rs`). Both intercept the bare
+// name BEFORE name resolution and both emit `Term::StrSubstring`, so the third
+// argument is a **length** on either side.
+//
+// Before this handler existed the bootstrap intercepted and the self-host did
+// not, so the same call resolved here to `driver/modules/build/mod.tg`'s
+// `substring`, whose third argument was an **end index** — and `lex_slice`
+// passes `pos - start`, a length. Nothing in either compiler reported it: the
+// arities matched, the types matched, and only the value differed. That `.tg`
+// function is gone; this handler is the only `substring` in the self-host.
+
+use lexer::span::Span;
+use parser::ast::{Expr};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    TermHandle,
+    tg_term_str_substring,
+    tg_type_string, tg_type_nat
+};
+use elab::env::{Env};
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error
+};
+use elab::exprs::{check};
+use elab::cir::{
+    CodegenIR,
+    CIRApp, CIRGlobal,
+    type_handle_to_codegen_type
+};
+
+/// One checked argument: its Core term handle + parallel CIR.
+/// Grouping the halves keeps the builder within the parameter budget.
+type SubstringArg = { term: TermHandle, cir: CodegenIR }
+
+/// The three un-elaborated argument expressions, once arity is known good.
+/// Grouped for the same reason: peeling them one at a time would otherwise
+/// carry six positional parameters into the exact-arity helper.
+type SubstringExprs = { subject: Expr, start: Expr, len: Expr }
+
+fn substring_arity_err(span: Span) -> ElabExprResult {
+    ElabExprErr(elab_expr_error(
+        "`substring` takes exactly three arguments: substring(string, start, length)", span))
+}
+
+/// Handle a `substring(s, start, len)` call.
+/// Arity is peeled one element per helper so each match stays flat (depth 1).
+pub fn handle_substring(env: Env, args: List<Expr>, span: Span) -> ElabExprResult {
+    match args {
+        Nil() => substring_arity_err(span),
+        Cons(str_expr, rest) => handle_substring_start(env, str_expr, rest, span)
+    }
+}
+
+fn handle_substring_start(env: Env, str_expr: Expr, rest: List<Expr>, span: Span) -> ElabExprResult {
+    match rest {
+        Nil() => substring_arity_err(span),
+        Cons(start_expr, after_start) => handle_substring_len(env, str_expr, start_expr, after_start, span)
+    }
+}
+
+fn handle_substring_len(env: Env, str_expr: Expr, start_expr: Expr, after_start: List<Expr>, span: Span) -> ElabExprResult {
+    match after_start {
+        Nil() => substring_arity_err(span),
+        Cons(len_expr, after_len) => {
+            let exprs: SubstringExprs = { subject: str_expr, start: start_expr, len: len_expr };
+            handle_substring_exact(env, exprs, after_len, span)
+        }
+    }
+}
+
+fn handle_substring_exact(env: Env, exprs: SubstringExprs, after_len: List<Expr>, span: Span) -> ElabExprResult {
+    match after_len {
+        Nil() => check_substring_string(env, exprs, span),
+        _ => substring_arity_err(span)
+    }
+}
+
+/// Check the subject against `String`.
+fn check_substring_string(env: Env, exprs: SubstringExprs, span: Span) -> ElabExprResult {
+    match check(env, exprs.subject, tg_type_string()) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, str_term, _ty, str_cir) => {
+            let subject: SubstringArg = { term: str_term, cir: str_cir };
+            check_substring_start(env2, subject, exprs, span)
+        }
+    }
+}
+
+/// Check the start offset against `Nat`.
+fn check_substring_start(env: Env, subject: SubstringArg, exprs: SubstringExprs, span: Span) -> ElabExprResult {
+    match check(env, exprs.start, tg_type_nat()) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, start_term, _ty, start_cir) => {
+            let start: SubstringArg = { term: start_term, cir: start_cir };
+            check_substring_len(env2, subject, start, exprs.len, span)
+        }
+    }
+}
+
+/// Check the length against `Nat`, then build the primitive.
+fn check_substring_len(env: Env, subject: SubstringArg, start: SubstringArg, len_expr: Expr, span: Span) -> ElabExprResult {
+    match check(env, len_expr, tg_type_nat()) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, len_term, _ty, len_cir) => {
+            let len: SubstringArg = { term: len_term, cir: len_cir };
+            build_substring(env2, subject, start, len)
+        }
+    }
+}
+
+/// Build `StrSubstring(s, start, len)` plus its CIR mirror.
+fn build_substring(env: Env, subject: SubstringArg, start: SubstringArg, len: SubstringArg) -> ElabExprResult {
+    let string_ty = tg_type_string();
+    let term = tg_term_str_substring(subject.term, start.term, len.term);
+    // CIR mirror, following `compare.tg`'s precedent: a saturated call to the
+    // runtime symbol rather than a dedicated node. The intermediate result types
+    // are approximated by `string_ct`, which is inert until the self-host's own
+    // codegen is wired into the driver — today `run_compile` delegates codegen to
+    // the bootstrap binary, so `src/compiler/codegen/` is exercised only by its
+    // own `test_*.tg` suites.
+    let string_ct = type_handle_to_codegen_type(string_ty);
+    let nat_ct = type_handle_to_codegen_type(tg_type_nat());
+    let cir_with_subject = CIRApp(CIRGlobal("tg_string_substring"), subject.cir, string_ct, string_ct);
+    let cir_with_start = CIRApp(cir_with_subject, start.cir, nat_ct, string_ct);
+    let cir_saturated = CIRApp(cir_with_start, len.cir, nat_ct, string_ct);
+    ElabExprOk(env, term, string_ty, cir_saturated)
+}

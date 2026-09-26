@@ -82,9 +82,9 @@ impl<'a> Elaborator<'a> {
             return Ok(ty);
         }
 
-        Err(ElabError::new(
+        Err(ElabError::internal(
             Span::new(0, 0),
-            ElabErrorKind::Other("internal error: no arms to infer type from".to_string()),
+            "no arms to infer type from",
         ))
     }
 
@@ -105,6 +105,11 @@ impl<'a> Elaborator<'a> {
         adt_type: &Type,
         type_params: &[String], // Type parameters of the ADT (for generic substitution)
     ) -> ElabResult<Type> {
+        // Defensive-ish: classification routes constructor arms here, but a
+        // nullary constructor written without parens parses as a Var pattern,
+        // so an ill-typed scrutinee (`match <Nat> { None => …, Some(x) => … }`)
+        // can surface this instead of E0022. Kept uncoded: the program's real
+        // fault is the scrutinee, not the pattern form (ADR 15.8.26b).
         let Pattern::Constructor(ref path, ref sub_patterns, _) = arm.pattern else {
             return Err(ElabError::new(
                 arm.pattern.span(),
@@ -227,7 +232,7 @@ impl<'a> Elaborator<'a> {
             .ok_or_else(|| {
                 ElabError::new(
                     Span::new(0, 0),
-                    ElabErrorKind::Other(format!(
+                    ElabErrorKind::InternalError(format!(
                         "variant index {} out of bounds for ADT with {} variants",
                         index,
                         variants.len()
@@ -275,7 +280,7 @@ impl<'a> Elaborator<'a> {
         if let Type::Sum(_, right) = unwrapped {
             Ok(right.as_ref())
         } else {
-            Err(Self::expected_sum_error())
+            Err(Self::scrutinee_not_sum_error(unwrapped))
         }
     }
 
@@ -301,7 +306,7 @@ impl<'a> Elaborator<'a> {
     fn extract_left_from_sum(ty: &Type) -> ElabResult<Type> {
         match ty {
             Type::Sum(left, _) => Ok((**left).clone()),
-            _ => Err(Self::expected_sum_error()),
+            _ => Err(Self::scrutinee_not_sum_error(ty)),
         }
     }
 
@@ -321,11 +326,16 @@ impl<'a> Elaborator<'a> {
         }
     }
 
-    /// Create a standard "expected sum type" error.
-    fn expected_sum_error() -> ElabError {
+    /// The scrutinee's type did not unfold to the sum the constructor arms
+    /// need — reachable by matching ADT constructors against a non-ADT value
+    /// (ADR 15.8.26b). The walkers do not know the arms' ADT name.
+    fn scrutinee_not_sum_error(found: &Type) -> ElabError {
         ElabError::new(
             Span::new(0, 0),
-            ElabErrorKind::Other("expected sum type".to_string()),
+            ElabErrorKind::MatchScrutineeNotAdt {
+                adt_name: None,
+                found: found.clone(),
+            },
         )
     }
 }

@@ -1,0 +1,108 @@
+// src/compiler/elab/error/kinds/messages.tg
+// One projection of `ElabErrorKind`: the wording a kind renders with.
+//
+// A total match, for the same reason `codes.tg` is one.
+
+use elab::ffi::{TypeHandle, INVALID_HANDLE};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{nat_to_string};
+use elab::error::kinds::{ElabErrorKind};
+
+// ===========================================================================
+// ERROR MESSAGES
+// ===========================================================================
+
+/// Get the base message for an error kind (without context).
+pub fn error_kind_message(kind: ElabErrorKind) -> String {
+    match kind {
+        // Type errors
+        ErrTypeMismatch(_, _) => "type mismatch",
+        ErrArityMismatch(expected, actual) => 
+            "arity mismatch: expected " ++ nat_to_string(expected) ++ 
+            " arguments, found " ++ nat_to_string(actual),
+        ErrNotAFunction(_) => "expected function type",
+        ErrNotAType(name) => "'" ++ name ++ "' is not a type",
+        ErrNotAnAdt(_) => "expected algebraic data type",
+        ErrNotASum(_) => "expected sum type",
+        ErrNotAPair(_) => "expected pair/tuple type",
+        ErrCannotInfer(what) => "cannot infer " ++ what,
+        ErrIntLiteralOutOfRange(literal) =>
+            "integer literal `" ++ literal ++ "` is out of range for `Int` " ++
+            "(the signed 64-bit range is -9223372036854775808 to 9223372036854775807)",
+
+        // Name resolution errors
+        ErrUnresolvedType(name) => "unresolved type: '" ++ name ++ "'",
+        ErrUnresolvedValue(name) => "unresolved name: '" ++ name ++ "'",
+        ErrUnresolvedModule(name) => "unresolved module: '" ++ name ++ "'",
+        ErrDuplicateDef(name) => "duplicate definition: '" ++ name ++ "'",
+        ErrDuplicateImport(name, _, _, first_module, second_module) =>
+            if first_module == second_module {
+                "the name `" ++ name ++ "` is imported multiple times"
+            } else {
+                "the name `" ++ name ++ "` is imported from both `" ++ first_module ++ "` and `" ++ second_module ++ "`"
+            },
+        ErrPrivateAccess(name, defined_in, accessed_from) =>
+            "type `" ++ name ++ "` is private (defined in `" ++ defined_in ++ "`) and cannot be accessed from `" ++ accessed_from ++ "`",
+        ErrAmbiguousName(name, _) => "ambiguous name: '" ++ name ++ "'",
+        ErrBuiltinTypeRedefined(name) =>
+            "cannot redefine the builtin type `" ++ name ++ "` — builtin lookup precedes " ++
+            "user types, so this definition would be unreachable",
+
+        // Item/definition errors
+        ErrMissingReturnType(name) => "missing return type for function '" ++ name ++ "'",
+        ErrInvalidExtern(msg) => "invalid extern: " ++ msg,
+        ErrImportNotFound(path) => "import not found: '" ++ path ++ "'",
+        ErrGlobImportEmpty(path) => "glob import matched nothing: '" ++ path ++ "::*'",
+        ErrCyclicDependency(_) => "cyclic dependency in type definitions",
+        ErrInvalidVisibility(item) => "visibility modifier not allowed on " ++ item,
+        ErrMissingBody(name) => "missing body for '" ++ name ++ "'",
+        
+        // Pattern matching errors
+        ErrInexhaustiveMatch(_) => "non-exhaustive match",
+        ErrUnreachablePattern() => "unreachable pattern",
+        ErrConstructorNotFound(ctor, ty) => 
+            "constructor '" ++ ctor ++ "' not found in type '" ++ ty ++ "'",
+        ErrDuplicateField(name) => "duplicate field: '" ++ name ++ "'",
+        ErrMissingField(name) => "missing field: '" ++ name ++ "'",
+        ErrExtraField(name) => "unexpected field: '" ++ name ++ "'",
+        ErrMultiArmMatch(n) => 
+            "match with " ++ nat_to_string(n) ++ " arms not yet supported (max 2)",
+        ErrPatternTooDeep(depth) =>
+            "pattern nesting depth " ++ nat_to_string(depth) ++ " exceeds maximum of 3",
+        ErrUnsupportedPattern(what) => "unsupported pattern: " ++ what,
+        
+        // Proof errors
+        ErrProofRequired(what) => "proof required for " ++ what,
+        ErrSorryInProd() => "'sorry' is not allowed in production code",
+        ErrInvalidRefl(_, _) => "refl requires both sides to be equal",
+        ErrSubstExpectedEquality(_) => "subst requires an equality proof as first argument",
+        ErrTransEndpointMismatch(_, _) => "trans: endpoint mismatch — first proof's RHS does not equal second proof's LHS",
+        ErrCongExpectedFunction(_) => "cong requires a function as first argument",
+        ErrMotiveNotPredicate(_) => "subst motive must be a predicate lambda |x: T| <type>, not a plain expression",
+        ErrMotiveDomainMismatch(_, _) => "motive parameter type does not match equality base type",
+        ErrMotiveBodyNotType() => "motive body must be a type expression, not a term",
+        
+        // Reference/mutability errors
+        ErrRefInPureContext() => "reference operation in pure context",
+        ErrCannotMutate(name) => "cannot mutate '" ++ name ++ "'",
+        
+        // Expression errors
+        ErrNoReturnContext() => "'return' used outside of function",
+        ErrNoMainFunction() => "no 'main' function found",
+        ErrInvalidMainSig(_) => "main function has invalid signature",
+        
+        // Soundness gates
+        // The message is rendered by tungsten_core's shared engine, so the two
+        // compilers cannot word one violation differently.
+        ErrNonStrictlyPositive(rendered) => rendered,
+        ErrCannotProveTermination(rendered) => rendered,
+        ErrPartialInProof(rendered) => rendered,
+        
+        // Other errors
+        ErrRecursionLimitExceeded(limit) => 
+            "recursion limit exceeded (" ++ nat_to_string(limit) ++ ")",
+        ErrPhase1Violation(msg) => "phase 1 restriction: " ++ msg,
+        ErrNotImplemented(what) => "not yet implemented: " ++ what,
+        ErrOther(msg) => msg
+    }
+}

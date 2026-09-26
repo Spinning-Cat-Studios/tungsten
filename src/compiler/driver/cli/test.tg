@@ -14,54 +14,123 @@ use driver::cli::{Command, CmdTest, CmdError, TestOpts, CliError};
 pub fn parse_test_command(args: List<String>) -> Command {
     let state = parse_test_options(args, "", "");
     let file_str: String = state.file;
-    if string_is_empty(file_str) {
+    let bad_flag: String = state.unknown_flag;
+    if string_is_empty(bad_flag) {
+        if string_is_empty(file_str) {
+            let err: CliError = {
+                message: "missing required argument: <FILE>",
+                usage: "tungsten test [OPTIONS] <FILE>"
+            };
+            CmdError(err)
+        } else {
+            let opts: TestOpts = {
+                file: file_str,
+                verbose: state.verbose,
+                filter: state.filter,
+                max_errors: state.max_errors,
+                require_tests: state.require_tests
+            };
+            CmdTest(opts)
+        }
+    } else {
+        // Reported BEFORE the missing-file check: a typo'd flag is the more
+        // specific diagnosis, and it is the whole reason this arm exists.
         let err: CliError = {
-            message: "missing required argument: <FILE>",
+            message: "unknown option: " ++ bad_flag,
             usage: "tungsten test [OPTIONS] <FILE>"
         };
         CmdError(err)
-    } else {
-        let opts: TestOpts = {
-            file: file_str,
-            verbose: state.verbose,
-            filter: state.filter,
-            max_errors: state.max_errors
-        };
-        CmdTest(opts)
     }
 }
 
 /// Intermediate state for test option parsing.
-type TestParseState = {
+///
+/// `unknown_flag` is the error channel this record did not have (ADR 7.8.26a
+/// D3). `parse_test_options` used to swallow every unrecognised `-` argument
+/// silently, so the moment `--require-tests` existed,
+/// `tungsten test f.tg --requre-tests` would have been accepted and ignored —
+/// the flag that exists to prevent a vacuous green becoming a vacuous green by
+/// typo, while looking armed. Empty means "no error", which is why
+/// `parse_test_command` checks it first.
+pub type TestParseState = {
     file: String,
     verbose: Bool,
     filter: String,
-    max_errors: Nat
+    max_errors: Nat,
+    require_tests: Bool,
+    unknown_flag: String
+}
+
+/// The state an exhausted (or truncated) argument list yields.
+pub fn empty_test_state(file: String, filter: String) -> TestParseState {
+    { file: file, verbose: false, filter: filter, max_errors: 20,
+      require_tests: false, unknown_flag: "" } : TestParseState
+}
+
+// ---------------------------------------------------------------------------
+// SINGLE-FIELD UPDATERS
+//
+// Every arm of `parse_test_options` used to respell all six fields to change
+// one of them, so adding a seventh meant five edits and a missed one compiled
+// silently — a record literal has no "and the rest unchanged" form here. These
+// updaters are that form, written once. Each one names the field it owns, so
+// the parser below reads as "this flag sets this field" and nothing else.
+// ---------------------------------------------------------------------------
+
+/// `s` with `verbose` set.
+fn with_verbose(s: TestParseState) -> TestParseState {
+    { file: s.file, verbose: true, filter: s.filter, max_errors: s.max_errors,
+      require_tests: s.require_tests, unknown_flag: s.unknown_flag } : TestParseState
+}
+
+/// `s` with `require_tests` set.
+fn with_require_tests(s: TestParseState) -> TestParseState {
+    { file: s.file, verbose: s.verbose, filter: s.filter, max_errors: s.max_errors,
+      require_tests: true, unknown_flag: s.unknown_flag } : TestParseState
+}
+
+/// `s` with `max_errors` replaced.
+fn with_max_errors(s: TestParseState, n: Nat) -> TestParseState {
+    { file: s.file, verbose: s.verbose, filter: s.filter, max_errors: n,
+      require_tests: s.require_tests, unknown_flag: s.unknown_flag } : TestParseState
+}
+
+/// `s` with `unknown_flag` replaced.
+///
+/// Unconditional overwrite, which is what makes the FIRST unknown flag win:
+/// the caller applies this on the way *out* of the recursion, over whatever the
+/// tail recorded.
+fn with_unknown_flag(s: TestParseState, flag: String) -> TestParseState {
+    { file: s.file, verbose: s.verbose, filter: s.filter, max_errors: s.max_errors,
+      require_tests: s.require_tests, unknown_flag: flag } : TestParseState
 }
 
 /// Parse test command options recursively.
-fn parse_test_options(args: List<String>, file: String, filter: String) -> TestParseState {
+///
+/// Each arm updates one field of the recursive result, so a flag seen early
+/// survives the rest of the list.
+pub fn parse_test_options(args: List<String>, file: String, filter: String) -> TestParseState {
     match args {
-        Nil() => { file: file, verbose: false, filter: filter, max_errors: 20 } : TestParseState,
+        Nil() => empty_test_state(file, filter),
         Cons(arg, rest) =>
             if string_eq(arg, "-v") || string_eq(arg, "--verbose") {
-                let s = parse_test_options(rest, file, filter);
-                { file: s.file, verbose: true, filter: s.filter, max_errors: s.max_errors } : TestParseState
+                with_verbose(parse_test_options(rest, file, filter))
+            } else if string_eq(arg, "--require-tests") {
+                with_require_tests(parse_test_options(rest, file, filter))
             } else if string_eq(arg, "--filter") {
                 match rest {
-                    Nil() => { file: file, verbose: false, filter: filter, max_errors: 20 } : TestParseState,
+                    Nil() => empty_test_state(file, filter),
                     Cons(f, rest2) => parse_test_options(rest2, file, f)
                 }
             } else if string_eq(arg, "--max-errors") {
                 match rest {
-                    Nil() => { file: file, verbose: false, filter: filter, max_errors: 20 } : TestParseState,
+                    Nil() => empty_test_state(file, filter),
                     Cons(val, rest2) =>
-                        let n = option_unwrap_or(parse_nat(val), 20);
-                        let s = parse_test_options(rest2, file, filter);
-                        { file: s.file, verbose: s.verbose, filter: s.filter, max_errors: n } : TestParseState
+                        with_max_errors(parse_test_options(rest2, file, filter),
+                                        option_unwrap_or(parse_nat(val), 20))
                 }
             } else if starts_with(arg, "-") {
-                parse_test_options(rest, file, filter)
+                with_unknown_flag(parse_test_options(rest, file, filter), arg)
             } else {
                 parse_test_options(rest, arg, filter)
             }

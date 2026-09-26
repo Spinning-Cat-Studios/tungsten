@@ -1,0 +1,54 @@
+// Minimal reproducer for ADR 1.7.26a:
+//   `musttail` TCO lost for struct-returning tail-recursive functions
+//   -> self-compiled self-check stack overflow.
+//
+// `lookup` is cleanly tail-recursive and combines the two ingredients that
+// defeat musttail under the current ABI:
+//   - a `String` param  -> {ptr,len} struct param triggers param-decomposition
+//                          (ADR 18.5.26a): a `$direct_mt` (flattened scalars)
+//                          entry plus a `$direct` shim are emitted.
+//   - a `Maybe2<Nat>` return -> a non-recursive sum-with-payload lowers to a
+//                          by-value `{i32,[N x i8]}` struct return, which
+//                          LLVM 18 forbids for `musttail`.
+//
+// Pre-fix: `tungsten compile tests/selfcompiled_repro/musttail_struct_return.tg \
+//            --trace-musttail` reports
+//   [musttail] lookup$direct_mt: SKIP (struct return (musttail incompatible in LLVM 18))
+// and the self-call falls back to a stack-growing `$direct_mt <-> $direct`
+// bounce -> O(N) stack instead of O(1). Over a long list this overflows.
+//
+// Post-fix (sret ABI, ADR 1.7.26a option A): EMIT — an O(1)-stack `musttail`
+// loop whose recursive branch calls `lookup$direct_mt` directly (no `$direct`
+// shim, no per-iteration env alloc).
+//
+// Run (trace):  tungsten compile tests/selfcompiled_repro/musttail_struct_return.tg --trace-musttail
+// Run (manual overflow, pre-fix only): set N large in `main` and execute.
+
+pub type List<T> = Nil | Cons(T, List<T>)
+pub type Maybe2<T> = None2 | Some2(T)
+
+// Tail-recursive scan to the `idx`-th element. `key` is a passthrough struct
+// param whose sole purpose is to trigger param-decomposition; the return type
+// `Maybe2<Nat>` is the actual musttail blocker.
+pub fn lookup(xs: List<Nat>, key: String, idx: Nat) -> Maybe2<Nat> {
+    match xs {
+        Nil() => None2,
+        Cons(x, rest) =>
+            if idx == 0 { Some2(x) }
+            else { lookup(rest, key, idx - 1) }   // tail position — should be O(1) stack
+    }
+}
+
+// Scalar-return tail recursion (this one IS musttail-eligible) to build input.
+pub fn build_list(n: Nat, acc: List<Nat>) -> List<Nat> {
+    if n == 0 { acc } else { build_list(n - 1, Cons(n, acc)) }
+}
+
+fn main() -> Nat {
+    // Modest N keeps normal runs cheap; the manual overflow repro raises this.
+    let xs = build_list(100, Nil);
+    match lookup(xs, "k", 50) {
+        None2() => 0,
+        Some2(v) => v,
+    }
+}

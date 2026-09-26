@@ -31,8 +31,6 @@ serde_json = "1"
 bincode = "1.3"
 sha2 = "0.10"
 rayon = "1.10"
-heed = "0.20"
-uuid = { version = "1", features = ["v4"] }
 toml = "0.8"
 tempfile = "3.24.0"
 zstd = { version = "0.13", optional = true }
@@ -40,7 +38,30 @@ tracing = { version = "0.1", optional = true }
 tracing-chrome = { version = "0.7", optional = true }
 tracing-subscriber = { version = "0.3", features = ["registry"], optional = true }
 
+# The agent sidecar's two dependencies, scoped away from `wasm32` (ADR 28.7.26a
+# §2.1). `heed` is LMDB — C compiled through `cc`, and `wasm32-unknown-unknown`
+# has no libc headers to compile it against; `uuid`'s `v4` needs a randomness
+# source that target does not provide either. Compiling the *modules* out is not
+# enough on its own: cargo builds a dependency for the target regardless of
+# which modules use it, so the subtraction has to happen here in the manifest.
+#
+# Scoped by target rather than behind a cargo feature deliberately. This repo
+# uses `--no-default-features` throughout to mean "without LLVM" — clippy,
+# coverage, mutation, and every `.tg` lane — and a default-on `sidecar` feature
+# would make all of those quietly drop the sidecar as well. A target scope
+# leaves every native invocation byte-identical and cannot be got wrong by a
+# caller forgetting a flag.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+heed = "0.20"
+uuid = { version = "1", features = ["v4"] }
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+
+# `ftok`, for the SysV semaphore reclaim test (ADR 18.8.26d): the census must
+# derive the same key LMDB does, and macOS is the only platform where LMDB
+# locks with SysV semaphores (D2a), so the dependency is scoped with the test.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = "0.2"

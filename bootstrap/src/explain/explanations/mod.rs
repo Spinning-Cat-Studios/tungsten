@@ -5,11 +5,17 @@
 //! - `name_resolution`: `UndefinedVariable`, `UndefinedType`, etc.
 //! - `type_errors`: `TypeMismatch`, `CannotInferType`, etc.
 //! - `control_flow`: `DeadCodeAfterReturn`, Try*, `LetElse`*
-//! - Remaining categories (phase 1, pattern matching, named records, entry point)
-//!   are small enough to stay inline here.
+//! - `termination`: `CannotProveTermination`, `PartialInProof`
+//! - `type_definitions`: `RecursiveAlias`, `NonStrictlyPositive`,
+//!   `NestedRecursiveFamily`
+//! - Remaining categories (phase 1, pattern matching, named records, entry
+//!   point) are small enough to stay inline here.
 
 mod control_flow;
+mod equality;
 mod name_resolution;
+mod termination;
+mod type_definitions;
 mod type_errors;
 
 use super::error_catalogue::ErrorExplanation;
@@ -21,14 +27,42 @@ pub(super) fn get_explanation(name: &str) -> Option<ErrorExplanation> {
         .or_else(|| phase1_restrictions(name))
         .or_else(|| pattern_matching(name))
         .or_else(|| control_flow::control_flow(name))
+        .or_else(|| type_definitions::type_definitions(name))
+        .or_else(|| equality::equality_proofs(name))
+        .or_else(|| termination::termination(name))
         .or_else(|| named_record(name))
         .or_else(|| entry_point(name))
+        .or_else(|| internal_errors(name))
+}
+
+/// `InternalError` (E9998) — resolvable so a user who hits one can look it
+/// up, but deliberately absent from the no-argument listing: no program edit
+/// can cause or fix one, so advertising the code would be noise
+/// (ADR 15.8.26b).
+fn internal_errors(name: &str) -> Option<ErrorExplanation> {
+    (name == "InternalError").then_some(ErrorExplanation {
+        name: "InternalError",
+        code: "E9998",
+        category: "Internal (not user-actionable)",
+        summary: "the compiler broke its own invariant",
+        detail: "\
+The compiler detected that one of its own internal invariants was broken. \
+This is a bug in the Tungsten compiler, not in your program — no change to \
+your source code can legitimately cause or fix it.\n\
+\n\
+Please report it, including the full error message and, if possible, the \
+source file that triggered it.",
+        example: "\
+// No source example: user input cannot legitimately trigger this code.",
+        see_also: &[],
+    })
 }
 
 fn phase1_restrictions(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "UnsupportedFeature" => ErrorExplanation {
             name: "UnsupportedFeature",
+            code: "E0100",
             category: "Phase 1 Restrictions",
             summary: "feature not yet supported",
             detail: "\
@@ -44,6 +78,7 @@ and dependent types. Some features are deferred to later phases.",
 
         "MutabilityNotSupported" => ErrorExplanation {
             name: "MutabilityNotSupported",
+            code: "E0102",
             category: "Phase 1 Restrictions",
             summary: "mutable bindings not supported",
             detail: "\
@@ -76,6 +111,7 @@ fn pattern_matching(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "NonExhaustiveMatch" => ErrorExplanation {
             name: "NonExhaustiveMatch",
+            code: "E0020",
             category: "Pattern Matching",
             summary: "match does not cover all cases",
             detail: "\
@@ -101,6 +137,7 @@ fn name(c: Color) -> String {\n\
 
         "UnreachableArm" => ErrorExplanation {
             name: "UnreachableArm",
+            code: "W0001",
             category: "Pattern Matching",
             summary: "pattern is unreachable",
             detail: "\
@@ -123,6 +160,7 @@ fn check(x: Bool) -> Nat {\n\
 
         "PatternTooDeep" => ErrorExplanation {
             name: "PatternTooDeep",
+            code: "E0103",
             category: "Pattern Matching",
             summary: "pattern nesting exceeds limit",
             detail: "\
@@ -144,8 +182,34 @@ match inner { ... }",
             see_also: &["UnsupportedPattern"],
         },
 
+        "MatchScrutineeNotAdt" => ErrorExplanation {
+            name: "MatchScrutineeNotAdt",
+            code: "E0022",
+            category: "Pattern Matching",
+            summary: "match arms expect an ADT scrutinee",
+            detail: "\
+The arms of this match are constructor patterns of an ADT, but the value \
+being matched does not have that ADT's type.\n\
+\n\
+Common causes:\n\
+• Matching constructors of one type against a value of another\n\
+• A scrutinee whose inferred type is a primitive (`Nat`, `String`)\n\
+• Forgetting to unwrap a value before matching on its contents",
+            example: "\
+type Opt = None | Some(Nat)\n\
+\n\
+fn f(n: Nat) -> Nat {\n\
+    match n {\n\
+        Some(x) => x,    // error: arms are `Opt` constructors, `n` is `Nat`\n\
+        _ => 0,\n\
+    }\n\
+}",
+            see_also: &["NonExhaustiveMatch", "UnsupportedPattern"],
+        },
+
         "UnsupportedPattern" => ErrorExplanation {
             name: "UnsupportedPattern",
+            code: "E0021",
             category: "Pattern Matching",
             summary: "pattern form not supported",
             detail: "\
@@ -168,6 +232,7 @@ fn named_record(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "NotARecordType" => ErrorExplanation {
             name: "NotARecordType",
+            code: "E0050",
             category: "Named Records",
             summary: "type is not a record",
             detail: "\
@@ -188,6 +253,7 @@ fn good() -> Color { Red }",
 
         "MissingRecordField" => ErrorExplanation {
             name: "MissingRecordField",
+            code: "E0051",
             category: "Named Records",
             summary: "missing field in record constructor",
             detail: "\
@@ -207,6 +273,7 @@ fn good() -> Point { Point { x: 1, y: 2 } }",
 
         "ExtraRecordField" => ErrorExplanation {
             name: "ExtraRecordField",
+            code: "E0052",
             category: "Named Records",
             summary: "unknown field in record constructor",
             detail: "\
@@ -226,6 +293,7 @@ fn good() -> Point { Point { x: 1, y: 2 } }",
 
         "DuplicateRecordField" => ErrorExplanation {
             name: "DuplicateRecordField",
+            code: "E0053",
             category: "Named Records",
             summary: "field specified twice",
             detail: "\
@@ -252,6 +320,7 @@ fn entry_point(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "NoMainFunction" => ErrorExplanation {
             name: "NoMainFunction",
+            code: "E0030",
             category: "Entry Point",
             summary: "no main function found",
             detail: "\
@@ -270,6 +339,7 @@ fn main() -> Nat { helper() }",
 
         "ContainsSorry" => ErrorExplanation {
             name: "ContainsSorry",
+            code: "E0031",
             category: "Entry Point",
             summary: "file contains sorry (cannot compile)",
             detail: "\

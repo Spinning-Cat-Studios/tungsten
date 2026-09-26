@@ -7,6 +7,7 @@ use tungsten_core::Context;
 
 use super::{CoreDef, ElabOutput};
 use crate::elaborate::error::ElabError;
+use crate::elaborate::termination::CachedTermination;
 use crate::elaborate::Elaborator;
 
 /// Elaborate a parsed source file to Core definitions.
@@ -67,7 +68,12 @@ pub fn elaborate_with_warnings_full(
 ) -> Result<ElabOutput, Vec<ElabError>> {
     let mut elaborator = Elaborator::new(core_ctx);
     elaborator.set_trace_target(trace_types);
-    elaborator.set_trace_encoding(trace_encoding);
+    // Only override the env-seeded default (ADR 22.7.26d) when a flag value is
+    // present; an absent `--trace-encoding` must not wipe a
+    // `TUNGSTEN_TRACE_ENCODING` target.
+    if trace_encoding.is_some() {
+        elaborator.set_trace_encoding(trace_encoding);
+    }
     elaborator.set_trace_normalization(trace_normalization);
     match elaborator.elaborate_file(file) {
         Ok(defs) => Ok(ElabOutput {
@@ -81,6 +87,9 @@ pub fn elaborate_with_warnings_full(
             mutual_recursion_groups: elaborator.get_mutual_recursion_groups(),
             type_visibilities: elaborator.get_type_visibilities(),
             record_field_visibilities: elaborator.get_record_field_visibilities(),
+            termination_meta: std::mem::take(&mut elaborator.termination_meta),
+            carried_termination: CachedTermination::default(),
+            value_import_targets: crate::elaborate::ValueImportTargets::new(),
         }),
         Err(errors) => Err(errors),
     }

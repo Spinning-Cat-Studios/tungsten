@@ -27,13 +27,21 @@ mod abi;
 mod backend;
 mod compilation;
 mod data;
+pub(crate) use data::AllocClass;
 mod debug_info;
 mod definitions;
 mod exec;
+pub mod musttail_report;
 mod naming;
 mod registration;
+// Concern sub-structs of `CodeGen` (ADR 4.5.26c) — grouped mutable state.
+mod state;
+pub(crate) use state::{
+    CompilationState, DefinitionRegistry, DirectCallState, NamingState, TracingState,
+};
 
 pub use backend::CodeGenError;
+use exec::polymorphism::MonomorphState;
 
 use crate::types::TypeLowering;
 use inkwell::builder::Builder;
@@ -41,171 +49,11 @@ use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::targets::{InitializationConfig, Target, TargetMachine};
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::{BasicValueEnum, FunctionValue};
 use inkwell::AddressSpace;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use tungsten_core::terms::{Term, Var};
-use tungsten_core::types::Type;
 
-// ── Concern sub-structs (ADR 4.5.26c) ──────────────────────────────
-
-/// State for uncurried direct calling convention (ADR 2.5.26b).
-pub(crate) struct DirectCallState {
-    /// Known arities for top-level functions with direct entry points.
-    pub(crate) arities: HashMap<String, usize>,
-    /// Name of the direct entry point currently being compiled.
-    pub(crate) current_entry: Option<String>,
-    /// Decomposition maps for musttail-eligible functions (ADR 18.5.26a).
-    /// Maps base function name → per-param decomposition info.
-    /// `Some(n)` = struct flattened into n scalar fields, `None` = passthrough.
-    pub(crate) decompose_maps: HashMap<String, Vec<Option<u32>>>,
-}
-
-impl DirectCallState {
-    fn new() -> Self {
-        Self {
-            arities: HashMap::new(),
-            current_entry: None,
-            decompose_maps: HashMap::new(),
-        }
-    }
-}
-
-/// State for monomorphization of polymorphic functions.
-pub(crate) struct MonomorphState {
-    /// Already monomorphized function instances.
-    pub(crate) instances: HashMap<(String, String), String>,
-    /// Functions currently being monomorphized (cycle prevention).
-    pub(crate) in_progress: HashSet<(String, String)>,
-    /// When true, the single-owner mono pipeline (ADR 8.5.26g) is active.
-    /// Ad-hoc per-unit monomorphization must not generate fresh instances;
-    /// all mono symbols must come from the pre-seeded ownership map.
-    pub(crate) mono_map_active: bool,
-}
-
-impl MonomorphState {
-    fn new() -> Self {
-        Self {
-            instances: HashMap::new(),
-            in_progress: HashSet::new(),
-            mono_map_active: false,
-        }
-    }
-}
-
-/// State for naming, counters, and symbol tracking.
-pub(crate) struct NamingState {
-    pub(crate) counter: u64,
-    pub(crate) lambda_counter: u64,
-    pub(crate) named_lambdas: bool,
-    /// Current let-binding name, set by `compile_let` and `compile_def_with_span`.
-    /// Also read by escape analysis in `compile_fold` to determine whether
-    /// the fold's result is non-escaping and can use stack allocation.
-    pub(crate) current_binding_name: Option<String>,
-    pub(crate) symbol_map: Vec<SymbolEntry>,
-    /// Per-module prefix for generated symbol names (lambdas, mono instances, fix).
-    /// When set, prevents name collisions across codegen units.
-    pub(crate) module_prefix: Option<String>,
-}
-
-impl NamingState {
-    fn new() -> Self {
-        Self {
-            counter: 0,
-            lambda_counter: 0,
-            named_lambdas: false,
-            current_binding_name: None,
-            symbol_map: Vec::new(),
-            module_prefix: None,
-        }
-    }
-}
-
-/// State for debug info and runtime tracing.
-pub(crate) struct TracingState<'ctx> {
-    pub(crate) debug_info: Option<debug_info::DebugInfoState<'ctx>>,
-    pub(crate) trace_adt_ops: Option<String>,
-    /// When set, emit per-function allocation profiling hooks (ADR 7.5.26b).
-    pub(crate) alloc_profile: bool,
-    /// Optional function name filter for the allocation profile report.
-    pub(crate) alloc_profile_filter: Option<String>,
-    /// When set, trace musttail decisions to stderr (ADR 8.5.26c).
-    pub(crate) trace_musttail: bool,
-    /// When set, trace escape analysis decisions to stderr (ADR 8.5.26d).
-    pub(crate) trace_escape: bool,
-}
-
-impl TracingState<'_> {
-    fn new() -> Self {
-        Self {
-            debug_info: None,
-            trace_adt_ops: None,
-            alloc_profile: false,
-            alloc_profile_filter: None,
-            trace_musttail: false,
-            trace_escape: false,
-        }
-    }
-}
-
-/// Registry of top-level definitions available during codegen.
-///
-/// Groups definition types, term bodies, extern name mappings, and
-/// escape analysis results — all populated before compilation and
-/// read during code generation.
-pub(crate) struct DefinitionRegistry {
-    /// Top-level definition types: name -> type.
-    pub(crate) def_types: HashMap<String, Type>,
-    /// Original term definitions for monomorphization.
-    pub(crate) term_defs: HashMap<String, Term>,
-    /// Extern name mappings: `original_name` -> `llvm_name`.
-    pub(crate) extern_name_map: HashMap<String, String>,
-    /// Variables bound to non-escaping Fold results (can use alloca instead of malloc).
-    pub(crate) non_escaping_folds: HashSet<String>,
-}
-
-impl DefinitionRegistry {
-    fn new() -> Self {
-        Self {
-            def_types: HashMap::new(),
-            term_defs: HashMap::new(),
-            extern_name_map: HashMap::new(),
-            non_escaping_folds: HashSet::new(),
-        }
-    }
-}
-
-/// Per-function compilation state that changes as each function is compiled.
-pub(crate) struct CompilationState<'ctx> {
-    /// Current function being compiled.
-    pub(crate) current_fn: Option<FunctionValue<'ctx>>,
-    /// Variable bindings: name -> (value, type).
-    pub(crate) env: HashMap<Var, (BasicValueEnum<'ctx>, Type)>,
-    /// Whether the current expression is in tail position of its enclosing function.
-    pub(crate) in_tail_position: bool,
-    /// Expected return type for the innermost lambda being compiled.
-    pub(crate) expected_lambda_ret_type: Option<Type>,
-    /// Variables whose sole remaining use is the current expression (last-use).
-    /// Populated when entering a `Let` whose body uses the bound var exactly once.
-    pub(crate) last_use_vars: HashSet<String>,
-    /// Variables bound to heap-allocated string results (e.g., `StrConcat`).
-    /// Only these are safe to pass to `tg_string_concat_owned` (realloc path).
-    pub(crate) heap_origin_vars: HashSet<String>,
-}
-
-impl CompilationState<'_> {
-    fn new() -> Self {
-        Self {
-            current_fn: None,
-            env: HashMap::new(),
-            in_tail_position: false,
-            expected_lambda_ret_type: None,
-            last_use_vars: HashSet::new(),
-            heap_origin_vars: HashSet::new(),
-        }
-    }
-}
+// The structural-comparator synthesis callback (ADR 29.6.26f P6′ step 2) is
+// defined alongside its use in `exec::polymorphism::comparator`.
+pub use exec::polymorphism::ComparatorSynth;
 
 // ── Main struct ─────────────────────────────────────────────────────
 
@@ -246,10 +94,13 @@ pub struct CodeGen<'ctx> {
     pub(crate) defs: DefinitionRegistry,
 
     // Grouped concerns
-    pub(crate) direct_calls: DirectCallState,
+    pub(crate) direct_calls: DirectCallState<'ctx>,
     pub(crate) monomorph: MonomorphState,
     pub(crate) naming: NamingState,
     pub(crate) tracing: TracingState<'ctx>,
+
+    /// Structured musttail decisions collected during this run (ADR 1.7.26b).
+    pub(crate) musttail_report: musttail_report::MusttailReport,
 }
 
 /// An entry mapping an IR function name to its source-level name and location.
@@ -308,13 +159,14 @@ impl<'ctx> CodeGen<'ctx> {
             monomorph: MonomorphState::new(),
             naming: NamingState::new(),
             tracing: TracingState::new(),
+            musttail_report: musttail_report::MusttailReport::new(),
         };
 
         cg.declare_runtime_functions();
         cg
     }
 
-    /// Declare runtime functions (printf, malloc, etc.)
+    /// Declare runtime functions (printf, `__tungsten_alloc`, memcpy, etc.)
     fn declare_runtime_functions(&mut self) {
         let i32_type = self.context.i32_type();
         let i64_type = self.context.i64_type();
@@ -326,10 +178,37 @@ impl<'ctx> CodeGen<'ctx> {
             self.module.add_function("printf", printf_type, None);
         }
 
-        // malloc(size_t) -> void*
+        // __tungsten_alloc(size: i64, class: i32) -> void* — the runtime's one
+        // allocation symbol (ADR 14.9.26b), the only entry to the arena and
+        // the profiler.
+        let alloc_type = i8_ptr.fn_type(&[i64_type.into(), i32_type.into()], false);
+        if self.module.get_function(data::ALLOC_SYMBOL).is_none() {
+            self.module
+                .add_function(data::ALLOC_SYMBOL, alloc_type, None);
+        }
+
+        // malloc(size: i64) -> void* and the mode flag it is gated on: mode
+        // off calls malloc directly, skipping a call level (ADR 18.9.26c).
         let malloc_type = i8_ptr.fn_type(&[i64_type.into()], false);
-        if self.module.get_function("malloc").is_none() {
-            self.module.add_function("malloc", malloc_type, None);
+        if self.module.get_function(data::MALLOC_SYMBOL).is_none() {
+            self.module
+                .add_function(data::MALLOC_SYMBOL, malloc_type, None);
+        }
+        // `hidden`: every program links the runtime statically, so the flag
+        // is in the same image and the load needs no GOT indirection — which
+        // measured as most of the branch's residual cost on the off path.
+        if self.module.get_global(data::ARENA_MODE_GLOBAL).is_none() {
+            let mode = self
+                .module
+                .add_global(i32_type, None, data::ARENA_MODE_GLOBAL);
+            mode.set_visibility(inkwell::GlobalVisibility::Hidden);
+        }
+
+        // __tungsten_arena_init() -> void — the prologue reads TUNGSTEN_ARENA.
+        let arena_init_type = self.context.void_type().fn_type(&[], false);
+        if self.module.get_function(data::ARENA_INIT_SYMBOL).is_none() {
+            self.module
+                .add_function(data::ARENA_INIT_SYMBOL, arena_init_type, None);
         }
 
         // memcpy(dest, src, n) -> dest
@@ -359,23 +238,6 @@ impl<'ctx> CodeGen<'ctx> {
         if self.module.get_function("tg_string_concat_owned").is_none() {
             self.module
                 .add_function("tg_string_concat_owned", concat_type, None);
-        }
-    }
-
-    /// Get the malloc function to use for allocations.
-    ///
-    /// When allocation profiling is enabled, returns `__tungsten_alloc_profile_malloc`
-    /// (which wraps malloc and records per-function attribution).
-    /// Otherwise returns the standard `malloc`.
-    pub(crate) fn get_malloc(&self) -> inkwell::values::FunctionValue<'ctx> {
-        if self.tracing.alloc_profile {
-            self.module
-                .get_function("__tungsten_alloc_profile_malloc")
-                .expect("alloc profiler malloc not declared (call set_alloc_profile first)")
-        } else {
-            self.module
-                .get_function("malloc")
-                .expect("malloc not declared")
         }
     }
 

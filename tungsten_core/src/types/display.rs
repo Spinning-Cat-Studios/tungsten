@@ -9,8 +9,8 @@ use super::Type;
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Base types with fixed display names
-        if let Some(name) = self.base_type_name() {
+        // Primitive types display as their source-level name (ADR 18.9.26f)
+        if let Some(name) = self.primitive_name() {
             return write!(f, "{name}");
         }
         // Binary type constructors: (t1 OP t2)
@@ -41,6 +41,7 @@ impl fmt::Display for Type {
             // Handled by helpers above
             Type::Bool
             | Type::Nat
+            | Type::Int
             | Type::Unit
             | Type::Void
             | Type::Prop
@@ -96,19 +97,6 @@ fn fmt_type_adt(
 }
 
 impl Type {
-    /// Base types with fixed display names.
-    pub(super) fn base_type_name(&self) -> Option<&str> {
-        match self {
-            Type::Bool => Some("Bool"),
-            Type::Nat => Some("Nat"),
-            Type::Unit => Some("Unit"),
-            Type::Void => Some("Void"),
-            Type::Prop => Some("Prop"),
-            Type::String => Some("String"),
-            _ => None,
-        }
-    }
-
     /// Identify binary type constructors and return (lhs, rhs, operator string).
     fn fmt_binary_type_op(&self) -> Option<(&Type, &Type, &str)> {
         match self {
@@ -127,48 +115,84 @@ impl Type {
 impl Type {
     /// Display the type in detailed form showing full structure.
     /// Useful for debugging type mismatches.
+    ///
+    /// Unbounded — a large type produces a large string. Callers rendering into
+    /// a *diagnostic* should prefer [`Type::display_detailed_to_depth`], which
+    /// bounds the output (ADR 21.7.26f).
     #[must_use]
     pub fn display_detailed(&self) -> String {
-        // Base types: display name matches the type name
-        if let Some(name) = self.base_type_name() {
+        self.display_detailed_to_depth(usize::MAX)
+    }
+
+    /// Display the type in detailed form, elided past `max_depth` nesting levels.
+    ///
+    /// Structure below the cut-off renders as `…`. This exists because
+    /// [`Type::display_detailed`] is unbounded, and the stored encodings it is
+    /// most useful on (recursive ADTs, constructor tables) are exactly the ones
+    /// large enough to swamp a diagnostic. Unlike the user-facing
+    /// `format_type_for_display`, this keeps the *structural* spelling
+    /// (`App(...)` vs `Adt(...)`) — which is the whole point when two types
+    /// render identically but differ structurally.
+    #[must_use]
+    pub fn display_detailed_to_depth(&self, max_depth: usize) -> String {
+        if max_depth == 0 {
+            return "…".to_string();
+        }
+        let inner = max_depth - 1;
+
+        // Primitive types: display name matches the type name
+        if let Some(name) = self.primitive_name() {
             return name.to_string();
         }
         // Binary type constructors share the same format
         if let Some((name, t1, t2)) = self.detailed_binary_label() {
             return format!(
                 "{name}({}, {})",
-                t1.display_detailed(),
-                t2.display_detailed()
+                t1.display_detailed_to_depth(inner),
+                t2.display_detailed_to_depth(inner)
             );
         }
         match self {
             Type::TyVar(v) => format!("TyVar({v})"),
             Type::Forall(v, body) => {
-                format!("Forall({}, {})", v, body.display_detailed())
+                format!("Forall({}, {})", v, body.display_detailed_to_depth(inner))
             }
             Type::Eq(ty, t1, t2) => {
-                format!("Eq({}, {}, {})", ty.display_detailed(), t1, t2)
+                format!(
+                    "Eq({}, {}, {})",
+                    ty.display_detailed_to_depth(inner),
+                    t1,
+                    t2
+                )
             }
             Type::Mu(v, body) => {
-                format!("Mu({}, {})", v, body.display_detailed())
+                format!("Mu({}, {})", v, body.display_detailed_to_depth(inner))
             }
-            Type::Ptr(inner) | Type::Ref(inner) => {
+            Type::Ptr(inner_ty) | Type::Ref(inner_ty) => {
                 let name = if matches!(self, Type::Ptr(_)) {
                     "Ptr"
                 } else {
                     "Ref"
                 };
-                format!("{name}({})", inner.display_detailed())
+                format!("{name}({})", inner_ty.display_detailed_to_depth(inner))
             }
             Type::App(name, args) => {
-                let arg_strs: Vec<String> = args.iter().map(Type::display_detailed).collect();
+                let arg_strs: Vec<String> = args
+                    .iter()
+                    .map(|a| a.display_detailed_to_depth(inner))
+                    .collect();
                 format!("App({}, [{}])", name, arg_strs.join(", "))
             }
             Type::Adt(name, type_args, variants) => {
-                let arg_strs: Vec<String> = type_args.iter().map(Type::display_detailed).collect();
+                let arg_strs: Vec<String> = type_args
+                    .iter()
+                    .map(|a| a.display_detailed_to_depth(inner))
+                    .collect();
                 let var_strs: Vec<String> = variants
                     .iter()
-                    .map(|(ctor, payload)| format!("({}, {})", ctor, payload.display_detailed()))
+                    .map(|(ctor, payload)| {
+                        format!("({}, {})", ctor, payload.display_detailed_to_depth(inner))
+                    })
                     .collect();
                 format!(
                     "Adt({}, [{}], [{}])",
@@ -181,6 +205,7 @@ impl Type {
             // Handled by helpers above
             Type::Bool
             | Type::Nat
+            | Type::Int
             | Type::Unit
             | Type::Void
             | Type::Prop

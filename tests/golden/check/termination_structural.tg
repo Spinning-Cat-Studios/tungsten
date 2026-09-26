@@ -1,0 +1,20 @@
+// == structural recursors are admitted, single and mutual
+type Lst = Nil | Cons(Nat, Lst)
+
+fn len(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => 1 + len(t) } }
+
+fn sum(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => h + sum(t) } }
+
+fn even_len(l: Lst) -> Bool { match l { Nil => true, Cons(h, t) => odd_len(t) } }
+
+fn odd_len(l: Lst) -> Bool { match l { Nil => false, Cons(h, t) => even_len(t) } }
+
+#[decreasing(b)]
+fn drain(a: Nat, b: Lst) -> Nat { match b { Nil => a, Cons(h, t) => drain(a, t) } }
+
+#[partial]
+fn countdown(n: Nat) -> Nat { if n == 0 { 0 } else { countdown(n - 1) } }
+
+fn uses_partial(n: Nat) -> Nat { countdown(n) }
+
+fn main() -> Nat { len(Nil) }

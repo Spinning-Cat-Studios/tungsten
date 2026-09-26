@@ -6,6 +6,7 @@
 
 pub mod deep_eq;
 pub mod named;
+pub mod projection;
 pub mod spread;
 
 pub use elab::exprs::records::deep_eq::*;
@@ -19,10 +20,10 @@ use parser::ast::{
     MaybeExpr, NoExpr, SomeExpr
 };
 use driver::ffi::{List, Nil, Cons, string_len, string_char_at_internal, cstring_to_string};
+use driver::util::list_len;
 use elab::ffi::{
     TermHandle, TypeHandle, INVALID_HANDLE,
-    tg_term_pair, tg_term_fst, tg_term_snd, tg_term_unit,
-    tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
+    tg_term_pair, tg_term_unit,
     tg_type_product,
     tg_type_is_tyvar, tg_type_get_tyvar_name,
     tg_type_is_app, tg_type_get_app_name,
@@ -49,9 +50,10 @@ use elab::exprs::forms::result::{
     add_expected_because, TermInfo
 };
 use elab::error::ExpFieldType;
-use elab::cir::{CodegenIR, CIRUnit, CIRPair, CIRFst, CIRSnd};
+use elab::cir::{CodegenIR, CIRUnit, CIRPair};
 use elab::exprs::{synth, check};
 use elab::exprs::records::deep_eq::{synth_record_update, check_record_update, check_record_fields, is_numeric_string, parse_field_index};
+use elab::exprs::records::projection::{FieldSlot, project_record_field, project_tuple_index};
 
 // ===========================================================================
 // RECORD LITERAL ELABORATION
@@ -169,7 +171,7 @@ fn project_field(
 ) -> ElabExprResult {
     if is_numeric_string(field_name) {
         let index = parse_field_index(field_name);
-        project_index(env, base, index, span)
+        project_tuple_index(env, base, index, span)
     } else {
         project_named_field(env, base, field_name, span)
     }
@@ -220,76 +222,13 @@ fn project_from_type_info(
                         "unknown field in record",
                         span
                     )),
+                // The field COUNT decides the chain, not the residual type
+                // (ADR 4.9.26b D1/D2): `fields` is the only place that knows
+                // whether this index is the last one, and it is in hand here.
                 SomeRecordField(field_info) =>
                     let structural_base: TermInfo = { term: base.term, ty: type_info.encoded_type, cir: base.cir };
-                    project_index_with_result_type(
-                        env, structural_base,
-                        field_info.index, field_info.ty, span
-                    )
+                    let slot: FieldSlot = { index: field_info.index, arity: list_len(fields) };
+                    project_record_field(env, structural_base, slot, field_info.ty, span)
             }
-    }
-}
-
-fn project_index(
-    env: Env,
-    base: TermInfo,
-    index: Nat,
-    span: Span
-) -> ElabExprResult {
-    if index == 0 {
-        if tg_type_is_product(base.ty) {
-            let elem_ty = tg_type_get_product_left(base.ty);
-            let term = tg_term_fst(base.term);
-            let cir = CIRFst(base.cir);
-            ElabExprOk(env, term, elem_ty, cir)
-        } else {
-            ElabExprOk(env, base.term, base.ty, base.cir)
-        }
-    } else {
-        if tg_type_is_product(base.ty) {
-            let next: TermInfo = {
-                term: tg_term_snd(base.term),
-                ty: tg_type_get_product_right(base.ty),
-                cir: CIRSnd(base.cir)
-            };
-            project_index(env, next, index - 1, span)
-        } else {
-            ElabExprErr(elab_expr_error(
-                "index out of bounds for record/tuple",
-                span
-            ))
-        }
-    }
-}
-
-fn project_index_with_result_type(
-    env: Env,
-    base: TermInfo,
-    index: Nat,
-    result_ty: TypeHandle,
-    span: Span
-) -> ElabExprResult {
-    if index == 0 {
-        if tg_type_is_product(base.ty) {
-            let term = tg_term_fst(base.term);
-            let cir = CIRFst(base.cir);
-            ElabExprOk(env, term, result_ty, cir)
-        } else {
-            ElabExprOk(env, base.term, result_ty, base.cir)
-        }
-    } else {
-        if tg_type_is_product(base.ty) {
-            let next: TermInfo = {
-                term: tg_term_snd(base.term),
-                ty: tg_type_get_product_right(base.ty),
-                cir: CIRSnd(base.cir)
-            };
-            project_index_with_result_type(env, next, index - 1, result_ty, span)
-        } else {
-            ElabExprErr(elab_expr_error(
-                "index out of bounds for record/tuple",
-                span
-            ))
-        }
     }
 }

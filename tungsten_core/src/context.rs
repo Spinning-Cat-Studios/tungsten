@@ -119,6 +119,11 @@ impl Context {
     pub fn len(&self) -> usize {
         self.bindings.len()
     }
+
+    /// The raw bindings, for arena retention accounting (ADR 2.7.26a §3.4).
+    pub(crate) fn bindings(&self) -> &Vec<Binding> {
+        &self.bindings
+    }
 }
 
 impl fmt::Display for Context {

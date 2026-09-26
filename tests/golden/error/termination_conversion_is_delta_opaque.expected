@@ -1,0 +1,16 @@
+[E0071] Error: `refl` requires both sides to be equal, but found `global:two` and `(succ (succ zero))`
+    ╭─[tests/golden/error/termination_conversion_is_delta_opaque.tg:16:38]
+    │
+ 16 │ fn total_is_opaque() -> two() == 2 { refl }
+    │                                      ──┬─  
+    │                                        ╰─── 
+────╯
+[E0071] Error: `refl` requires both sides to be equal, but found `(global:spin (succ zero))` and `(succ (succ zero))`
+    ╭─[tests/golden/error/termination_conversion_is_delta_opaque.tg:18:42]
+    │
+ 18 │ fn partial_is_opaque() -> spin(1) == 2 { refl }
+    │                                          ──┬─  
+    │                                            ╰─── 
+────╯
+
+error: aborting due to 2 errors

@@ -1,0 +1,23 @@
+// ADR 1.7.26b fixture — unclassifiable driver SKIP → UNKNOWN risk.
+//
+// `flip` recurses with only `Bool` params (neither a collection/unbounded type
+// nor a finite ADT the risk model recognizes) and returns a by-value tuple
+// `(Nat, Nat)` (struct return → SKIP). Two params give it arity ≥ 2 so the
+// `$direct` musttail path fires. The driver cannot be classified, so the row
+// is UNKNOWN rather than being silently bucketed as LOW.
+
+// Partial (ADR 11.8.26b): a measure recursion, out of Phase 1's scope.
+// This fixture exercises musttail classification, not termination.
+#[partial]
+fn flip(a: Bool, b: Bool) -> (Nat, Nat) {
+    if a {
+        (1, 0)
+    } else {
+        flip(b, a)
+    }
+}
+
+fn main() -> Nat {
+    let (x, y) = flip(false, true);
+    x + y
+}

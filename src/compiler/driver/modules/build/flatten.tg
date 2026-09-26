@@ -53,7 +53,7 @@ fn flatten_submodules(
 }
 
 /// Filter out mod declarations from the flattened item list.
-/// Use declarations are kept so Phase 1b import resolution can fire.
+/// Use declarations are kept so Import Resolution import resolution can fire.
 pub fn filter_mod_decls(items: List<Item>) -> List<Item> {
     match items {
         Nil() => Nil,

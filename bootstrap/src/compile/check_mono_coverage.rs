@@ -1,4 +1,4 @@
-//! `tungsten doctor check-mono-coverage` — detect uncovered TyApp sites.
+//! `tungsten doctor check codegen mono-coverage` — detect uncovered TyApp sites.
 //!
 //! Walks all codegen unit term trees and verifies every
 //! `TyApp(Global(name), ty_arg)` has a corresponding entry in the frozen
@@ -28,7 +28,7 @@ struct UncoveredSite {
     unit_id: String,
 }
 
-/// Entry point for `tungsten doctor check-mono-coverage <file>`.
+/// Entry point for `tungsten doctor check codegen mono-coverage <file>`.
 pub fn cmd_check_mono_coverage(file: &PathBuf, verbose: bool, max_errors: usize) -> ExitCode {
     let project = match driver::elaborate_project(file, verbose, max_errors, None) {
         Ok(output) => output,

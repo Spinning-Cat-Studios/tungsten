@@ -9,14 +9,24 @@ use super::elaborate_for_info;
 use super::helpers::format_type_short;
 
 pub use super::commands_detail::{
-    cmd_info_adt, cmd_info_constructors, cmd_info_def, cmd_info_def_parsed, cmd_info_encoding,
-    cmd_info_error_enrichment, cmd_info_field_type, cmd_info_mutual_recursion_groups,
-    cmd_info_record_fields, cmd_info_try_desugar, cmd_info_type_encoding, cmd_info_type_visibility,
-    AdtInfoOptions,
+    cmd_info_adt, cmd_info_constructors, cmd_info_def, cmd_info_def_parsed, cmd_info_encode_order,
+    cmd_info_encoding, cmd_info_error_enrichment, cmd_info_field_type, cmd_info_mu_members,
+    cmd_info_mutual_recursion_groups, cmd_info_record_fields, cmd_info_try_desugar,
+    cmd_info_type_encoding, cmd_info_type_size, cmd_info_type_spine, cmd_info_type_visibility,
+    AdtInfoOptions, DefReports,
 };
 
-mod pipeline;
+pub(crate) mod pipeline;
 pub use pipeline::cmd_info_pipeline;
+
+// Compiled in both configurations so its unit tests run in the default
+// (no-codegen) test config; only the codegen-less CLI dispatches to it, hence
+// the dead-code allowance under `codegen` (the ADR 5.8.26c retrospective's
+// `info/mod.rs:23` precedent, inverted).
+#[cfg_attr(feature = "codegen", allow(dead_code))]
+mod codegen_unavailable;
+#[cfg_attr(feature = "codegen", allow(unused_imports))]
+pub use codegen_unavailable::cmd_info_codegen_unavailable;
 
 pub fn cmd_info_types(file: &PathBuf, verbose: bool, max_errors: usize) -> ExitCode {
     let Some(project) = elaborate_for_info(file, verbose, max_errors) else {
@@ -136,7 +146,12 @@ fn def_llvm_name(name: &str) -> String {
 }
 
 #[cfg(feature = "codegen")]
-pub fn cmd_info_symbols(file: &PathBuf, verbose: bool, max_errors: usize) -> ExitCode {
+pub fn cmd_info_symbols(
+    file: &PathBuf,
+    by_function: Option<&str>,
+    verbose: bool,
+    max_errors: usize,
+) -> ExitCode {
     use tungsten_bootstrap::driver;
     use tungsten_codegen::inkwell::context::Context as LlvmContext;
     use tungsten_codegen::CodeGen;
@@ -166,9 +181,78 @@ pub fn cmd_info_symbols(file: &PathBuf, verbose: bool, max_errors: usize) -> Exi
 
     // Print the symbol table
     let symbols = codegen.symbol_map();
-    print_symbol_table(symbols);
+    match by_function {
+        // Rendering lives in `info/codegen/symbols.rs` — see its module doc for
+        // why codegen-gated code must stay inside that directory.
+        Some(name) => crate::info::codegen::symbols::print_function_symbol_set(name, symbols),
+        None => print_symbol_table(symbols),
+    }
 
     ExitCode::SUCCESS
+}
+
+/// `tungsten info type lowering <name> <file>` (ADR 12.7.26c P4/D5).
+///
+/// Prints the named type's LLVM layout via each applicable lowering route,
+/// flagging divergence. Shares the route-lowering probe with
+/// `doctor check type lowering-consistency`, so the two cannot disagree.
+#[cfg(feature = "codegen")]
+pub fn cmd_info_type_lowering(
+    name: &str,
+    file: &PathBuf,
+    verbose: bool,
+    max_errors: usize,
+) -> ExitCode {
+    use tungsten_bootstrap::doctor::lowering_probe::{
+        build_project_lowering, layouts_diverge, type_route_layouts,
+    };
+    use tungsten_bootstrap::driver;
+    use tungsten_codegen::inkwell::context::Context as LlvmContext;
+
+    let project = match driver::elaborate_project(file, verbose, max_errors, None) {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let Some((_, (params, _))) = project.adt_types.iter().find(|(n, _)| n.as_str() == name) else {
+        eprintln!("Type '{name}' is not a project ADT (records/aliases have one fixed layout).");
+        return ExitCode::FAILURE;
+    };
+    let params = params.clone();
+
+    let context = LlvmContext::create();
+    let mut lowering = build_project_lowering(&context, &project);
+
+    if lowering.is_recursive_adt(name) {
+        println!("{name}: recursive ADT — lowers uniformly to `ptr` at the value level (no route divergence possible).");
+        return ExitCode::SUCCESS;
+    }
+
+    let layouts = type_route_layouts(&mut lowering, name, &params);
+    if layouts.is_empty() {
+        eprintln!("No applicable lowering routes for '{name}'.");
+        return ExitCode::FAILURE;
+    }
+
+    let args = if params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", vec!["String"; params.len()].join(", "))
+    };
+    println!("lowering routes for `{name}{args}`:");
+    for rl in &layouts {
+        println!("  {:<10} {}   ← {}", rl.route, rl.layout, rl.label);
+    }
+    if layouts_diverge(&layouts) {
+        println!("\n  DIVERGENT — routes disagree; run `tungsten doctor check type lowering-consistency {}`", file.display());
+        ExitCode::FAILURE
+    } else {
+        println!("\n  all routes agree.");
+        ExitCode::SUCCESS
+    }
 }
 
 /// Declare functions, register term definitions, and compile all defs into codegen.

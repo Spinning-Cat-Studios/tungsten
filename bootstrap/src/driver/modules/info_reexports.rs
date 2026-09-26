@@ -145,7 +145,15 @@ pub fn resolve_pub_use_module(
 ///
 /// Uses insert-if-absent semantics: existing items in the target are never
 /// overwritten. Visibility and type param counts are propagated from source.
-fn copy_contents_entries(src: &ModuleContents, tgt: &mut ModuleContents, filter: Option<&str>) {
+/// Copied values also record their re-export provenance
+/// (`reexported_value_sources`, ADR 12.7.26a §2.1) so canonical value
+/// resolution can walk the `pub use` chain back to the defining module.
+fn copy_contents_entries(
+    src: &ModuleContents,
+    src_module: &ModulePath,
+    tgt: &mut ModuleContents,
+    filter: Option<&str>,
+) {
     // Copy types with visibility and type param counts
     for name in &src.types {
         if filter.is_some_and(|f| f != name) {
@@ -163,7 +171,7 @@ fn copy_contents_entries(src: &ModuleContents, tgt: &mut ModuleContents, filter:
         }
     }
 
-    // Copy values with visibility
+    // Copy values with visibility + re-export provenance (ADR 12.7.26a)
     for name in &src.values {
         if filter.is_some_and(|f| f != name) {
             continue;
@@ -173,6 +181,9 @@ fn copy_contents_entries(src: &ModuleContents, tgt: &mut ModuleContents, filter:
             if let Some(vis) = src.value_visibility.get(name) {
                 tgt.value_visibility.insert(name.clone(), vis.clone());
             }
+            tgt.reexported_value_sources
+                .entry(name.clone())
+                .or_insert_with(|| (src_module.clone(), name.clone()));
         }
     }
 
@@ -202,7 +213,12 @@ fn copy_item_to_module(
         None => return,
     };
     let target_contents = info.modules.entry(target_module.clone()).or_default();
-    copy_contents_entries(&source_contents, target_contents, Some(item_name));
+    copy_contents_entries(
+        &source_contents,
+        source_module,
+        target_contents,
+        Some(item_name),
+    );
 }
 
 /// Copy all items from source module to target module (for glob re-exports).
@@ -216,7 +232,7 @@ fn copy_all_items_to_module(
         None => return,
     };
     let target_contents = info.modules.entry(target_module.clone()).or_default();
-    copy_contents_entries(&source_contents, target_contents, None);
+    copy_contents_entries(&source_contents, source_module, target_contents, None);
 }
 
 /// Copy a specific item from source module to target module under an alias name.
@@ -250,7 +266,9 @@ fn copy_item_to_module_as(
         }
     }
 
-    // Copy value if it exists under item_name, register as alias_name
+    // Copy value if it exists under item_name, register as alias_name.
+    // Provenance records the ORIGINAL name in the source module, so the
+    // canonical-value chain walk recovers the defining name (ADR 12.7.26a).
     if source_contents.values.iter().any(|n| n == item_name) {
         if !target_contents.values.iter().any(|n| n == alias_name) {
             target_contents.values.push(alias_name.to_string());
@@ -259,6 +277,10 @@ fn copy_item_to_module_as(
                     .value_visibility
                     .insert(alias_name.to_string(), vis.clone());
             }
+            target_contents
+                .reexported_value_sources
+                .entry(alias_name.to_string())
+                .or_insert_with(|| (source_module.clone(), item_name.to_string()));
         }
     }
 

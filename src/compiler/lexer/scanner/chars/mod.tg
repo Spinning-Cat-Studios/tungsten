@@ -1,0 +1,29 @@
+// src/compiler/lexer/scanner/chars/mod.tg
+// Character code constants and classification functions for the lexer.
+//
+// Split out of the single `chars.tg` by ADR 10.9.26b. The seam is the LEXICAL
+// ROLE each code plays — whitespace, alphanumeric, delimiter, operator,
+// literal marker — which is the axis the classification predicates already
+// read the codes along. The predicates themselves sit together in `classify`
+// rather than beside the codes they consume: `is_ident_continue` spans the
+// alphanumeric group, `is_hex_digit` spans alphanumeric AND literal markers,
+// so distributing them would have made the code modules import each other in
+// both directions. As it stands the dependency runs one way, `classify` →
+// codes, and no code module imports another.
+//
+// Every name is re-exported here, so `use lexer::scanner::chars::{...}` reads
+// exactly as it did before the split.
+
+pub mod whitespace;
+pub mod alphanumeric;
+pub mod delimiters;
+pub mod operators;
+pub mod literal_markers;
+pub mod classify;
+
+pub use lexer::scanner::chars::whitespace::*;
+pub use lexer::scanner::chars::alphanumeric::*;
+pub use lexer::scanner::chars::delimiters::*;
+pub use lexer::scanner::chars::operators::*;
+pub use lexer::scanner::chars::literal_markers::*;
+pub use lexer::scanner::chars::classify::*;

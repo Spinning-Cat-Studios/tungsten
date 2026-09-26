@@ -1,0 +1,9 @@
+// Golden test (ADR 18.9.26e): literal patterns cannot cover every integer,
+// so an integer match needs an UNGUARDED catch-all; a guarded `x if ...` arm
+// does not count. E0020.
+fn main() -> Nat {
+    match 3 {
+        0 => 1,
+        x if x > 0 => 2
+    }
+}

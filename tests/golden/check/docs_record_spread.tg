@@ -1,0 +1,11 @@
+// Record construction, named constructors, spread and field access. A spread
+// takes its type from the context: annotate the binding.
+type Point = { x: Nat, y: Nat }
+
+fn main() -> Nat {
+    let p: Point = { x: 0, y: 10 };
+    let q = Point { x: 0, y: 10 };
+    let r: Point = { ...p, x: 5 };
+    let v = p.x;
+    v + r.x + q.y
+}

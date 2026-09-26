@@ -8,6 +8,16 @@ use super::type_graph::TypeGraph;
 ///
 /// Returns components in reverse topological order (leaf SCCs first).
 pub fn tarjan_scc(graph: &TypeGraph) -> Vec<Vec<String>> {
+    tarjan_scc_with_depth(graph).0
+}
+
+/// [`tarjan_scc`], additionally reporting the deepest `strongconnect` recursion
+/// reached.
+///
+/// `strongconnect` recurses, so a graph whose node set is larger than the
+/// elaborator's ADT-only one (as the strict-positivity driver's is —
+/// ADR 7.8.26e D3) needs the depth measured rather than assumed.
+pub fn tarjan_scc_with_depth(graph: &TypeGraph) -> (Vec<Vec<String>>, usize) {
     let mut state = TarjanState {
         index_counter: 0,
         stack: Vec::new(),
@@ -15,6 +25,8 @@ pub fn tarjan_scc(graph: &TypeGraph) -> Vec<Vec<String>> {
         indices: HashMap::new(),
         lowlinks: HashMap::new(),
         result: Vec::new(),
+        depth: 0,
+        max_depth: 0,
     };
 
     let mut nodes: Vec<&String> = graph.nodes().iter().collect();
@@ -26,7 +38,7 @@ pub fn tarjan_scc(graph: &TypeGraph) -> Vec<Vec<String>> {
         }
     }
 
-    state.result
+    (state.result, state.max_depth)
 }
 
 struct TarjanState {
@@ -36,9 +48,20 @@ struct TarjanState {
     indices: HashMap<String, usize>,
     lowlinks: HashMap<String, usize>,
     result: Vec<Vec<String>>,
+    /// Current `strongconnect` recursion depth.
+    depth: usize,
+    /// Deepest recursion reached over the whole run.
+    max_depth: usize,
 }
 
 fn strongconnect(v: &str, graph: &TypeGraph, state: &mut TarjanState) {
+    state.depth += 1;
+    state.max_depth = state.max_depth.max(state.depth);
+    strongconnect_inner(v, graph, state);
+    state.depth -= 1;
+}
+
+fn strongconnect_inner(v: &str, graph: &TypeGraph, state: &mut TarjanState) {
     let v_index = state.index_counter;
     state.index_counter += 1;
     state.indices.insert(v.to_string(), v_index);

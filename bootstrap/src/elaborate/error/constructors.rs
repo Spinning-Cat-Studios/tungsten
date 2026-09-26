@@ -121,7 +121,22 @@ impl ElabError {
     }
 
     /// Create a generic error with a custom message.
+    ///
+    /// **This is the second construction path for `Other`**, and greps for the
+    /// variant do not find it: ADR 15.8.26b's census read 35 sites where there
+    /// were 42, the ten it missed being callers of this helper. Both spellings
+    /// are counted by `other_construction_sites` in `error/tests.rs`, which
+    /// caps the population — see [`Self::internal`] for the other class.
     pub fn other(span: Span, message: &str) -> Self {
         Self::new(span, ElabErrorKind::Other(message.to_string()))
+    }
+
+    /// Create an internal-invariant error (ADR 15.8.26b).
+    ///
+    /// For conditions no user input can cause: the message states the broken
+    /// invariant WITHOUT an "internal error:" prefix — the kind's rendering
+    /// adds the framing and the bug-report request uniformly.
+    pub fn internal(span: Span, invariant: impl Into<String>) -> Self {
+        Self::new(span, ElabErrorKind::InternalError(invariant.into()))
     }
 }

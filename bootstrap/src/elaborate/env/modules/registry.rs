@@ -198,15 +198,9 @@ impl Env {
     ///
     /// This is used to fix false visibility errors where the item_module
     /// and from_module represent the same file but have different path prefixes.
+    /// Delegates to the shared [`canonicalize_module_path`] so this and
+    /// `ModuleInfo::canonicalize_path` cannot diverge.
     pub fn canonicalize_path(&self, path: &ModulePath) -> ModulePath {
-        // Look up the file for this module path
-        if let Some(file) = self.module_files.get(path) {
-            // Look up the canonical module path for this file
-            if let Some(canonical) = self.file_to_module.get(file) {
-                return canonical.clone();
-            }
-        }
-        // No mapping found - return original path
-        path.clone()
+        super::canonicalize_module_path(path, &self.module_files, &self.file_to_module)
     }
 }

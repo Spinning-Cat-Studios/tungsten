@@ -60,7 +60,10 @@ pub type CheckOpts = {
     verbose: Bool,
     max_errors: Nat,
     dump_core: Option<String>,
+    dump_core_terms: Option<String>,
     check_tyvar_escape: Bool,
+    check_free_vars: Bool,
+    check_well_typed: Bool,
     elab_mode: ElabMode
 }
 
@@ -86,11 +89,17 @@ pub type CliError = {
 }
 
 /// Options for the `test` command.
+///
+/// `require_tests` mirrors the bootstrap's flag of the same name (ADR 2.7.26b):
+/// zero RUNNABLE tests is an error, and functions skipped by the signature
+/// filter do not count towards the total. Without it a discovery regression —
+/// a rename sweep, a filter typo — reports a passing run (ADR 7.8.26a).
 pub type TestOpts = {
     file: String,
     verbose: Bool,
     filter: String,
-    max_errors: Nat
+    max_errors: Nat,
+    require_tests: Bool
 }
 
 /// Options for the `info` subcommand.
@@ -173,7 +182,10 @@ fn parse_check_command(args: List<String>) -> Command {
                 verbose: state.verbose,
                 max_errors: state.max_errors,
                 dump_core: state.dump_core,
+                dump_core_terms: state.dump_core_terms,
                 check_tyvar_escape: state.check_tyvar_escape,
+                check_free_vars: state.check_free_vars,
+                check_well_typed: state.check_well_typed,
                 elab_mode: ElabCheck
             };
             CmdCheck(opts)

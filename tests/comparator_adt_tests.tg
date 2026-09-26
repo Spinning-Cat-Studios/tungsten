@@ -1,0 +1,151 @@
+// ADR 29.6.26f — value-level comparator unit tests on compiler-shaped ADTs, run
+// through the `tungsten test` runner (T13, now flag-aware). These exercise the
+// generic `compare`/`assert_eq` intrinsic on the kinds of recursive, span-carrying,
+// multi-constructor data the compiler actually manipulates.
+//
+// NOTE ON `Expr`/`Ty` (AC 2): the *literal* compiler `Expr`/`Ty` pull the entire
+// compiler module graph, so elaborating a standalone test that imports them takes
+// minutes under the evaluator. Instead these use a **mini expression AST** and
+// **mini type AST** that mirror the real ones' shape — recursive sums, `Span`-
+// carrying nodes, nested payloads — which drive the same recursive comparator
+// synthesis at a fraction of the cost. Testing the literal `Expr`/`Ty` is a
+// heavier follow-up (see the ADR AC note).
+//
+// Run: tungsten test tests/comparator_adt_tests.tg   (expect all ok, exit 0)
+
+extern "C" fn tg_assert_eq_bool(left: Nat, right: Nat) -> Unit
+
+type List<T> = | Nil | Cons(T, List<T>)
+type Option<T> = | None | Some(T)
+type PathSeg = | Field(String) | Pos(Nat) | Index(Nat) | Tag | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult = | Equal | NotEqual(CompareDiff)
+
+// A span, exactly as the compiler carries one on every AST node.
+type Span = { start: Nat, end: Nat }
+
+// Mini expression AST — recursive, span-carrying, multi-constructor (Expr-shaped).
+type MiniExpr =
+    | EInt(Nat, Span)
+    | EVar(String, Span)
+    | EBin(String, MiniExpr, MiniExpr, Span)
+    | EIf(MiniExpr, MiniExpr, MiniExpr, Span)
+    | ECall(MiniExpr, List<MiniExpr>, Span)
+
+// Mini type AST — recursive, flat + nested (Ty-shaped).
+type MiniTy =
+    | TCon(String)
+    | TArrow(MiniTy, MiniTy)
+    | TApp(String, List<MiniTy>)
+
+fn is_equal(r: CompareResult) -> Bool { match r { Equal() => true, NotEqual(_) => false } }
+fn assert(cond: Bool) -> Unit { tg_assert_eq_bool(if cond { 1 } else { 0 }, 1) }
+fn assert_false(cond: Bool) -> Unit { tg_assert_eq_bool(if cond { 1 } else { 0 }, 0) }
+fn assert_eq<T>(a: T, b: T) -> Unit { assert(is_equal(compare(a, b))) }
+fn assert_ne<T>(a: T, b: T) -> Unit { assert_false(is_equal(compare(a, b))) }
+
+fn sp(a: Nat, b: Nat) -> Span { Span { start: a, end: b } }
+
+// ── Primitives / leaves ────────────────────────────────────────────────────
+
+pub fn test_nat_eq_and_ne() -> Unit {
+    assert_eq(42, 42);
+    assert_ne(42, 43)
+}
+
+pub fn test_string_eq_and_ne() -> Unit {
+    assert_eq("hello", "hello");
+    assert_ne("hello", "world")
+}
+
+pub fn test_bool_eq_and_ne() -> Unit {
+    assert_eq(true, true);
+    assert_ne(true, false)
+}
+
+// ── Tuples / Option / List ─────────────────────────────────────────────────
+
+pub fn test_tuple_eq_and_ne() -> Unit {
+    assert_eq((1, false), (1, false));
+    assert_ne((1, false), (1, true))
+}
+
+pub fn test_option_eq_and_ne() -> Unit {
+    let a: Option<Nat> = Some(7);
+    assert_eq(a, Some(7));
+    assert_ne(a, Some(8));
+    let n: Option<Nat> = None;
+    assert_ne(a, n)
+}
+
+pub fn test_list_eq_element_and_length() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
+    assert_eq(xs, Cons(1, Cons(2, Cons(3, Nil))));
+    assert_ne(xs, Cons(1, Cons(9, Cons(3, Nil))));   // element diff
+    assert_ne(xs, Cons(1, Cons(2, Nil)))             // length diff
+}
+
+// ── Records (Span) ─────────────────────────────────────────────────────────
+
+pub fn test_span_record_eq_and_ne() -> Unit {
+    assert_eq(sp(0, 5), sp(0, 5));
+    assert_ne(sp(0, 5), sp(0, 6))
+}
+
+// ── Recursive expression ADT (Expr-shaped) ─────────────────────────────────
+
+pub fn test_miniexpr_leaf_eq_and_ne() -> Unit {
+    let a: MiniExpr = EInt(1, sp(0, 1));
+    assert_eq(a, EInt(1, sp(0, 1)));
+    assert_ne(a, EInt(2, sp(0, 1)))       // payload differs
+}
+
+pub fn test_miniexpr_constructor_tag_differs() -> Unit {
+    let i: MiniExpr = EInt(1, sp(0, 1));
+    let v: MiniExpr = EVar("x", sp(0, 1));
+    assert_ne(i, v)                        // different constructor
+}
+
+pub fn test_miniexpr_nested_recursive_eq_and_ne() -> Unit {
+    let s = sp(0, 5);
+    let lhs: MiniExpr = EBin("+", EInt(1, s), EInt(2, s), s);
+    assert_eq(lhs, EBin("+", EInt(1, s), EInt(2, s), s));
+    assert_ne(lhs, EBin("+", EInt(1, s), EInt(3, s), s));   // nested payload
+    assert_ne(lhs, EBin("-", EInt(1, s), EInt(2, s), s))    // operator differs
+}
+
+pub fn test_miniexpr_deep_if_and_call() -> Unit {
+    let s = sp(1, 9);
+    let cond: MiniExpr = EBin("<", EVar("n", s), EInt(10, s), s);
+    let e1: MiniExpr = EIf(cond, EInt(0, s), EInt(1, s), s);
+    assert_eq(e1, EIf(EBin("<", EVar("n", s), EInt(10, s), s), EInt(0, s), EInt(1, s), s));
+    // Call with a list of argument expressions.
+    let c1: MiniExpr = ECall(EVar("f", s), Cons(EInt(1, s), Cons(EInt(2, s), Nil)), s);
+    assert_eq(c1, ECall(EVar("f", s), Cons(EInt(1, s), Cons(EInt(2, s), Nil)), s));
+    assert_ne(c1, ECall(EVar("f", s), Cons(EInt(1, s), Nil), s))   // arg-list length
+}
+
+// ── Span-sensitivity (AC 7 direction): nodes differing only in span compare unequal
+
+pub fn test_miniexpr_span_sensitive() -> Unit {
+    // Same value and shape, different span → structurally unequal (no implicit strip).
+    assert_ne(EInt(1, sp(0, 1)), EInt(1, sp(2, 3)))
+}
+
+// ── Recursive type ADT (Ty-shaped) ─────────────────────────────────────────
+
+pub fn test_minity_eq_and_ne() -> Unit {
+    let t: MiniTy = TArrow(TCon("Nat"), TApp("List", Cons(TCon("Nat"), Nil)));
+    assert_eq(t, TArrow(TCon("Nat"), TApp("List", Cons(TCon("Nat"), Nil))));
+    assert_ne(t, TArrow(TCon("Bool"), TApp("List", Cons(TCon("Nat"), Nil))));  // domain
+    assert_ne(t, TArrow(TCon("Nat"), TApp("List", Cons(TCon("Bool"), Nil))))   // nested arg
+}
+
+// ── Nested generic: Option<List<(Nat, Bool)>> ──────────────────────────────
+
+pub fn test_nested_option_list_tuple() -> Unit {
+    let v: Option<List<(Nat, Bool)>> = Some(Cons((1, true), Cons((2, false), Nil)));
+    assert_eq(v, Some(Cons((1, true), Cons((2, false), Nil))));
+    assert_ne(v, Some(Cons((1, true), Cons((2, true), Nil))))
+}

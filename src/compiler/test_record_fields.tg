@@ -1,0 +1,175 @@
+// Unit tests for record-field resolution by canonical index (ADR 7.9.26b).
+//
+// `elaborate_record_body` returns a record's `List<RecordFieldInfo>`
+// **newest-first** — its own header says so, and `positivity_register_record`
+// reverses it before use. Two consumers did not: the named-spread walk and the
+// no-spread reorder both counted places in that list, so `{ ...r, tail: 7 }`
+// wrote `7` into `head`, and `{ head: a, mid: b, tail: c }` checked `c` against
+// `head`'s type. Each `RecordFieldInfo` already carries the `index` the encoding
+// is built around; `record_field_at_index` is the one place that reads it, and
+// this suite is where the "position is not the index" fact is pinned.
+//
+// **A middle field cannot pin it** (ADR 7.9.26b D5). Position and index are
+// mirror images, so in an odd-arity record the centre field is its own mirror
+// and agrees under both readings. Every assertion below therefore names a
+// field that is NOT at the centre, which is also why the list is three long:
+// at arity 1 the two readings coincide, and at arity 2 there is no centre to
+// distinguish them from.
+
+// Full module tree (matches test_projections.tg): with only `mod driver`,
+// Signature Collection fails resolving `Option` in driver::util (ADR 2.7.26b T5b).
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_string, assert_eq_nat, assert_eq_bool};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_get;
+use elab::ffi::INVALID_HANDLE;
+use elab::env::{
+    RecordFieldInfo, record_field_info_new,
+    MaybeRecordField, NoRecordField, SomeRecordField,
+    record_field_at_index, record_field_lookup
+};
+
+// ---------------------------------------------------------------------------
+// The list as the elaborator hands it over
+// ---------------------------------------------------------------------------
+
+/// `type ScalarTail = { head, mid, tail }` as `elaborate_record_body` produces
+/// it: consed one field at a time, so the LAST field declared is at the FRONT.
+///
+/// The field types are irrelevant to every lookup below, so they are all
+/// `INVALID_HANDLE()` — this suite is about the ordering, and a real handle
+/// would need an arena the bootstrap evaluator does not carry.
+fn scalar_tail_fields() -> List<RecordFieldInfo> {
+    let fields: List<RecordFieldInfo> = Cons(
+        record_field_info_new("tail", INVALID_HANDLE(), 2),
+        Cons(
+            record_field_info_new("mid", INVALID_HANDLE(), 1),
+            Cons(record_field_info_new("head", INVALID_HANDLE(), 0), Nil())
+        )
+    );
+    fields
+}
+
+// ---------------------------------------------------------------------------
+// Rendering helpers — an answer as text, so a miss reads as a name
+// ---------------------------------------------------------------------------
+
+/// The found field's name, or `"<none>"`. A sentinel rather than `""`, so an
+/// empty-string name and a missing field cannot render alike.
+fn found_field_name(found: MaybeRecordField) -> String {
+    match found {
+        NoRecordField() => "<none>",
+        SomeRecordField(field) => field.name
+    }
+}
+
+/// The found field's own `index`, or the arity sentinel.
+fn found_field_index(found: MaybeRecordField) -> Nat {
+    match found {
+        NoRecordField() => INVALID_HANDLE(),
+        SomeRecordField(field) => field.index
+    }
+}
+
+fn found_field_exists(found: MaybeRecordField) -> Bool {
+    match found {
+        NoRecordField() => false,
+        SomeRecordField(field) => true
+    }
+}
+
+/// The name at a *position* in the list — the reading this ADR removed.
+fn positional_field_name(fields: List<RecordFieldInfo>, position: Nat) -> String {
+    match list_get(fields, position) {
+        None() => "<none>",
+        Some(field) => field.name
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR 7.9.26b AC4: the index names the field, at every non-central index
+// ---------------------------------------------------------------------------
+
+/// Index 0 is `head` and index 2 is `tail` — the two that are each other's
+/// mirror, so a positional walk swaps them and a reversal cannot pass this.
+pub fn test_index_names_the_declared_field() -> Unit {
+    let fields = scalar_tail_fields();
+    assert_eq_string(found_field_name(record_field_at_index(fields, 0)), "head");
+    assert_eq_string(found_field_name(record_field_at_index(fields, 1)), "mid");
+    assert_eq_string(found_field_name(record_field_at_index(fields, 2)), "tail")
+}
+
+/// The list really does arrive reversed — this is the defect's own premise, and
+/// asserting it here is what keeps the suite honest if the producer ever changes.
+///
+/// Position 0 holds `tail` and position 2 holds `head`: exactly the swap the
+/// two consumers used to perform. Position 1 holds `mid` under BOTH readings,
+/// which is why `{ ...r, mid: 7 }` was correct all along (D5).
+pub fn test_list_position_is_the_mirror_of_the_index() -> Unit {
+    let fields = scalar_tail_fields();
+    assert_eq_string(positional_field_name(fields, 0), "tail");
+    assert_eq_string(positional_field_name(fields, 1), "mid");
+    assert_eq_string(positional_field_name(fields, 2), "head")
+}
+
+/// The centre field agrees under both readings, and the outer two do not.
+///
+/// Stated as a comparison rather than as two more literals: this is the fact
+/// that makes a middle-field fixture worthless as a regression, so it is worth
+/// a test of its own rather than a comment.
+pub fn test_only_the_centre_field_agrees_under_both_readings() -> Unit {
+    let fields = scalar_tail_fields();
+    assert_eq_bool(
+        found_field_name(record_field_at_index(fields, 1)) == positional_field_name(fields, 1),
+        true
+    );
+    assert_eq_bool(
+        found_field_name(record_field_at_index(fields, 0)) == positional_field_name(fields, 0),
+        false
+    );
+    assert_eq_bool(
+        found_field_name(record_field_at_index(fields, 2)) == positional_field_name(fields, 2),
+        false
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The two lookups are one ordering
+// ---------------------------------------------------------------------------
+
+/// Looking a field up by name and by index agree, in both directions.
+///
+/// `record_field_lookup` is what ordinary field access already used; keying the
+/// record builders on `index` is what makes them read the same number rather
+/// than a second, unstated one (D1).
+pub fn test_name_lookup_and_index_lookup_agree() -> Unit {
+    let fields = scalar_tail_fields();
+    assert_eq_nat(found_field_index(record_field_lookup(fields, "head")), 0);
+    assert_eq_nat(found_field_index(record_field_lookup(fields, "mid")), 1);
+    assert_eq_nat(found_field_index(record_field_lookup(fields, "tail")), 2);
+    assert_eq_string(found_field_name(record_field_at_index(fields, 0)), "head");
+    assert_eq_string(found_field_name(record_field_at_index(fields, 2)), "tail")
+}
+
+/// An index past the last field is a miss, not the last field.
+///
+/// The no-spread reorder walk now ends on this answer rather than on the list
+/// running out, so a lookup that clamped instead of missing would loop forever.
+pub fn test_index_past_the_last_field_is_a_miss() -> Unit {
+    let fields = scalar_tail_fields();
+    assert_eq_bool(found_field_exists(record_field_at_index(fields, 2)), true);
+    assert_eq_bool(found_field_exists(record_field_at_index(fields, 3)), false);
+    assert_eq_string(found_field_name(record_field_at_index(fields, 3)), "<none>")
+}
+
+/// An unknown name is a miss too — the sibling arm, asserted so the sentinel
+/// rendering above cannot pass by returning `"<none>"` for everything.
+pub fn test_unknown_name_is_a_miss() -> Unit {
+    let fields = scalar_tail_fields();
+    assert_eq_bool(found_field_exists(record_field_lookup(fields, "head")), true);
+    assert_eq_bool(found_field_exists(record_field_lookup(fields, "nose")), false)
+}

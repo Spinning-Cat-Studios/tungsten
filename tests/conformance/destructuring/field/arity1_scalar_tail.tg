@@ -1,0 +1,12 @@
+// CONTROL for `arity1_product_tail.tg` — arity 1, scalar tail.
+//
+// The same access at the same arity with a field the spine cannot widen. Both
+// readings coincide here by construction, so a divergence on this file is not
+// the field-count defect and the pair's diagnosis is wrong.
+
+type OneScalar = { only: Nat }
+
+pub fn main() -> Nat {
+    let r: OneScalar = { only: 34 };
+    r.only
+}

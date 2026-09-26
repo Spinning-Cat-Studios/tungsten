@@ -1,0 +1,23 @@
+// P3 / AC 6 negative test (ADR 29.6.26f): a `compare` on a **record with an
+// opaque field** must be rejected at compile time with the **path to the first
+// incomparable field** — e.g. `$.run: Arrow(Nat, Nat) is opaque`.
+//
+// `Handler` has a function-typed field `run`, which is a closure/opaque leaf
+// (§2.2). Compiling this MUST fail with a message containing "not comparable"
+// and the field path "$.run".
+//
+// Verified by: make tg-test-comparator-codegen (asserts the compile fails w/ path).
+
+type CompareResult = | Equal | NotEqual
+fn is_eq(r: CompareResult) -> Bool { match r { Equal() => true, NotEqual() => false } }
+
+type Handler = { id: Nat, run: Nat -> Nat }
+fn f(n: Nat) -> Nat { n }
+
+fn main() -> Nat {
+    let a: Handler = Handler { id: 1, run: f };
+    let b: Handler = Handler { id: 1, run: f };
+    // The `run` field is opaque → the whole record is incomparable; the error
+    // must point at `$.run` (the first incomparable field), not just `$`.
+    if is_eq(compare(a, b)) { 1 } else { 0 }
+}

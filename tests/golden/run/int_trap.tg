@@ -1,0 +1,6 @@
+// Golden test (ADR 14.9.26c AC 3): the evaluator's trap line.
+// The golden runner snapshots stderr, so this pins the exact line —
+// `error: integer overflow in +` — that compile/int_trap.tg pins for the
+// native binary: the two must stay byte-identical.
+fn signed_max() -> Int { 9223372036854775807 }
+fn main() -> Int { signed_max() + 1 }

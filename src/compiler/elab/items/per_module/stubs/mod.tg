@@ -1,11 +1,11 @@
-// Phase A: Global type + constructor stub collection.
+// Stub Registration: Global type + constructor stub collection.
 //
 // Walks the entire ParsedModule tree and extracts type stubs with correct
 // arity (from TypeParam AST nodes) and constructor stubs with correct
 // parent type, index, and arity. These stubs replace the arity-0 stubs
 // from populate_module_info, enabling cross-branch generic type resolution.
 //
-// Mirrors L1's `stubs.rs` (ADR 5.5.26c §2.2).
+// Mirrors the bootstrap's `stubs.rs` (ADR 5.5.26c §2.2).
 // See ADR 6.5.26e §2.1.
 
 mod helpers;
@@ -39,7 +39,7 @@ use elab::items::per_module::stubs::helpers::{
 // STUB EXPORTS
 // ===========================================================================
 
-/// Output of Phase A: type + constructor stubs from all modules.
+/// Output of Stub Registration: type + constructor stubs from all modules.
 pub type StubExports = {
     types: List<TypeDefExport>,
     constructors: List<ConstructorExport>
@@ -54,7 +54,7 @@ pub fn stub_exports_empty() -> StubExports {
 // MAIN ENTRY POINT
 // ===========================================================================
 
-/// Phase A: Walk all modules and collect type + constructor stubs
+/// Stub Registration: Walk all modules and collect type + constructor stubs
 /// with correct arity and constructor info.
 pub fn collect_all_stubs(module: ParsedModule) -> StubExports {
     let root_path = module_path_root();
@@ -85,6 +85,10 @@ fn collect_stubs_rec(
 }
 
 /// Collect stubs from a list of submodules.
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn collect_stubs_from_submodules(
     submodules: List<ParsedModule>,
     parent_path: ModulePath
@@ -243,7 +247,7 @@ fn collect_variant_stubs_acc(
             // ⚠ MUST use INVALID_HANDLE, not literal 0 — handle 0 is a valid
             // arena index (the first type allocated, often TyVar from
             // preregister_type_vars). Using 0 caused stale stubs to shadow
-            // real constructors in Phase B environments.
+            // real constructors in Body Elaboration environments.
             let info = constructor_info_new(
                 id, INVALID_HANDLE, INVALID_HANDLE, VisPublic, variant.span
             );

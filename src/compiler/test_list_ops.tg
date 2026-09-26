@@ -123,9 +123,3 @@ pub fn test_list_reverse_type() -> Unit {
     let result: List<Nat> = list_reverse(xs);
     let _ = result;
 }
-
-pub fn test_list_reverse_type() -> Unit {
-    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
-    let result: List<Nat> = list_reverse(xs);
-    let _ = result;
-}

@@ -122,7 +122,7 @@ fn test_info_cmd_def_exit_success() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.tg");
     fs::write(&path, "fn answer() -> Nat { 42 }").unwrap();
-    let result = cmd_info_def("answer", &path, false, 20);
+    let result = cmd_info_def("answer", &path, false, 20, DefReports::default());
     assert_eq!(result, ExitCode::SUCCESS);
 }
 
@@ -131,7 +131,7 @@ fn test_info_cmd_def_not_found() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.tg");
     fs::write(&path, "fn answer() -> Nat { 42 }").unwrap();
-    let result = cmd_info_def("missing", &path, false, 20);
+    let result = cmd_info_def("missing", &path, false, 20, DefReports::default());
     assert_eq!(result, ExitCode::FAILURE);
 }
 
@@ -146,8 +146,8 @@ fn test_info_cmd_encoding_exit_success() {
 
 #[test]
 fn test_info_cmd_pipeline_exit_success() {
-    let result = cmd_info_pipeline();
-    assert_eq!(result, ExitCode::SUCCESS);
+    assert_eq!(cmd_info_pipeline(false), ExitCode::SUCCESS);
+    assert_eq!(cmd_info_pipeline(true), ExitCode::SUCCESS);
 }
 
 #[test]

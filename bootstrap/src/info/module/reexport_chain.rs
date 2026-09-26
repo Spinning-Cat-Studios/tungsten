@@ -1,4 +1,4 @@
-//! `tungsten info reexport-chain` — trace re-export paths for a module's items.
+//! `tungsten info module reexport-chain` — trace re-export paths for a module's items.
 //!
 //! Given a module path, shows how its items propagate through `pub use`
 //! declarations in ancestor modules.
@@ -29,7 +29,7 @@ enum ReexportKind {
     Named,
 }
 
-/// Entry point for `tungsten info reexport-chain <module> <file>`.
+/// Entry point for `tungsten info module reexport-chain <module> <file>`.
 pub fn cmd_info_reexport_chain(module: &str, file: &PathBuf, verbose: bool) -> ExitCode {
     let mut visited = HashSet::new();
     let mut chain = Vec::new();

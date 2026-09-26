@@ -61,6 +61,7 @@ use elab::exprs::bind::{SynthLetCont, CheckLetCont};
 use elab::exprs::apply::app::synth_app;
 use elab::exprs::apply::app::type_app::synth_type_app;
 use elab::exprs::apply::operators::{synth_binary, synth_unary};
+use elab::exprs::apply::operators::int_literals::{check_default};
 use elab::exprs::control::{synth_if, check_if, synth_return, synth_return_unit, IfBranches};
 use elab::exprs::blocks::{synth_block, check_block};
 use elab::exprs::forms::tuples::{synth_tuple, check_tuple};
@@ -287,9 +288,10 @@ pub fn check(env: Env, expr: Expr, expected: TypeHandle) -> ElabExprResult {
         ExprIfLetChain(conditions, body, maybe_else, span) =>
             let match_expr = build_if_let_chain_match(conditions, body, maybe_else, span);
             check(env, match_expr, expected),
-        
-        // Default: synthesize and compare
-        _ => synth_and_compare(env, expr, expected)
+
+        // Default: the numeric arms against Int/Nat (ADR 14.9.26c), else
+        // synthesize and compare — operators/int_literals.tg
+        _ => check_default(env, expr, expected)
     }
     }
 }

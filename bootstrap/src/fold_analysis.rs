@@ -1,11 +1,14 @@
 //! Shared fold/unfold analysis helpers for doctor and info commands.
 //!
 //! Provides structural Term traversal and μ-variable analysis used by
-//! `doctor check-fold-consistency` and `info adt --check-fold`.
+//! `doctor check type fold-consistency` and `info type adt --check-fold`.
 
 use tungsten_core::{Term, Type};
 
 /// Count Fold or Unfold sites in a term tree that reference a given μ-variable.
+///
+/// Deliberately NOT on the `Type::children` discipline (ADR 23.7.26b): this
+/// walks `Term` (via `for_each_subterm`), not `Type`.
 pub fn count_in_term(term: &Term, mu_var: &str, is_fold: bool) -> usize {
     let this = match term {
         Term::Fold(ty, _) if is_fold && type_has_mu_var(ty, mu_var) => 1,
@@ -37,21 +40,18 @@ pub fn encoding_has_mu_binder(ty: &Type, name: &str) -> bool {
 }
 
 /// Check if a type mentions a specific μ-variable.
+///
+/// Non-uniform arms: the `TyVar` leaf and the `Mu` binder name itself (a
+/// `Mu(α_X, _)` mentions `α_X` even if the body never uses it). Every other
+/// variant delegates to [`Type::children`] (ADR 23.7.26b).
 pub fn type_has_mu_var(ty: &Type, mu_var: &str) -> bool {
     match ty {
         Type::Mu(var, body) => var == mu_var || type_has_mu_var(body, mu_var),
         Type::TyVar(v) => v == mu_var,
-        Type::Arrow(a, b) | Type::Product(a, b) | Type::Sum(a, b) => {
-            type_has_mu_var(a, mu_var) || type_has_mu_var(b, mu_var)
-        }
-        Type::Forall(_, body) | Type::Ptr(body) | Type::Ref(body) => type_has_mu_var(body, mu_var),
-        Type::Eq(t, _, _) => type_has_mu_var(t, mu_var),
-        Type::App(_, args) => args.iter().any(|a| type_has_mu_var(a, mu_var)),
-        Type::Adt(_, type_args, variants) => {
-            type_args.iter().any(|a| type_has_mu_var(a, mu_var))
-                || variants.iter().any(|(_, vty)| type_has_mu_var(vty, mu_var))
-        }
-        _ => false,
+        _ => ty
+            .children()
+            .iter()
+            .any(|child| type_has_mu_var(child, mu_var)),
     }
 }
 

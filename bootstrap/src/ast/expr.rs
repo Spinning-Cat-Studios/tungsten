@@ -290,6 +290,10 @@ pub enum LiteralPattern {
     Int(u64, Span),
     Bool(bool, Span),
     String(String, Span),
+    /// A negated integer literal `-5`, carried as its magnitude — the parser
+    /// has a `u64`, and `-9223372036854775808` (`Int`'s `MIN`) needs one more
+    /// magnitude than `MAX` (ADR 18.9.26e). Appended last: bincode is positional.
+    NegInt(u64, Span),
 }
 
 impl Spanned for LiteralPattern {
@@ -298,6 +302,7 @@ impl Spanned for LiteralPattern {
             LiteralPattern::Int(_, s) => *s,
             LiteralPattern::Bool(_, s) => *s,
             LiteralPattern::String(_, s) => *s,
+            LiteralPattern::NegInt(_, s) => *s,
         }
     }
 }

@@ -27,6 +27,15 @@ use crate::elaborate::env::TypeDefKind;
 use crate::elaborate::error::{ElabError, ElabErrorKind};
 use crate::elaborate::{ElabResult, Elaborator};
 
+/// What `resolve_record_type` found behind a type.
+enum RecordShape {
+    /// A record: its name and ordered `(field, type)` list.
+    Fields(String, Vec<(String, Type)>),
+    /// The type already failed to elaborate (ADR 15.8.26d D1). The fault
+    /// was reported at the type's span; the site passes poison through.
+    Poisoned,
+}
+
 impl<'a> Elaborator<'a> {
     /// Elaborate a named record constructor: `TypeName { field: value, ... }`
     /// or `TypeName { ...spread, field: value, ... }` (ADR 13.5.26h/i)
@@ -53,6 +62,17 @@ impl<'a> Elaborator<'a> {
                 ));
             }
         };
+
+        // Poison transit (ADR 15.8.26d D1): the type's own body failed and
+        // was reported at its span; a stub carries no field list, so the
+        // `_` arm below would re-diagnose that one fault as E0050 at every
+        // construction site. The field expressions still elaborate.
+        if type_def.is_poison() {
+            let term = self.elab_poisoned_construction(
+                spread.into_iter().chain(fields.iter().map(|(_, e)| e)),
+            )?;
+            return Ok((term, Type::Error));
+        }
 
         if !type_def.params.is_empty() {
             return Err(ElabError::new(
@@ -231,7 +251,13 @@ impl<'a> Elaborator<'a> {
         span: Span,
     ) -> ElabResult<Term> {
         // 1. Resolve the expected type to a record type definition
-        let (type_name, record_fields) = self.resolve_record_type(expected, span)?;
+        let RecordShape::Fields(type_name, record_fields) =
+            self.resolve_record_type(expected, span)?
+        else {
+            return self.elab_poisoned_construction(
+                spread.into_iter().chain(fields.iter().map(|(_, e)| e)),
+            );
+        };
 
         // 2. Build a map of provided fields
         let mut field_map: HashMap<&str, &Expr> = HashMap::new();
@@ -354,8 +380,13 @@ impl<'a> Elaborator<'a> {
         // 1. Infer base expression type
         let (base_term, base_ty) = self.infer(base)?;
 
-        // 2. Resolve record type
-        let (type_name, record_fields) = self.resolve_record_type(&base_ty, span)?;
+        // 2. Resolve record type. A poisoned base projects to poison: the
+        // field cannot be named, and the fault is already reported.
+        let RecordShape::Fields(type_name, record_fields) =
+            self.resolve_record_type(&base_ty, span)?
+        else {
+            return Ok((Term::Sorry, Type::Error));
+        };
 
         // 3. Find field position
         let (position, field_ty) = record_fields
@@ -408,17 +439,16 @@ impl<'a> Elaborator<'a> {
     ///
     /// Cross-module record types appear as `Type::App("RecordName", [])` instead
     /// of `Type::TyVar("RecordName")`. We handle both cases.
-    fn resolve_record_type(
-        &self,
-        ty: &Type,
-        span: Span,
-    ) -> ElabResult<(String, Vec<(String, Type)>)> {
+    fn resolve_record_type(&self, ty: &Type, span: Span) -> ElabResult<RecordShape> {
         // Extract the type name from either TyVar or App representation
         let type_name = match ty {
             // Local record types appear as TyVar("@RecordName") (ADR 13.4.26c §2)
             Type::TyVar(name) => name.strip_prefix('@').unwrap_or(name).to_string(),
             // Cross-module record types appear as App("RecordName", [])
             Type::App(name, args) if args.is_empty() => name.clone(),
+            // Poison transit (ADR 15.8.26d D1): the expected type already
+            // failed — a literal checked against a poisoned field, say.
+            Type::Error => return Ok(RecordShape::Poisoned),
             _ => {
                 // Not a record type - produce a user-friendly error
                 return Err(ElabError::new(
@@ -430,8 +460,13 @@ impl<'a> Elaborator<'a> {
 
         // Look up the type definition and verify it's a record
         if let Some(type_def) = self.env.lookup_type(&type_name) {
+            // The same transit for a NAMED poisoned type: its stub has no
+            // field list, and the fault was reported at the type's span.
+            if type_def.is_poison() {
+                return Ok(RecordShape::Poisoned);
+            }
             if let TypeDefKind::Record(fields) = &type_def.kind {
-                return Ok((type_name, fields.clone()));
+                return Ok(RecordShape::Fields(type_name, fields.clone()));
             }
         }
 

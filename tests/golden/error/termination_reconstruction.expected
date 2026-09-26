@@ -1,0 +1,13 @@
+[E0062] Error: cannot prove termination of `grow`
+   ╭─[tests/golden/error/termination_reconstruction.tg:4:60]
+   │
+ 4 │ fn grow(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => grow(Cons(0, t)) } }
+   │                                                            ────────┬───────  
+   │                                                                    ╰───────── 
+   │ 
+   │ Help: rewrite the recursion structurally, or mark the definition `#[partial]` (partial definitions cannot be used in proofs)
+   │ 
+   │ Note: with `l` decreasing, the call to `grow` supplies `(fold [μα_Lst. (Unit + (Nat × α_Lst))] (inr [(Unit + (Nat × μα_Lst. (Unit + (Nat × α_Lst))))] (zero, t)))`, which is not a known strict subterm of `l`
+───╯
+
+error: aborting due to 1 error

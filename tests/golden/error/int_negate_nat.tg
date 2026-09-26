@@ -1,0 +1,3 @@
+// Unary minus on a Nat keeps its refusal (ADR 14.9.26c), reworded at Int
+fn f(n: Nat) -> Nat { -n }
+fn main() -> Nat { f(1) }

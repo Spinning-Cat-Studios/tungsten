@@ -5,11 +5,13 @@
 
 pub mod types;
 pub mod exprs;
+pub mod attributes;
 pub mod items;
 
 // Re-export everything from sub-modules
 pub use parser::ast::nodes::types::*;
 pub use parser::ast::nodes::exprs::*;
+pub use parser::ast::nodes::attributes::*;
 pub use parser::ast::nodes::items::*;
 
 // Re-export pattern types for convenience (was in original nodes.tg)

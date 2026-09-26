@@ -1,0 +1,11 @@
+[E0064] Error: cannot match on `Rose`: its recursive occurrence is nested under generic type `Wrap`, so its μ-encoding (binder `α_Rose`) does not unfold to a structural type
+    ╭─[tests/golden/error/nested_inductive_family_match.tg:16:5]
+    │
+ 16 │     match r { Node(w) => match w { W(inner) => 1 + depth(inner) } }
+    │     ───────────────────────────────┬───────────────────────────────  
+    │                                    ╰───────────────────────────────── 
+    │ 
+    │ Note: break the nesting with a non-generic intermediate type, in place of `Wrap<Rose>`
+────╯
+
+error: aborting due to 1 error

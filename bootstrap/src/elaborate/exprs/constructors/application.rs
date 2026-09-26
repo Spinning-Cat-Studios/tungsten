@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use crate::ast::Expr;
 use crate::elaborate::env;
+use crate::elaborate::exprs::constructors::context::ConstructorParent;
 use crate::elaborate::{ElabResult, Elaborator};
 use crate::span::Span;
 use tungsten_core::{Term, Type};
@@ -22,11 +23,24 @@ impl<'a> Elaborator<'a> {
         expected: &Type,
         span: Span,
     ) -> ElabResult<Term> {
+        // A poisoned EXPECTATION carries no type arguments to read (ADR
+        // 15.8.26d): `Cons(x, Nil())` passed into a poisoned field would
+        // otherwise unify its `T` against nothing and mismatch the very
+        // argument it was given. Infer instead — the arguments still
+        // elaborate, and poison unifies with whatever comes out.
+        if matches!(expected, Type::Error) {
+            return self
+                .elab_constructor_application(name, info, args, span)
+                .map(|(term, _)| term);
+        }
+
         // Validate arity
         self.validate_ctor_arity(name, info.arity, args.len(), span)?;
 
-        // Get type context
-        let ctx = self.get_constructor_context(info, span)?;
+        // Get type context; a poisoned parent is transit (ADR 15.8.26d D2)
+        let ConstructorParent::Adt(ctx) = self.get_constructor_context(info, span)? else {
+            return self.elab_poisoned_construction(args);
+        };
         let constructor = &ctx.constructors[info.index];
 
         // Build substitution from expected type
@@ -58,8 +72,11 @@ impl<'a> Elaborator<'a> {
         // Validate arity
         self.validate_ctor_arity(name, info.arity, args.len(), span)?;
 
-        // Get type context
-        let ctx = self.get_constructor_context(info, span)?;
+        // Get type context; a poisoned parent is transit (ADR 15.8.26d D2)
+        let ConstructorParent::Adt(ctx) = self.get_constructor_context(info, span)? else {
+            let term = self.elab_poisoned_construction(args)?;
+            return Ok((term, Type::Error));
+        };
         let constructor = &ctx.constructors[info.index];
 
         // Infer argument types (used only for type parameter inference)

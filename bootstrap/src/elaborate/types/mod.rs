@@ -9,11 +9,14 @@
 //! - `paths.rs` — Path and name resolution for types
 //! - `encoding.rs` — ADT and record type encoding
 //! - `normalize/` — Type normalization for structural comparison (see normalize/mod.rs)
+//! - `ref_walk.rs` — unified structural walker behind the Phase-1d and
+//!   encoding-path reference resolvers (ADR 23.7.26a)
 
-mod encoding;
+pub(crate) mod encoding;
 mod encoding_utils;
 mod normalize;
 mod paths;
+pub(crate) mod ref_walk;
 pub(crate) mod resolve_refs;
 
 #[cfg(test)]
@@ -62,6 +65,10 @@ impl<'a> Elaborator<'a> {
                 })
             }
 
+            // Defensive: the parser aborts compilation before elaboration
+            // when it emitted an `Error` placeholder, so this stays an
+            // uncoded `Other` rather than minting an untriggerable code
+            // (ADR 15.8.26b).
             TypeExpr::Error(_span) => Err(ElabError::new(
                 ty.span(),
                 ElabErrorKind::Other("cannot elaborate error type".to_string()),

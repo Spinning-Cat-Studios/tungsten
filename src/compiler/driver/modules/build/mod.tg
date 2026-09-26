@@ -11,7 +11,7 @@ pub mod warn;
 use driver::ffi::{
     List, Nil, Cons,
     read_file, parent_directory,
-    string_len, string_char_at_internal, tg_string_append_char,
+    string_len, string_char_at_internal,
     FfiResult, FfiOk, FfiErr
 };
 use driver::util::{Option, Some, None, unwrap_or, string_eq, ends_with};
@@ -225,10 +225,16 @@ fn get_filename(path: String) -> String {
     get_filename_find_slash(path, string_len(path), 0, 0)
 }
 
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 fn get_filename_find_slash(path: String, len: Nat, i: Nat, last_slash: Nat) -> String {
     if i >= len {
-        // Extract from last_slash to end
-        substring(path, last_slash, len)
+        // Extract from last_slash to end. `substring`'s third argument is a
+        // LENGTH (ADR 20.8.26c), so the count is `len - last_slash`; passing
+        // `len` worked only because the builtin clamps to what remains.
+        substring(path, last_slash, len - last_slash)
     } else {
         let c = string_char_at_internal(path, i);
         if c == 47 {
@@ -244,23 +250,11 @@ fn get_filename_find_slash(path: String, len: Nat, i: Nat, last_slash: Nat) -> S
 pub fn strip_tg_extension(filename: String) -> String {
     let len = string_len(filename);
     if len > 3 && ends_with(filename, ".tg") {
+        // `substring`'s third argument is a LENGTH (ADR 20.8.26c). Starting at
+        // 0 the two readings coincide, which is why this site survived the
+        // divergence unchanged.
         substring(filename, 0, len - 3)
     } else {
         filename
-    }
-}
-
-/// Extract substring from start to end indices.
-fn substring(s: String, start: Nat, end: Nat) -> String {
-    substring_loop(s, start, end, "")
-}
-
-fn substring_loop(s: String, i: Nat, end: Nat, acc: String) -> String {
-    if i >= end {
-        acc
-    } else {
-        let c = string_char_at_internal(s, i);
-        let acc2 = tg_string_append_char(acc, c);
-        substring_loop(s, i + 1, end, acc2)
     }
 }

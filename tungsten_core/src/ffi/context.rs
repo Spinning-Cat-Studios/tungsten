@@ -44,8 +44,8 @@ pub unsafe extern "C" fn tg_ctx_extend(
             Some(c) => c.clone(),
             None => return INVALID_HANDLE,
         };
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
+        let ty = match super::types::nodes::materialize_type(arena, ty) {
+            Some(t) => t,
             None => return INVALID_HANDLE,
         };
         let new_ctx = ctx.with_term(name_str, ty);
@@ -74,8 +74,10 @@ pub unsafe extern "C" fn tg_ctx_lookup(ctx: CtxHandle, var_name: *const c_char) 
             Some(c) => c,
             None => return INVALID_HANDLE,
         };
-        match ctx.lookup_term(name_str) {
-            Some(ty) => arena.alloc_type(ty.clone()),
+        // Context bindings own `Type` trees; import the lookup result into
+        // the node arena (O(result), transient owned copy freed here).
+        match ctx.lookup_term(name_str).cloned() {
+            Some(ty) => super::types::nodes::import_type(arena, &ty),
             None => INVALID_HANDLE,
         }
     })

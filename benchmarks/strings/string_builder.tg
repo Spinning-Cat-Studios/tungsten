@@ -1,0 +1,47 @@
+// Benchmark: String building through StringBuilder (ADR 14.9.26a)
+//
+// Tests: the amortised-O(1) append path against string_concat's O(n²) one.
+// The SAME workload as string_concat — 44-char base string × N reps, final
+// length printed as checksum — so the two Tungsten rows of one bundle are
+// directly comparable (AC 6: this row at least 10× faster than that one).
+// Default: 15000 repetitions.
+// Usage: ./string_builder [repetitions]  (default: 15000)
+
+extern "C" fn tg_argc() -> Nat
+extern "C" fn tg_argv(index: Nat) -> Nat
+extern "C" fn tg_string_to_nat(s: Nat) -> Nat
+
+extern "C" fn tg_string_builder_new() -> Nat
+extern "C" fn tg_string_builder_push_str(sb: Nat, s: String) -> Nat
+extern "C" fn tg_string_builder_len(sb: Nat) -> Nat
+extern "C" fn tg_string_builder_to_string(sb: Nat) -> String
+
+pub type PNat = PZero | PSucc(PNat)
+
+fn from_nat(n: Nat) -> PNat {
+  if n == 0 { PZero } else { PSucc(from_nat(n - 1)) }
+}
+
+// The push loop threads the handle through as the accumulator; every
+// tg_string_builder_push_str returns the same handle it was given.
+fn push_repeated(sb: Nat, s: String, n: PNat) -> Nat {
+  match n {
+    PZero() => sb,
+    PSucc(p) => push_repeated(tg_string_builder_push_str(sb, s), s, p),
+  }
+}
+
+fn get_repetitions() -> Nat {
+  if tg_argc() > 1 { tg_string_to_nat(tg_argv(1)) } else { 15000 }
+}
+
+fn main() -> Nat {
+  // Default: 15000 reps of 44-char string. Length = 660000
+  let n = get_repetitions();
+  let sb = push_repeated(tg_string_builder_new(), "the quick brown fox jumps over the lazy dog!", from_nat(n));
+  // Take the string out (the consuming step the builder exists for) and
+  // report its length, which is the observable output the .rs side prints.
+  let len = tg_string_builder_len(sb);
+  let _result = tg_string_builder_to_string(sb);
+  len
+}

@@ -1,4 +1,4 @@
-//! `tungsten info imports` — show import resolution status for a module.
+//! `tungsten info module imports` — show import resolution status for a module.
 //!
 //! For a specific module in the tree, lists each `use` declaration and reports
 //! whether each imported name resolved to a full definition or a stub.
@@ -12,7 +12,7 @@ use tungsten_bootstrap::driver::{
     self, build_module_info, get_module_name_from_parsed, parse_module_tree, ParsedModule,
 };
 
-/// Entry point for `tungsten info imports <module> <file>`.
+/// Entry point for `tungsten info module imports <module> <file>`.
 pub fn cmd_info_imports(
     module_path: &str,
     file: &PathBuf,

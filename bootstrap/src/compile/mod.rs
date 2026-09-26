@@ -6,6 +6,7 @@
 //! - Diagnostic helpers (dump-ir, dump-encoding)
 //! - Type parameter substitution extraction
 
+pub(crate) mod check_extern_map_ambiguity;
 pub(crate) mod check_mono_coverage;
 mod diagnostics;
 mod extern_naming;
@@ -13,6 +14,8 @@ mod linking;
 pub(crate) mod mangling;
 pub(crate) mod mono;
 pub(crate) mod per_module;
+pub(crate) mod tco;
+pub(crate) mod unit_cost;
 mod validation;
 
 #[cfg(test)]
@@ -134,7 +137,8 @@ pub(super) fn compile_all_defs<'ctx>(
     Ok(())
 }
 
-/// Warn about definitions that still contain `sorry`.
+/// Warn about definitions that still contain `sorry`, with each one's counts
+/// from the classifier `doctor check sorry-sites` uses (ADR 18.9.26g).
 pub(super) fn warn_sorry_defs(defs: &[CoreDef]) {
     let sorry_defs: Vec<_> = defs.iter().filter(|d| d.term.contains_sorry()).collect();
     if !sorry_defs.is_empty() {
@@ -143,7 +147,11 @@ pub(super) fn warn_sorry_defs(defs: &[CoreDef]) {
             sorry_defs.len()
         );
         for def in &sorry_defs {
-            eprintln!("  - {}", def.name);
+            let counts = tungsten_core::terms::analysis::SorryCounts::of([&*def.term]);
+            eprintln!(
+                "  - {} ({} authored, {} synthesised, {} unclassified)",
+                def.name, counts.authored, counts.synthesised, counts.unclassified
+            );
         }
     }
 }
@@ -152,6 +160,7 @@ pub(super) fn warn_sorry_defs(defs: &[CoreDef]) {
 ///
 /// Groups optional diagnostic parameters that control IR dumps,
 /// type tracing, and encoding inspection.
+#[derive(Default)]
 pub(crate) struct DiagnosticFlags {
     pub(crate) dump_ir: Option<String>,
     pub(crate) trace_types: Option<String>,
@@ -162,12 +171,21 @@ pub(crate) struct DiagnosticFlags {
     pub(crate) tracing: TraceFlags,
     /// Allocation profiling filter (None = disabled, Some("") = all, Some(pat) = filtered).
     pub(crate) alloc_profile: Option<String>,
+    /// Compile only these codegen units (`--only-unit`, ADR 3.7.26b).
+    /// Empty = compile everything. Non-empty requires --emit-llvm, skips the
+    /// __mono depot, and disables serial-unit scheduling.
+    pub(crate) only_units: Vec<String>,
+    /// Dump synthesized comparator Core terms (`--dump-synthesized`, ADR
+    /// 12.7.26c P6). `None` = off; `Some(None)` = all; `Some(Some(sym))` =
+    /// only defs whose symbol contains `sym`.
+    pub(crate) dump_synthesized: Option<Option<String>>,
 }
 
 /// Runtime and codegen tracing toggles.
 ///
 /// Grouped separately from `DiagnosticFlags` because these are all
 /// simple on/off toggles that control stderr trace output during codegen.
+#[derive(Default)]
 pub(crate) struct TraceFlags {
     pub(crate) trace_adt_ops: Option<String>,
     pub(crate) trace_encoding: Option<String>,
@@ -182,6 +200,10 @@ pub(crate) struct TraceFlags {
 ///
 /// Bundles the boolean flags and diagnostic parameters that are
 /// threaded through `cmd_compile` → `run_codegen` → `emit_output`.
+///
+/// `Default` yields an all-off config (note: `codegen_jobs` defaults to 0 —
+/// diagnostic callers that drive codegen must set it to ≥1).
+#[derive(Default)]
 pub(crate) struct CompileFlags {
     pub(crate) emit_llvm: bool,
     pub(crate) verbose: bool,
@@ -195,6 +217,12 @@ pub(crate) struct CompileFlags {
     /// Number of parallel codegen jobs (default: num_cpus).
     /// Configured via TUNGSTEN_CODEGEN_JOBS env var.
     pub(crate) codegen_jobs: usize,
+    /// Codegen units serialized onto one dedicated worker while the rest
+    /// parallelize normally (ADR 3.7.26b Stub Registration). Configured via the
+    /// TUNGSTEN_CODEGEN_SERIAL_UNITS env var (comma-separated unit names);
+    /// set by `tungsten-dev self-compile` for the known-pathological units.
+    /// Never raises the worker count above `codegen_jobs`.
+    pub(crate) codegen_serial_units: Vec<String>,
 }
 
 /// Parse `TUNGSTEN_CODEGEN_JOBS` env var (default: num_cpus, minimum: 1).
@@ -208,6 +236,25 @@ pub(crate) fn parse_codegen_jobs() -> usize {
                 .map(|n| n.get())
                 .unwrap_or(4)
         })
+}
+
+/// Parse `TUNGSTEN_CODEGEN_SERIAL_UNITS` env var: comma-separated codegen
+/// unit names to serialize onto one worker (ADR 3.7.26b Stub Registration).
+pub(crate) fn parse_codegen_serial_units() -> Vec<String> {
+    std::env::var("TUNGSTEN_CODEGEN_SERIAL_UNITS")
+        .map(|value| split_serial_units_value(&value))
+        .unwrap_or_default()
+}
+
+/// Split a `TUNGSTEN_CODEGEN_SERIAL_UNITS` value into unit names.
+/// Whitespace around names is tolerated; empty entries are dropped.
+fn split_serial_units_value(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// Validate --no-codegen flag interactions.
@@ -243,6 +290,9 @@ pub(super) fn validate_no_codegen_flags(
     }
     if flags.diagnostics.tracing.trace_mono {
         eprintln!("warning: ignored with --no-codegen: --trace-mono");
+    }
+    if !flags.diagnostics.only_units.is_empty() {
+        eprintln!("warning: ignored with --no-codegen: --only-unit");
     }
     if output.is_some() {
         eprintln!("warning: ignored with --no-codegen: -o/--output");

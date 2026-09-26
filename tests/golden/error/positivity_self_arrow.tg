@@ -1,0 +1,5 @@
+// ADR 7.8.26e: the headline witness. `Bad` occurs left of an arrow, so
+// `omega(Mk(omega))` would diverge with no syntactic recursion anywhere.
+// This is a size-1 SCC and so is absent from `mutual_recursion_groups` -
+// the regression test for the all-definitions worklist.
+type Bad = Mk(Bad -> Bad)

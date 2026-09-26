@@ -3,6 +3,9 @@
 //! Handles import registration, lookups, and query methods for Env.
 
 mod lookups;
+mod targets;
+
+pub use targets::{ImportTarget, ValueImportTargets};
 
 use super::{Env, ModulePath};
 use crate::span::Span;

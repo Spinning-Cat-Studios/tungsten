@@ -1,0 +1,10 @@
+// Golden test (ADR 18.9.26e): a `Nat` is never negative, so a negative
+// literal pattern on a `Nat` scrutinee is refused rather than silently never
+// matching. E0021, with a note pointing at `Int`.
+fn main() -> Nat {
+    let n: Nat = 3;
+    match n {
+        -1 => 1,
+        _ => 2
+    }
+}

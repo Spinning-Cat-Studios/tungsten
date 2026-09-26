@@ -29,6 +29,13 @@ impl<'a> Elaborator<'a> {
             return Err(ElabError::new(span, ElabErrorKind::NonExhaustiveMatch));
         }
 
+        // Poison transit (ADR 15.8.26d): a scrutinee whose type already
+        // failed has nothing to take apart, and the fault is reported at
+        // the type's span. Arms still elaborate, at `Type::Error`.
+        if let Type::Error = scrutinee_ty {
+            return self.elab_poisoned_match(arms, expected);
+        }
+
         // Special case: Bool matching - desugar to if-then-else
         if matches!(scrutinee_ty, Type::Bool) {
             return self.elab_bool_match(scrutinee_term, arms, expected, span);
@@ -43,6 +50,14 @@ impl<'a> Elaborator<'a> {
         if has_constructor_pattern {
             // Constructor pattern - this is an ADT match
             return self.elab_adt_match(scrutinee_term, scrutinee_ty, arms, expected, span);
+        }
+
+        // Integer match: a conditional chain over equality (ADR 18.9.26e).
+        // After the constructor check, not before it: a single-constructor
+        // wrapper over `Nat` encodes to `Nat` itself, and constructor arms on
+        // a real `Nat` keep E0022, which names the arms' ADT.
+        if matches!(scrutinee_ty, Type::Nat | Type::Int) {
+            return self.elab_int_match(scrutinee_term, scrutinee_ty, arms, expected, span);
         }
 
         // Fall back to simple sum type matching for variable patterns

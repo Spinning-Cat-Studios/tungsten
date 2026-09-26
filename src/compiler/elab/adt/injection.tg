@@ -17,6 +17,10 @@ pub type InjectionPath =
     | InjectionPathRight(InjectionPath)  // inr
 
 /// Compute the injection path for constructor at given index.
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 pub fn compute_injection_path(index: Nat, total: Nat) -> InjectionPath {
     if total <= 1 {
         InjectionPathNil

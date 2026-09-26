@@ -1,0 +1,6 @@
+// ADR 7.8.26e D2: `Bad2` is never syntactically left of an arrow. The
+// violation is inherited through `Fn1`, which uses its parameter `T` in a
+// forbidden position. The diagnostic must name that intermediate type and
+// parameter - it is the one part the reader cannot see in their own source.
+type Fn1<T> = Mk(T -> Nat)
+type Bad2 = B(Fn1<Bad2>)

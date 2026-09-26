@@ -9,9 +9,9 @@ fn profile_emit_no_panic() {
     use crate::driver::per_module::profile::{ElabProfile, ModuleTiming};
     use std::time::Duration;
     let mut p = ElabProfile::new();
-    p.phase_a = Duration::from_millis(100);
-    p.phase_a5 = Duration::from_millis(200);
-    p.phase_b_total = Duration::from_millis(500);
+    p.stub_registration = Duration::from_millis(100);
+    p.signature_collection = Duration::from_millis(200);
+    p.body_elaboration_total = Duration::from_millis(500);
     p.record_module(ModuleTiming {
         path: "test.tg".to_string(),
         collection: Duration::from_millis(50),
@@ -138,7 +138,7 @@ fn profile_merge_from_combines_modules() {
 }
 
 // =========================================================================
-// Parallel Phase B tests (ADR 11.5.26b §P5)
+// Parallel Body Elaboration tests (ADR 11.5.26b §P5)
 // =========================================================================
 
 #[test]

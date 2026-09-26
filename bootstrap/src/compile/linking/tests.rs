@@ -110,11 +110,13 @@ fn test_build_cc_includes_platform_libs() {
         .get_args()
         .map(|a| a.to_string_lossy().to_string())
         .collect();
-    // Platform-specific transitive C deps should be present
+    // Platform-specific transitive C deps should be present.
+    // macOS: cc implicitly links libSystem (provides libc + libm), so we
+    // do NOT pass -lSystem explicitly — that causes a duplicate-library warning.
     #[cfg(target_os = "macos")]
     assert!(
-        args.contains(&"-lSystem".to_string()),
-        "should include platform libs on macOS, got: {:?}",
+        !args.contains(&"-lSystem".to_string()),
+        "should NOT include -lSystem on macOS (implicit via cc), got: {:?}",
         args,
     );
     #[cfg(target_os = "linux")]
@@ -149,5 +151,32 @@ fn test_build_cc_includes_stack_size() {
         args.contains(&"-Wl,-z,stack-size=134217728".to_string()),
         "should include stack-size linker flag on Linux, got: {:?}",
         args,
+    );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn test_build_cc_no_duplicate_system_libs_macos() {
+    // Regression: cc (Apple Clang) implicitly links -lSystem. Passing it
+    // explicitly causes "ld: warning: ignoring duplicate libraries: '-lSystem'".
+    let file = Path::new("/tmp/test.tg");
+    let linker = LinkerCommand::new(file, None, false, false);
+    let inputs = vec![PathBuf::from("/tmp/test.o")];
+    let cmd = linker.build_cc(&inputs);
+    let args: Vec<_> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().to_string())
+        .collect();
+    assert!(
+        !args.contains(&"-lSystem".to_string()),
+        "-lSystem must not be passed explicitly on macOS (implicit via cc)"
+    );
+    assert!(
+        !args.contains(&"-lc".to_string()),
+        "-lc must not be passed explicitly on macOS (provided by libSystem)"
+    );
+    assert!(
+        !args.contains(&"-lm".to_string()),
+        "-lm must not be passed explicitly on macOS (provided by libSystem)"
     );
 }

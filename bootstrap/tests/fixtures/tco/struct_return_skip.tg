@@ -1,0 +1,22 @@
+// ADR 1.7.26b fixture — struct return SKIP.
+//
+// `countdown` is tail-recursive and returns a by-value tuple `(Nat, Nat)`,
+// which lowers to an LLVM struct. `check_musttail_abi_safety` rejects struct
+// returns → the self-recursive tail call SKIPs musttail with reason
+// STRUCT_RETURN. It recurses over `Nat` → HIGH risk.
+
+// Partial (ADR 11.8.26b): a measure recursion, out of Phase 1's scope.
+// This fixture exercises musttail classification, not termination.
+#[partial]
+fn countdown(n: Nat, acc: Nat) -> (Nat, Nat) {
+    if n == 0 {
+        (acc, n)
+    } else {
+        countdown(n - 1, acc + 1)
+    }
+}
+
+fn main() -> Nat {
+    let (total, rest) = countdown(5, 0);
+    total + rest
+}

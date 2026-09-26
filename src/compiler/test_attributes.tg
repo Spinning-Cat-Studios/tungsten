@@ -1,0 +1,145 @@
+// Attribute parsing in the self-hosted front end (ADR 12.8.26b P1).
+//
+// These assert on the PARSED ITEM'S ATTRIBUTE ACCESSOR, not on "parses without
+// error". The bug this deliverable closes already parsed without error: `#`
+// lexed fine, the item dispatcher had no arm for it, the resulting error was
+// recovered from, and the annotated function parsed normally on the next pass —
+// so a suite that only checked for a clean parse would have been green
+// throughout. Only reading the attribute list back can tell the annotation
+// arrived from the annotation being discarded.
+//
+// Every assertion here runs the real chain `tokenize → parse_file →
+// item_attributes`, so nothing is mocked.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_bool, assert_eq_nat, assert_eq_string};
+use driver::ffi::{List, Nil, Cons};
+use lexer::scanner::{tokenize, lex_result_tokens};
+use parser::lib::{parse_file, file_parse_result_items, file_parse_error_count};
+use parser::ast::nodes::{
+    Item, ItemFn, item_attributes,
+    Attribute, attribute_name, attribute_list_has, attribute_list_arg
+};
+use parser::ast::common::{Ident, ident_name};
+use parser::option::{Option, Some, None};
+use driver::util::{list_len};
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+/// Parse a source string into its item list.
+fn items_of(src: String) -> List<Item> {
+    let toks = lex_result_tokens(tokenize(src, "t.tg"));
+    file_parse_result_items(parse_file(toks, "t.tg"))
+}
+
+/// How many parse errors a source string produced.
+fn error_count_of(src: String) -> Nat {
+    let toks = lex_result_tokens(tokenize(src, "t.tg"));
+    file_parse_error_count(parse_file(toks, "t.tg"))
+}
+
+/// The attribute list of the first item, or the empty list if there is none.
+fn first_attributes(src: String) -> List<Attribute> {
+    let items: List<Item> = items_of(src);
+    match items {
+        Nil() => Nil,
+        Cons(item, _) => item_attributes(item)
+    }
+}
+
+/// The argument of `name`'s attribute, or `"<none>"`.
+fn arg_of(attrs: List<Attribute>, name: String) -> String {
+    match attribute_list_arg(attrs, name) {
+        None() => "<none>",
+        Some(id) => ident_name(id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC4: `#[partial]` reaches the self-hosted AST
+// ---------------------------------------------------------------------------
+
+pub fn test_partial_reaches_the_ast() -> Unit {
+    let attrs = first_attributes("#[partial]\nfn f(n: Nat) -> Nat { n }");
+    assert_eq_nat(list_len(attrs), 1);
+    assert_eq_bool(attribute_list_has(attrs, "partial"), true)
+}
+
+pub fn test_an_unannotated_fn_has_an_empty_attribute_list() -> Unit {
+    // The other half of the discrimination: before this ADR an annotated and an
+    // unannotated function were indistinguishable, so asserting only the
+    // annotated case would not prove the accessor reads anything.
+    let attrs = first_attributes("fn f(n: Nat) -> Nat { n }");
+    assert_eq_nat(list_len(attrs), 0);
+    assert_eq_bool(attribute_list_has(attrs, "partial"), false)
+}
+
+pub fn test_decreasing_carries_its_argument() -> Unit {
+    let attrs = first_attributes("#[decreasing(b)]\nfn f(a: Nat, b: Nat) -> Nat { a }");
+    assert_eq_nat(list_len(attrs), 1);
+    assert_eq_string(arg_of(attrs, "decreasing"), "b")
+}
+
+pub fn test_a_bare_attribute_carries_no_argument() -> Unit {
+    let attrs = first_attributes("#[partial]\nfn f(n: Nat) -> Nat { n }");
+    assert_eq_string(arg_of(attrs, "partial"), "<none>")
+}
+
+pub fn test_two_attributes_both_arrive_in_source_order() -> Unit {
+    let attrs = first_attributes(
+        "#[partial]\n#[decreasing(n)]\nfn f(n: Nat) -> Nat { n }"
+    );
+    assert_eq_nat(list_len(attrs), 2);
+    assert_eq_bool(attribute_list_has(attrs, "partial"), true);
+    assert_eq_bool(attribute_list_has(attrs, "decreasing"), true);
+    assert_eq_string(first_attribute_name(attrs), "partial")
+}
+
+fn first_attribute_name(attrs: List<Attribute>) -> String {
+    match attrs {
+        Nil() => "<none>",
+        Cons(attr, _) => attribute_name(attr)
+    }
+}
+
+pub fn test_an_annotated_fn_still_parses_as_a_function() -> Unit {
+    // The annotation must not displace the item: one item, zero errors.
+    let items: List<Item> = items_of("#[partial]\nfn f(n: Nat) -> Nat { n }");
+    assert_eq_nat(list_len(items), 1);
+    assert_eq_nat(error_count_of("#[partial]\nfn f(n: Nat) -> Nat { n }"), 0)
+}
+
+pub fn test_visibility_and_attributes_compose() -> Unit {
+    let attrs = first_attributes("#[partial]\npub fn f(n: Nat) -> Nat { n }");
+    assert_eq_bool(attribute_list_has(attrs, "partial"), true)
+}
+
+// ---------------------------------------------------------------------------
+// The must-not-over-report direction
+// ---------------------------------------------------------------------------
+//
+// WHERE THE REJECTION CASES LIVE, AND WHY NOT HERE. Asserting a NON-ZERO parse
+// error count goes Stuck under the evaluator: `error_count_of` executes exactly
+// while the count is 0, and any source that actually produces a `ParseError`
+// leaves the enclosing assertion unevaluated (`Fst` applied to a sum
+// injection). `tungsten test` reports that honestly as NEVER COMPARED rather
+// than as a pass (ADR 6.8.26b), which is how it was caught — but a test that
+// cannot execute is not a test, so the rejection cases are asserted against the
+// real `tungsten1` binary in the conformance harness's attribute-diagnostics
+// arm instead. That is also the tier AC5 asks for: "rejected **by tungsten1**",
+// which nothing running under the bootstrap's evaluator can show.
+
+pub fn test_a_known_attribute_is_not_rejected() -> Unit {
+    assert_eq_nat(error_count_of("#[partial]\nfn f(n: Nat) -> Nat { n }"), 0)
+}
+
+pub fn test_a_clean_file_reports_no_errors() -> Unit {
+    // A gate that fired on healthy input would train its readers to ignore it.
+    assert_eq_nat(error_count_of("fn a(n: Nat) -> Nat { n }\nfn b(n: Nat) -> Nat { n }"), 0)
+}

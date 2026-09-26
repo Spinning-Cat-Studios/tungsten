@@ -1,0 +1,7 @@
+// == #[decreasing(nope)] names something that is not a parameter
+type Lst = Nil | Cons(Nat, Lst)
+
+#[decreasing(nope)]
+fn len(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => 1 + len(t) } }
+
+fn main() -> Nat { 0 }

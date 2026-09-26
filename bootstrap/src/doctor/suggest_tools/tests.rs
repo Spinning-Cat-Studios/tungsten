@@ -1,7 +1,24 @@
+//! Per-category tests: does a query a user would actually paste surface the
+//! command for that category?
+//!
+//! One block per `ErrorPattern` category, in registry order. The invariants
+//! that hold across the WHOLE table — empty input, case folding, the relevance
+//! cap, cost-field validity, deterministic ordering — are next door in
+//! [`super::matcher_property_tests`]; they were one file until this one reached
+//! its size ceiling, and the seam is real: a test here fails when one category's
+//! keywords stop matching, a test there fails when the matcher itself does.
+//!
+//! The shared `assert_suggests` / `assert_top_suggestion` harness lives here
+//! because this is where it is used most; both are `pub(super)`.
+
+use super::output::{no_match_report, NO_MATCH_EXAMPLES};
 use super::*;
 
 /// Helper: assert that the suggestions for a query contain a specific command substring.
-fn assert_suggests(query: &str, expected_cmd: &str) {
+///
+/// `pub(super)` so sibling test modules share one harness rather than copying
+/// it — `termination_tests` is the first such sibling.
+pub(super) fn assert_suggests(query: &str, expected_cmd: &str) {
     let results = match_suggestions(query);
     assert!(
         results.iter().any(|s| s.command.contains(expected_cmd)),
@@ -13,7 +30,7 @@ fn assert_suggests(query: &str, expected_cmd: &str) {
 }
 
 /// Helper: assert that the first suggestion for a query contains a specific command.
-fn assert_top_suggestion(query: &str, expected_cmd: &str) {
+pub(super) fn assert_top_suggestion(query: &str, expected_cmd: &str) {
     let results = match_suggestions(query);
     assert!(
         !results.is_empty(),
@@ -47,6 +64,24 @@ fn test_segfault_suggests_ir_layout() {
 #[test]
 fn test_sigsegv_top_is_fold_consistency() {
     assert_top_suggestion("SIGSEGV crash", "check fold-consistency");
+}
+
+// ── Category: stale/warm elaboration cache (ADR 4.7.26c) ─────────
+
+#[test]
+fn test_warm_cache_symptoms_suggest_cache_clean() {
+    // The symptom cluster that had no pattern before ADR 4.7.26c — each of
+    // these should now route to `cache clean` as the top suggestion.
+    for query in [
+        "tungsten run reports no main function found",
+        "test prints no tests found on the second run",
+        "span out of bounds this may indicate a file_path tracking issue",
+        "warm cache gives empty defs",
+    ] {
+        assert_top_suggestion(query, "cache clean");
+    }
+    // ADR 4.7.26d also adds `cache inspect` + `diff cache` to this cluster; that
+    // listing is asserted end-to-end in tests/cache_diagnostics.rs (real binary).
 }
 
 // ── Category: type mismatch ─────────────────────────────────────
@@ -107,7 +142,10 @@ fn test_elaboration_error_suggests_explain() {
 
 #[test]
 fn test_undefined_suggests_phase_invariants() {
-    assert_suggests("unresolved type reference", "check phase-invariants");
+    assert_suggests(
+        "unresolved type reference",
+        "check type integrity phase-invariants",
+    );
 }
 
 // ── Category: encoding / μ-type ─────────────────────────────────
@@ -144,248 +182,207 @@ fn test_mutual_recursion_suggests_fold() {
     assert_suggests("mutual recursion fold/unfold", "check fold-consistency");
 }
 
-// ── Edge cases ──────────────────────────────────────────────────
+// ── Category: miscompile / wrong value (ADR 3.7.26d) ────────────
 
+/// The ADR 3.7.26a cold start, now a cost-1 answer: a wrong-runtime-value
+/// query returns a non-empty ranked list topped by `diff exec`.
 #[test]
-fn test_empty_query_returns_empty() {
-    let results = match_suggestions("");
-    assert!(results.is_empty());
+fn test_wrong_value_top_is_diff_exec() {
+    assert_top_suggestion("compiled binary returns wrong value", "diff exec");
 }
 
 #[test]
-fn test_unrelated_query_returns_empty() {
-    let results = match_suggestions("how do I write a hello world program");
-    assert!(results.is_empty());
+fn test_miscompile_keywords_reach_the_pattern() {
+    // Canonical keyword set (ADR 3.7.26d §2.3) — every keyword matches.
+    for query in [
+        "wrong value at runtime",
+        "binary prints garbage",
+        "suspected miscompile",
+        "evaluator differs from native output",
+        "incorrect output from compiled program",
+        "prints wrong number",
+    ] {
+        assert_top_suggestion(query, "diff exec");
+    }
 }
 
 #[test]
-fn test_json_output_is_valid() {
-    let results = match_suggestions("SIGSEGV");
-    let json = serde_json::to_string(&results).unwrap();
-    let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
-    assert!(!parsed.is_empty());
-    // Verify required fields
-    let first = &parsed[0];
-    assert!(first.get("command").is_some());
-    assert!(first.get("cost").is_some());
-    assert!(first.get("reason").is_some());
-    assert!(first.get("relevance").is_some());
-}
-
-#[test]
-fn test_multi_keyword_match_boosts_relevance() {
-    // "mutual recursion cycle" matches both "mutual recursion" and "cycle"
-    // keywords, so mutual-recursion-groups should score higher
-    let results = match_suggestions("mutual recursion cycle in types");
-    assert!(!results.is_empty());
-    assert!(
-        results[0].command.contains("mutual-recursion-groups"),
-        "Expected mutual-recursion-groups as top result for multi-keyword match, got '{}'",
-        results[0].command
+fn test_miscompile_suggests_sret_stores() {
+    assert_suggests(
+        "compiled binary returns wrong value",
+        "check ir sret-stores",
     );
 }
 
 #[test]
-fn test_all_categories_have_suggestions() {
-    // Verify each category is reachable
-    let test_cases = [
-        "sigsegv",
-        "type mismatch",
-        "stack overflow",
-        "infinite loop",
-        "elaboration error",
-        "encoding",
-        "mutual recursion",
-        "cross-file",
-    ];
-    for query in &test_cases {
+fn test_miscompile_suggests_ir_inspection() {
+    assert_suggests("suspected miscompile", "--dump-ir");
+    assert_suggests("suspected miscompile", "--emit-llvm");
+}
+
+// ── Category: merge-arms lowering divergence (ADR 12.7.26c) ─────
+
+/// Each phrase from the merge-arms T2 error routes to the lowering-consistency
+/// check — the error whose own wording scored zero before this ADR.
+#[test]
+fn test_merge_divergence_phrases_suggest_lowering_consistency() {
+    for query in [
+        "merge arms disagree on result type",
+        "two reachable arms lowered to different types",
+        "reachable arms lowered to different types",
+    ] {
+        assert_top_suggestion(query, "check type lowering-consistency");
+    }
+}
+
+#[test]
+fn test_merge_divergence_suggests_info_type_lowering_and_diff() {
+    assert_suggests("merge arms disagree", "info type lowering");
+    assert_suggests("lowered to different types", "diff ir");
+    assert_suggests("merge arms disagree", "diff exec");
+}
+
+// ── Category: referenced but not declared (ADR 1.7.26f vocabulary) ─
+
+#[test]
+fn test_referenced_but_not_declared_suggests_codegen_symbols() {
+    assert_top_suggestion(
+        "symbol referenced but not declared in depot",
+        "info codegen symbols",
+    );
+    assert_suggests("referenced but not declared", "check link collisions");
+}
+
+// ── Category: bootstrap/self-host divergence (ADR 4.9.26d) ──────
+
+/// The commands `'self-host divergence'` returns, in the order it returns them.
+/// Written out rather than derived so that a widened trigger set cannot quietly
+/// re-rank the answer the cause-shaped query already gave (AC 4).
+const DIVERGENCE_RANKING: &[&str] = &[
+    "tungsten diff bootstrap-selfhost-check <file> --selfhost-binary ./tungsten1",
+    "tungsten diff selfhost-core <def> <file>",
+    "tungsten doctor check selfhost closed-terms <file>",
+    "tungsten doctor check selfhost well-typed-terms <file>",
+    "tungsten doctor check nested-patterns <file>",
+    "tungsten explain error --self-hosted <code>",
+];
+
+/// **The measured misses now match** (ADR 4.9.26d AC 2). These three queries
+/// returned *no matching diagnostic tools* on 4 Sep 2026; each is the symptom a
+/// reader of the 3.9.26g projection bug actually had, none of them names the
+/// divergence, and each must now reach the tools that answer it.
+#[test]
+fn the_three_measured_misses_reach_the_divergence_tools() {
+    for query in [
+        "wrong field value",
+        "destructuring gives the wrong element",
+        "a projection builder disagrees with the type walk beside it",
+    ] {
         let results = match_suggestions(query);
         assert!(
             !results.is_empty(),
-            "Category '{}' returned no suggestions",
-            query
+            "measured-miss query {query:?} still returns nothing"
         );
-    }
-}
-
-#[test]
-fn test_suggestions_sorted_by_relevance() {
-    let results = match_suggestions("SIGSEGV");
-    for window in results.windows(2) {
-        assert!(
-            window[0].relevance >= window[1].relevance,
-            "Suggestions not sorted: {} ({}) came before {} ({})",
-            window[0].command,
-            window[0].relevance,
-            window[1].command,
-            window[1].relevance,
-        );
-    }
-}
-
-#[test]
-fn test_no_duplicate_commands() {
-    let results = match_suggestions("mutual recursion encoding cycle μ-type");
-    let mut commands: Vec<&str> = results.iter().map(|s| s.command).collect();
-    let len_before = commands.len();
-    commands.sort();
-    commands.dedup();
-    assert_eq!(
-        len_before,
-        commands.len(),
-        "Duplicate commands in suggestions"
-    );
-}
-
-// ── Case insensitivity ──────────────────────────────────────────
-
-#[test]
-fn test_cross_file_suggests_error_enrichment() {
-    let results = match_suggestions("cross-file error in different file");
-    assert!(
-        results
-            .iter()
-            .any(|s| s.command.contains("error-enrichment")),
-        "Expected error-enrichment for cross-file query"
-    );
-}
-
-#[test]
-fn test_case_insensitive_matching() {
-    let upper = match_suggestions("SIGSEGV");
-    let lower = match_suggestions("sigsegv");
-    let mixed = match_suggestions("SigSegV");
-
-    assert_eq!(upper.len(), lower.len());
-    assert_eq!(upper.len(), mixed.len());
-
-    for (u, l) in upper.iter().zip(lower.iter()) {
-        assert_eq!(u.command, l.command);
-        assert_eq!(u.relevance, l.relevance);
-    }
-    for (u, m) in upper.iter().zip(mixed.iter()) {
-        assert_eq!(u.command, m.command);
-        assert_eq!(u.relevance, m.relevance);
-    }
-}
-
-// ── Keyword in verbose error message ────────────────────────────
-
-#[test]
-fn test_keyword_in_verbose_error_message() {
-    // Keywords buried in a long, noisy error message should still match
-    let verbose = "Error at line 42 in module Foo: the compiler encountered \
-                   a segmentation fault (SIGSEGV) while attempting to lower \
-                   the ADT constructor for type Bar. Please report this bug.";
-    let results = match_suggestions(verbose);
-    assert!(
-        results
-            .iter()
-            .any(|s| s.command.contains("check fold-consistency")),
-        "Expected check-fold-consistency for verbose SIGSEGV message, got: {:?}",
-        results.iter().map(|s| s.command).collect::<Vec<_>>()
-    );
-}
-
-// ── Cross-category matching ─────────────────────────────────────
-
-#[test]
-fn test_cross_category_returns_suggestions_from_both() {
-    // A query mentioning keywords from two categories should return
-    // suggestions from both
-    let results = match_suggestions("mutual recursion caused SIGSEGV");
-    let has_segfault_tool = results
-        .iter()
-        .any(|s| s.command.contains("check fold-consistency"));
-    let has_mutual_tool = results
-        .iter()
-        .any(|s| s.command.contains("mutual-recursion-groups"));
-    assert!(
-        has_segfault_tool && has_mutual_tool,
-        "Expected suggestions from both segfault and mutual recursion categories, got: {:?}",
-        results.iter().map(|s| s.command).collect::<Vec<_>>()
-    );
-}
-
-// ── Relevance cap ───────────────────────────────────────────────
-
-#[test]
-fn test_relevance_never_exceeds_one() {
-    // Even with many keyword hits, relevance should be capped at 1.0
-    let heavy_query = "mutual recursion mutually recursive scc cycle \
-                       circular type circular dependency encoding μ-type \
-                       mu type mu_var tyvar alpha_ mu binder recursive type";
-    let results = match_suggestions(heavy_query);
-    for s in &results {
-        assert!(
-            s.relevance <= 1.0,
-            "Relevance {} > 1.0 for command '{}'",
-            s.relevance,
-            s.command
-        );
-    }
-}
-
-// ── Cost field validity ─────────────────────────────────────────
-
-#[test]
-fn test_all_costs_in_valid_range() {
-    // Every suggestion across all categories should have cost 1–5
-    let queries = [
-        "sigsegv",
-        "type mismatch",
-        "stack overflow",
-        "infinite loop",
-        "elaboration error",
-        "encoding",
-        "mutual recursion",
-    ];
-    for query in &queries {
-        let results = match_suggestions(query);
-        for s in &results {
+        for expected in DIVERGENCE_RANKING {
             assert!(
-                (1..=5).contains(&s.cost),
-                "Cost {} out of range 1-5 for command '{}' (query: '{}')",
-                s.cost,
-                s.command,
-                query
+                results.iter().any(|s| s.command == *expected),
+                "{query:?} did not offer {expected:?}; got {:?}",
+                results.iter().map(|s| s.command).collect::<Vec<_>>()
             );
         }
     }
 }
 
-// ── Top suggestion per category ─────────────────────────────────
-
+/// **The cause-shaped queries are untouched** (AC 4). A wider trigger set earns
+/// nothing if it dilutes the ranking for the reader who already knew what to
+/// type: both phrasings still return exactly these six commands, in this order.
 #[test]
-fn test_top_suggestion_per_category() {
-    // Verify each category returns the expected highest-relevance tool first
-    let expectations = [
-        ("sigsegv", "check fold-consistency"),
-        ("type mismatch", "type-encoding"),
-        ("stack overflow", "check link-health"),
-        ("infinite loop", "audit-recursion"),
-        ("elaboration error", "explain error"),
-        ("encoding", "type-encoding"),
-        ("mutual recursion", "mutual-recursion-groups"),
-    ];
-    for (query, expected_top) in &expectations {
-        assert_top_suggestion(query, expected_top);
+fn the_cause_shaped_queries_keep_their_exact_ranking() {
+    for query in ["self-host divergence", "bootstrap and self-host disagree"] {
+        let commands: Vec<&str> = match_suggestions(query).iter().map(|s| s.command).collect();
+        assert_eq!(
+            commands, DIVERGENCE_RANKING,
+            "the ranking for {query:?} changed"
+        );
     }
 }
 
-// ── Deterministic ordering ──────────────────────────────────────
+// ── The empty answer (ADR 4.9.26d D4/AC 6) ──────────────────────
 
+/// A query that genuinely matches nothing still says so, and says it in the
+/// reader's own vocabulary. The report is not empty, it names the failure, and
+/// it is plainly distinguishable from the "most relevant first" listing a match
+/// produces.
 #[test]
-fn test_deterministic_ordering() {
-    // Running the same query twice should produce identical results
-    let query = "type mismatch in recursive encoding with mutual recursion";
-    let run1 = match_suggestions(query);
-    let run2 = match_suggestions(query);
+fn a_query_that_matches_nothing_still_answers() {
+    let results = match_suggestions("xyzzy completely unrelated nonsense");
+    assert!(results.is_empty(), "expected a genuine no-match query");
 
-    assert_eq!(run1.len(), run2.len(), "Result count differs across runs");
-    for (a, b) in run1.iter().zip(run2.iter()) {
-        assert_eq!(a.command, b.command, "Command order differs across runs");
-        assert_eq!(a.relevance, b.relevance, "Relevance differs across runs");
-        assert_eq!(a.cost, b.cost, "Cost differs across runs");
+    let report = no_match_report();
+    assert!(report.contains("No matching diagnostic tools found"));
+    assert!(
+        !report.contains("most relevant first"),
+        "the empty answer must not read like a listing"
+    );
+}
+
+/// **The tip must not lie.** Every example the empty answer offers is itself a
+/// query that matches — the failure this replaces was a tip whose every example
+/// was cause-shaped, i.e. the one lesson the surface must not teach.
+#[test]
+fn every_example_in_the_no_match_tip_actually_matches() {
+    for example in NO_MATCH_EXAMPLES {
+        assert!(
+            !match_suggestions(example).is_empty(),
+            "the no-match tip offers {example:?}, which itself returns nothing"
+        );
+        assert!(
+            no_match_report().contains(&format!("'{example}'")),
+            "the no-match tip must quote {example:?} verbatim"
+        );
     }
+}
+
+// ── Category: private-item access / name collision (ADR 13.8.26c) ─
+
+/// The message a reader actually pastes in. E0016 is reported in the LOSER's
+/// file naming the WINNER's module, so its own text points away from the edit
+/// that caused it — which makes `suggest-tools` the surface that has to name
+/// the tool, since nothing in the error does.
+#[test]
+fn a_private_item_error_tops_out_at_name_collisions() {
+    assert_top_suggestion(
+        "function `string_slice` is private (defined in `codegen::ir_header`) \
+         and cannot be accessed from `elab::error::source`",
+        "check module name-collisions",
+    );
+}
+
+/// The code and the bare phrasing route there too — a reader may paste either.
+#[test]
+fn the_code_and_the_bare_phrasing_both_reach_the_check() {
+    assert_suggests("E0016", "check module name-collisions");
+    assert_suggests("is private", "check module name-collisions");
+    assert_suggests("name collision", "check module name-collisions");
+}
+
+/// The check is **advisory** (ADR 13.8.26c D3), so `suggest-tools` is doing the
+/// work an exit code is not: the two cheaper companions must come with it,
+/// because the recommendation is the whole discovery path for this tool.
+#[test]
+fn the_cheap_companions_ride_along_with_it() {
+    assert_suggests("cannot be accessed from", "explain error E0016");
+    assert_suggests("cannot be accessed from", "info error-sites E0016");
+}
+
+// ── Category: unexplained proof hole (ADR 18.9.26g) ─────────────
+
+// 18.9.26g AC3: the symptom ranks the census first.
+#[test]
+fn test_unwritten_sorry_top_is_sorry_sites() {
+    assert_top_suggestion(
+        "check says contains sorry but I wrote no sorry",
+        "doctor check sorry-sites",
+    );
+    assert_top_suggestion("contains sorry", "doctor check sorry-sites");
 }

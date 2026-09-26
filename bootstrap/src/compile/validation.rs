@@ -84,14 +84,16 @@ pub(super) fn apply_tyvar_substitutions(
 
         if subst.keys().any(|k| genuine_leaks.contains(k)) {
             if verbose {
-                eprintln!(
-                    "[tyvar-cleanup] {}: substituting {:?}",
-                    def.name,
-                    subst
-                        .iter()
-                        .filter(|(k, _)| genuine_leaks.contains(*k))
-                        .collect::<Vec<_>>()
-                );
+                // Sort by tyvar name so the verbose diagnostic is deterministic
+                // (HashMap iteration order is not) — ADR 29.6.26h.
+                let mut shown: Vec<_> = Vec::new();
+                for (k, v) in &subst {
+                    if genuine_leaks.contains(k) {
+                        shown.push((k, v));
+                    }
+                }
+                shown.sort_by(|a, b| a.0.cmp(b.0));
+                eprintln!("[tyvar-cleanup] {}: substituting {shown:?}", def.name);
             }
             def.term.term = def.term.term.substitute_type_vars(&subst);
             substitution_count += 1;

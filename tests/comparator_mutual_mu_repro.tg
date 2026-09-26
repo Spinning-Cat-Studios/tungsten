@@ -1,0 +1,25 @@
+// Isolation: deep mutually-recursive mu chain, ALL constructors <= 2 fields.
+// If these compare correctly, "nested mu" is not itself a defect and the
+// TypeExpr/Stmt Stuck is plain D1 (>=3-field payloads).
+type List<T> = | Nil | Cons(T, List<T>)
+type PathSeg = | Field(String) | Pos(Nat) | Index(Nat) | Tag | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult = | Equal | NotEqual(CompareDiff)
+
+type Alpha = | ANil | ACons(Beta, Alpha)
+type Beta  = | BNil | BCons(Gamma, Beta)
+type Gamma = | GLeaf(Nat) | GNest(Alpha)
+
+fn wrongly_equal_alpha(a: Alpha, b: Alpha) -> Nat {
+    match compare(a, b) { Equal() => 1, NotEqual(_) => 0 }
+}
+
+// Both pairs DIFFER; correct comparator returns 0 for each.
+fn main() -> Nat {
+    let shallow = wrongly_equal_alpha(ACons(BNil, ANil), ANil);
+    let deep = wrongly_equal_alpha(
+        ACons(BCons(GLeaf(1), BNil), ANil),
+        ACons(BCons(GLeaf(2), BNil), ANil));
+    shallow + 2 * deep
+}

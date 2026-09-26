@@ -1,0 +1,31 @@
+// ADR 21.8.26a AC2/AC3: a two-field constructor pattern must bind BOTH fields
+// in the emitted Core term, not merely in the elaborator's environment.
+//
+// The self-hosted compiler used to give this arm the synthetic binder
+// `_payload` and leave `h` and `t` free, so `tungsten1 run` printed the
+// unreduced term. Run this file through both compilers and compare — the
+// bootstrap is the oracle.
+//
+// The wildcard arm is the second half of the shape: `C2(h, _)` leaks exactly
+// one free variable, which is why 160 of the 862 open definitions had only one.
+
+pub type L2 = N2 | C2(Nat, L2)
+
+pub fn sum2(l: L2) -> Nat {
+    match l {
+        N2() => 0,
+        C2(h, t) => h + sum2(t)
+    }
+}
+
+pub fn head2(l: L2) -> Nat {
+    match l {
+        N2() => 0,
+        C2(h, _) => h
+    }
+}
+
+pub fn main() -> Nat {
+    let xs = C2(7, C2(8, C2(9, N2)));
+    sum2(xs) + head2(xs)
+}

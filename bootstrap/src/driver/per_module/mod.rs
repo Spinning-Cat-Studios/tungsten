@@ -5,27 +5,30 @@
 //! completed modules are injected into subsequent modules' environments.
 //!
 //! Two-phase architecture (ADR 5.5.26c):
-//!   Phase A — walk ALL modules, register type + constructor stubs globally
-//!   Phase A.5 — collect ALL function signatures globally (combined AST)
-//!   Phase B — elaborate each module's value bodies in post-order
+//!   Stub Registration — walk ALL modules, register type + constructor stubs globally
+//!   Signature Collection — collect ALL function signatures globally (combined AST)
+//!   Body Elaboration — elaborate each module's value bodies in post-order
 
 mod accumulator;
-mod body;
 pub(super) mod cache;
+pub(super) mod fresh_encodings;
+pub(crate) mod inspect;
+mod phases;
 mod profile;
 pub(crate) mod stubs;
 #[cfg(test)]
 mod tests;
+mod walk;
 
 use std::path::Path;
 use std::time::Instant;
 
 use crate::cache::elab_cache;
 use crate::cache::elab_cache::writer::{self, BackgroundWriter};
-use crate::elaborate::{ElabError, ElabOutput, ModuleExports};
-use tungsten_core::Context;
+use crate::elaborate::{ElabError, ElabOutput};
 
 use accumulator::ModuleTreeAccumulator;
+use walk::TreeWalkState;
 
 use super::modules::{self, ParsedModule};
 use super::output::TraceOptions;
@@ -41,16 +44,26 @@ pub(super) struct ModuleTreeOutput {
         std::path::PathBuf,
         Vec<crate::elaborate::CoreDef>,
     )>,
+    /// Per-module value import targets, keyed by canonical module path
+    /// (ADR 12.7.26a §2.1).
+    pub(super) module_import_targets:
+        std::collections::BTreeMap<Vec<String>, crate::elaborate::ValueImportTargets>,
     /// Def count from cache hits (bodies not re-elaborated).
     pub(super) cached_def_count: usize,
+    /// Accumulated whole-project exports after Body Elaboration (ADR 21.7.26j).
+    /// Every module's real type/value/constructor definitions, *moved* out of
+    /// the accumulator (not cloned — they were about to be dropped), so the
+    /// live-elaborator normalization check can seed a fresh whole-project
+    /// `Elaborator`. The compile path ignores this field.
+    pub(super) exports: crate::elaborate::ModuleExports,
 }
 
 /// Elaborate a module tree per-module in post-order (ADR 5.5.26b §3, 5.5.26c).
 ///
 /// Two-phase approach:
-///   Phase A: Walk all modules and register type + constructor stubs globally,
+///   Stub Registration: Walk all modules and register type + constructor stubs globally,
 ///            so cross-branch imports resolve before any body elaboration.
-///   Phase B: Elaborate each module's value bodies in post-order, injecting
+///   Body Elaboration: Elaborate each module's value bodies in post-order, injecting
 ///            full defs from completed siblings.
 ///
 /// Caching is not yet supported in per-module mode (ADR 5.5.26b non-goals).
@@ -65,35 +78,35 @@ pub(super) fn elaborate_module_tree(
     let profiling = profile::is_enabled();
     let mut elab_profile = profile::ElabProfile::new();
 
-    // Phase A: collect type + constructor stubs from ALL modules (ADR 5.5.26c §2.2)
-    let phase_a_start = Instant::now();
+    // Stub Registration: collect type + constructor stubs from ALL modules (ADR 5.5.26c §2.2)
+    let stub_registration_start = Instant::now();
     stubs::collect_all_type_and_constructor_stubs(module_tree, &mut acc.exports);
-    let phase_a_elapsed = phase_a_start.elapsed();
-    elab_profile.phase_a = phase_a_elapsed;
-    log_phase_a(verbose, trace, &acc.exports);
+    let stub_registration_elapsed = stub_registration_start.elapsed();
+    elab_profile.stub_registration = stub_registration_elapsed;
+    phases::log_stub_registration(verbose, trace, &acc.exports);
 
-    // Phase A.5: collect function signatures globally.
+    // Signature Collection: collect function signatures globally.
     // Build a combined AST of ALL items from ALL modules and run the
-    // collection pass using Phase A type stubs. This gives every module
+    // collection pass using Stub Registration type stubs. This gives every module
     // access to all function types for cross-branch value imports.
-    let phase_a5_start = Instant::now();
-    run_phase_a5(module_tree, build, &mut acc, verbose);
-    let phase_a5_elapsed = phase_a5_start.elapsed();
-    log_phase_a5(verbose, &acc.exports);
+    let signature_collection_start = Instant::now();
+    phases::run_signature_collection(module_tree, build, &mut acc, verbose);
+    let signature_collection_elapsed = signature_collection_start.elapsed();
+    phases::log_signature_collection(verbose, &acc.exports);
 
-    // Compute exports hash once for Phase B cache keys (ADR 10.5.26l §2.1).
-    // This captures the full Phase A.5 environment state. Any upstream change
+    // Compute exports hash once for Body Elaboration cache keys (ADR 10.5.26l §2.1).
+    // This captures the full Signature Collection environment state. Any upstream change
     // produces a different hash, conservatively invalidating all module caches.
     let exports_hash = elab_cache::hash_exports(&acc.exports);
 
-    elab_profile.phase_a5 = phase_a5_elapsed;
+    elab_profile.signature_collection = signature_collection_elapsed;
 
-    // Phase B: elaborate each module's bodies in post-order
+    // Body Elaboration: elaborate each module's bodies in post-order
     let full_output_cache = std::env::var("TUNGSTEN_ELAB_CACHE_FULL")
         .map(|v| v == "1")
         .unwrap_or(false);
-    let phase_b_start = Instant::now();
-    run_phase_b(
+    let body_elaboration_start = Instant::now();
+    run_body_elaboration(
         module_tree,
         build,
         trace,
@@ -106,14 +119,15 @@ pub(super) fn elaborate_module_tree(
         &mut acc,
         &mut elab_profile,
     )?;
-    let phase_b_elapsed = phase_b_start.elapsed();
-    elab_profile.phase_b_total = phase_b_elapsed;
+    let body_elaboration_elapsed = body_elaboration_start.elapsed();
+    elab_profile.body_elaboration_total = body_elaboration_elapsed;
 
     if verbose {
-        let total = phase_a_elapsed + phase_a5_elapsed + phase_b_elapsed;
+        let total =
+            stub_registration_elapsed + signature_collection_elapsed + body_elaboration_elapsed;
         eprintln!(
-            "  Elaboration phase timing: A={:.0?}, A.5={:.0?}, B={:.0?}, total={:.0?}",
-            phase_a_elapsed, phase_a5_elapsed, phase_b_elapsed, total,
+            "  Elaboration phase timing: stub-reg={:.0?}, sig-collect={:.0?}, body-elab={:.0?}, total={:.0?}",
+            stub_registration_elapsed, signature_collection_elapsed, body_elaboration_elapsed, total,
         );
     }
 
@@ -121,17 +135,47 @@ pub(super) fn elaborate_module_tree(
         elab_profile.emit();
     }
 
+    // Comparator synthesis runs *before* the gate (ADR 11.8.26b §2.3) so its
+    // output is inside the trusted boundary rather than appended past it.
+    if let Some(notice) = synthesis_notice(verbose, acc.synthesize_comparators()) {
+        eprintln!("{notice}");
+    }
+
+    // Termination admission (ADR 29.6.26e §2.5). This is the trusted boundary:
+    // the first and only point where every definition — freshly elaborated,
+    // imported, or reconstructed from cache — is in one set. Running it here
+    // rather than in `elaborate_project` means `check`, `run`, `test` and
+    // `compile` all traverse the same state machine.
+    acc.admit_or_reject()?;
+
     let cached_def_count = acc.cached_def_count;
     let module_defs = acc.module_defs.clone();
+    let module_import_targets = acc.module_import_targets.clone();
+    // Move the accumulated exports out before `into_output` drops the rest of
+    // the accumulator; `into_output` ignores `exports`, so this is a free move,
+    // not an added clone on the compile path (ADR 21.7.26j).
+    let exports = std::mem::take(&mut acc.exports);
     Ok(ModuleTreeOutput {
         elab: acc.into_output(),
         module_defs,
+        module_import_targets,
         cached_def_count,
+        exports,
     })
 }
 
-/// Run Phase B: elaborate module bodies in post-order with optional background caching.
-fn run_phase_b(
+/// What to print about comparator synthesis, or `None` for silence.
+///
+/// A pure function rather than an `if` at the call site so both conditions are
+/// assertable: an `eprintln!` behind `verbose && count > 0` is invisible to the
+/// test suite, and every mutation of that guard survives (measured — ADR
+/// 11.8.26b's close-out sweep flagged `&&`, `>`, `>=` and `==` here).
+pub(super) fn synthesis_notice(verbose: bool, count: usize) -> Option<String> {
+    (verbose && count > 0).then(|| format!("Synthesized {count} comparator(s)"))
+}
+
+/// Run Body Elaboration: elaborate module bodies in post-order with optional background caching.
+fn run_body_elaboration(
     module_tree: &ParsedModule,
     build: &BuildCtx<'_>,
     trace: &TraceOptions,
@@ -151,22 +195,35 @@ fn run_phase_b(
     let root_path: Vec<String> = Vec::new();
     {
         let mut state = TreeWalkState { acc, elab_profile };
-        elaborate_module_tree_rec(module_tree, &root_path, &elab_ctx, &mut state)
+        walk::elaborate_module_tree_rec(module_tree, &root_path, &elab_ctx, &mut state);
     }
-    .map_err(|mut errors| {
-        // ADR 13.5.26g §2.2: annotate "not found" errors when Phase A.5 failed.
-        if !acc.phase_a5_ok {
-            annotate_errors_for_phase_a5_failure(&mut errors);
-        }
-        errors
-    })?;
+
+    // The walk accumulates instead of short-circuiting (ADR 14.8.26g D1), so
+    // the run's verdict is read here, after every module has been examined.
+    // Pre-walk (Signature Collection, D4) errors report first, then module
+    // groups re-ordered into the canonical (serial) walk order, so the same
+    // fault produces a byte-identical list at every `thread_count`.
+    if acc.has_accumulated_errors() {
+        let mut canonical_order = Vec::new();
+        walk::canonical_walk_order(module_tree, &root_path, &mut canonical_order);
+        let mut errors = acc.take_accumulated_errors_ordered(&canonical_order);
+        phases::finish_failed_body_elaboration(acc, module_tree, &mut errors);
+        // The staged cache writes are dropped, not committed (ADR 14.8.26g
+        // D5): a failing run leaves the cache exactly as it found it.
+        return Err(errors);
+    }
+
+    // The whole run succeeded — commit the staged cache writes (ADR 14.8.26g
+    // D5). Full-output bytes go to the background writer, which the join
+    // below flushes.
+    cache::commit_pending_cache_writes(std::mem::take(&mut acc.pending_cache_writes), &elab_ctx);
 
     // Join background writer — flush all pending entries (ADR 10.5.26o)
     if let Some(writer) = bg_writer {
         let write_errors = writer.join();
         if !write_errors.is_empty() && flags.verbose {
             eprintln!(
-                "[elab-cache-full] {} background write error(s) during Phase B",
+                "[elab-cache-full] {} background write error(s) during Body Elaboration",
                 write_errors.len()
             );
             for err in &write_errors {
@@ -183,15 +240,26 @@ pub(super) struct ElabTreeCtx<'a> {
     pub(super) flags: ElabCtxFlags,
     pub(super) build: &'a BuildCtx<'a>,
     trace: &'a TraceOptions,
-    /// Hash of Phase A.5 exports for cache key computation (ADR 10.5.26l).
+    /// Hash of Signature Collection exports for cache key computation (ADR 10.5.26l).
     pub(super) exports_hash: [u8; 32],
     /// Background cache writer for full-output entries (ADR 10.5.26o).
     /// `None` when full-output caching is disabled.
     pub(super) bg_writer: Option<&'a BackgroundWriter>,
-    /// Configured thread count for parallel Phase B (ADR 11.5.26b §P5).
+    /// Configured thread count for parallel Body Elaboration (ADR 11.5.26b §P5).
     /// Read once from `TUNGSTEN_ELAB_THREADS`; 1 = serial (default).
     thread_count: usize,
-    /// Shared rayon thread pool for parallel Phase B (ADR 11.5.26b §P5).
+    /// How many failing modules the walk tolerates before bailing out
+    /// (ADR 14.8.26g D6's wall-clock arm): D7's display budget
+    /// (`--max-errors`, 0 = unlimited) applied to modules rather than
+    /// diagnostics. P2 measured a failing run at ~10× the short-circuiting
+    /// run's wall clock — the cost of examining the whole tree — which is the
+    /// accepted price *below* this budget: past it, nothing more is
+    /// displayable anyway, and the unreached-module note reports what the
+    /// bail-out skipped. Read once, on the caller thread, because the
+    /// underlying setting is thread-local and rayon workers would otherwise
+    /// read the default.
+    pub(super) module_failure_budget: usize,
+    /// Shared rayon thread pool for parallel Body Elaboration (ADR 11.5.26b §P5).
     /// `None` when `thread_count == 1` (serial mode).
     parallel_pool: Option<rayon::ThreadPool>,
 }
@@ -229,246 +297,7 @@ fn build_elab_ctx<'a>(
         exports_hash,
         bg_writer,
         thread_count,
+        module_failure_budget: super::diagnostics::get_max_errors(),
         parallel_pool,
     }
-}
-
-/// Log Phase A results (verbose + constructor trace).
-fn log_phase_a(verbose: bool, trace: &TraceOptions, exports: &ModuleExports) {
-    if verbose {
-        eprintln!(
-            "  Phase A: collected {} type stubs, {} constructor stubs",
-            exports.types.len(),
-            exports.constructors.len(),
-        );
-    }
-    if trace.trace_ctor_registration {
-        for (name, info) in &exports.constructors {
-            eprintln!(
-                "[ctor-reg] Phase A: register {} (parent={}, index={}) via collect_all_type_and_constructor_stubs",
-                name, info.type_name, info.index
-            );
-        }
-    }
-}
-
-/// Log Phase A.5 results (verbose).
-fn log_phase_a5(verbose: bool, exports: &ModuleExports) {
-    if verbose {
-        eprintln!(
-            "  Phase A.5: {} types, {} values, {} constructors after global collection",
-            exports.types.len(),
-            exports.values.len(),
-            exports.constructors.len(),
-        );
-    }
-}
-
-/// Phase A.5: build combined AST from all modules and run global collection
-/// to extract function signatures. Results are merged into `acc.exports`.
-fn run_phase_a5(
-    module_tree: &ParsedModule,
-    build: &BuildCtx<'_>,
-    acc: &mut ModuleTreeAccumulator,
-    verbose: bool,
-) {
-    let (combined_ast, combined_file_index) = super::pipeline::build_combined_ast(module_tree);
-    let mut combined_module_info = build.module_info.clone();
-    combined_module_info.item_index_to_file = combined_file_index;
-
-    let mut ctx = Context::new();
-    match crate::elaborate::collect_definitions_with_exports(
-        &combined_ast,
-        &mut ctx,
-        combined_module_info,
-        &acc.exports,
-    ) {
-        Ok(collected) => {
-            let global_exports = collected.extract_value_exports();
-            if verbose {
-                eprintln!(
-                    "  Phase A.5: global collection succeeded, {} types, {} values, {} constructors",
-                    global_exports.types.len(),
-                    global_exports.values.len(),
-                    global_exports.constructors.len(),
-                );
-            }
-            acc.merge_exports(global_exports);
-        }
-        Err(errors) => {
-            // Always warn on Phase A.5 failure (ADR 13.5.26g §2.1).
-            // In verbose mode, also print individual errors.
-            let count = errors.len();
-            eprintln!(
-                "warning: Phase A.5 global collection failed with {} error{}; \
-                 cross-module imports may not resolve.",
-                count,
-                if count == 1 { "" } else { "s" },
-            );
-            if let Some(first) = errors.first() {
-                eprintln!("  first error: {}", first);
-            }
-            eprintln!("  hint: run `tungsten doctor check phase-a5 <file>` for details");
-            if verbose {
-                for e in &errors {
-                    eprintln!("    - {}", e);
-                }
-            }
-            acc.phase_a5_ok = false;
-        }
-    }
-}
-
-/// Annotate "not found" errors with a Phase A.5 failure hint (ADR 13.5.26g §2.2).
-///
-/// When Phase A.5 global collection fails, downstream modules can't resolve
-/// cross-module imports, producing misleading E0001/E0005/E0006 errors.
-/// This adds a note to those errors pointing to the real root cause.
-fn annotate_errors_for_phase_a5_failure(errors: &mut [ElabError]) {
-    use crate::elaborate::ElabErrorKind;
-    use crate::elaborate::Note;
-
-    let hint = "Phase A.5 global collection failed — this error may be caused by \
-                a bad import in another module. Run `tungsten doctor check phase-a5 <file>` \
-                for details.";
-
-    for err in errors.iter_mut() {
-        let is_resolution_error = matches!(
-            &err.kind,
-            ElabErrorKind::UndefinedVariable(_)
-                | ElabErrorKind::ModuleNotFound { .. }
-                | ElabErrorKind::ItemNotFoundInModule { .. }
-                | ElabErrorKind::UnresolvedImport(_)
-        );
-        if is_resolution_error {
-            err.notes.push(Note {
-                message: hint.to_string(),
-                span: None,
-                file_path: None,
-            });
-        }
-    }
-}
-
-/// Mutable state threaded through the module tree walk (Visitor pattern).
-pub(in crate::driver::per_module) struct TreeWalkState<'a> {
-    pub(in crate::driver::per_module) acc: &'a mut ModuleTreeAccumulator,
-    pub(in crate::driver::per_module) elab_profile: &'a mut profile::ElabProfile,
-}
-
-/// Recursively elaborate modules in post-order (children first).
-///
-/// Sibling modules are sorted by dependency order (modules that are depended
-/// on are processed first) so cross-sibling imports resolve to full definitions
-/// rather than stubs.
-///
-/// When `TUNGSTEN_ELAB_THREADS > 1`, sibling modules at the same dependency
-/// level are elaborated in parallel (ADR 11.5.26b §P5).
-fn elaborate_module_tree_rec(
-    module: &ParsedModule,
-    module_path: &[String],
-    ctx: &ElabTreeCtx<'_>,
-    state: &mut TreeWalkState<'_>,
-) -> Result<(), Vec<ElabError>> {
-    if ctx.thread_count > 1 && module.submodules.len() > 1 {
-        elaborate_children_parallel(module, module_path, ctx, state)?;
-    } else {
-        elaborate_children_serial(module, module_path, ctx, state)?;
-    }
-
-    // Elaborate this module itself (after all children are done)
-    body::elaborate_self(module, module_path, ctx, state)
-}
-
-/// Serial child elaboration: topological sort, process one-by-one.
-fn elaborate_children_serial(
-    module: &ParsedModule,
-    module_path: &[String],
-    ctx: &ElabTreeCtx<'_>,
-    state: &mut TreeWalkState<'_>,
-) -> Result<(), Vec<ElabError>> {
-    let sorted_indices = cache::levels::sort_submodules_by_deps(&module.submodules);
-    for &idx in &sorted_indices {
-        let child_name = modules::get_module_name_from_parsed(&module.submodules[idx]);
-        let mut child_path = module_path.to_vec();
-        child_path.push(child_name);
-        elaborate_module_tree_rec(&module.submodules[idx], &child_path, ctx, state)?;
-    }
-    Ok(())
-}
-
-/// Parallel child elaboration: level-set scheduling with rayon (ADR 11.5.26b §P5).
-///
-/// Modules at the same dependency level are elaborated concurrently. After each
-/// level completes, results are merged into the accumulator in index order for
-/// deterministic output. Each worker gets a snapshot of the accumulated exports
-/// and its own accumulator.
-fn elaborate_children_parallel(
-    module: &ParsedModule,
-    module_path: &[String],
-    ctx: &ElabTreeCtx<'_>,
-    state: &mut TreeWalkState<'_>,
-) -> Result<(), Vec<ElabError>> {
-    let level_sets = cache::levels::sort_submodules_into_levels(&module.submodules);
-
-    // Use the shared pool from ElabTreeCtx (ADR 11.5.26b §P5).
-    // Fallback to serial if pool creation failed at init time.
-    let pool = match ctx.parallel_pool.as_ref() {
-        Some(p) => p,
-        None => return elaborate_children_serial(module, module_path, ctx, state),
-    };
-
-    for level in &level_sets {
-        if level.len() == 1 {
-            // Single module — no parallelism overhead
-            let idx = level[0];
-            let child_name = modules::get_module_name_from_parsed(&module.submodules[idx]);
-            let mut child_path = module_path.to_vec();
-            child_path.push(child_name);
-            elaborate_module_tree_rec(&module.submodules[idx], &child_path, ctx, state)?;
-            continue;
-        }
-
-        // Snapshot exports for this level (read-only for workers)
-        let exports_snapshot = state.acc.exports.clone();
-
-        // Parallel elaboration of all modules in this level
-        let results: Vec<_> = pool.install(|| {
-            use rayon::prelude::*;
-            level
-                .par_iter()
-                .map(|&idx| {
-                    let child_name = modules::get_module_name_from_parsed(&module.submodules[idx]);
-                    let mut child_path = module_path.to_vec();
-                    child_path.push(child_name);
-                    let mut worker_acc = ModuleTreeAccumulator::new();
-                    worker_acc.merge_exports(exports_snapshot.clone());
-                    let mut worker_profile = profile::ElabProfile::new();
-                    let mut worker_state = TreeWalkState {
-                        acc: &mut worker_acc,
-                        elab_profile: &mut worker_profile,
-                    };
-                    let result = elaborate_module_tree_rec(
-                        &module.submodules[idx],
-                        &child_path,
-                        ctx,
-                        &mut worker_state,
-                    );
-                    (idx, result, worker_acc, worker_profile)
-                })
-                .collect()
-        });
-
-        // Merge results in index order for deterministic output
-        let mut sorted_results = results;
-        sorted_results.sort_by_key(|(idx, _, _, _)| *idx);
-
-        for (_idx, result, worker_acc, worker_profile) in sorted_results {
-            result?;
-            state.acc.merge_worker(worker_acc);
-            state.elab_profile.merge_from(&worker_profile);
-        }
-    }
-
-    Ok(())
 }

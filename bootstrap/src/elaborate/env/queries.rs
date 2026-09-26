@@ -18,8 +18,12 @@ impl Env {
     /// - Type variables in scope
     /// - Built-in types
     pub fn all_type_names(&self) -> impl Iterator<Item = &str> {
-        // Built-in types
-        let builtins = ["Nat", "Bool", "Unit", "String", "Eq", "Void"].into_iter();
+        // Built-in types: every primitive (ADR 18.9.26f), plus `Eq`, the one
+        // built-in type former that is not a primitive.
+        let builtins = tungsten_core::types::PRIMITIVE_TYPES
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(std::iter::once("Eq"));
 
         // Defined types
         let defined = self.types.keys().map(|s| s.as_str());

@@ -1,0 +1,11 @@
+// ADR 7.8.26e §2.3: a non-strictly-positive type reaching `env` by IMPORT is
+// rejected by the node-E check like any other, with no separate import arm --
+// and reported exactly ONCE, despite the collection pass running per module in
+// each of the three driver phases.
+pub mod types;
+
+use types::{Bad};
+
+fn take(b: Bad) -> Nat { 0 }
+
+fn main() -> Nat { 0 }

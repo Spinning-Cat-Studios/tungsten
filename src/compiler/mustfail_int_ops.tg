@@ -1,0 +1,36 @@
+// Negative control for test_int_ops.tg (ADR 14.9.26c AC 2).
+//
+// The positive suite asserts signed results through `assert_eq_int`. A
+// comparison the evaluator cannot execute goes silently Stuck in EITHER
+// polarity, and the runner then reports `ok` while asserting nothing — the
+// trap that made three earlier suites vacuous (ADR 6.8.26b, 20.8.26d,
+// 19.8.26c). So this file asserts something FALSE through the same wrapper,
+// and `check-mustfail-fixtures` (make/quality/tg-tests.mk) requires it to FAIL and to
+// fail for its OWN reason: the runner's failure line must name
+// `test_sub_is_not_saturating`, the one test below.
+//
+//   tungsten test src/compiler/mustfail_int_ops.tg --require-tests
+//     -> assertion failed: assert_eq_int … test_sub_is_not_saturating
+//        exit != 0
+//
+// The value chosen is the one a saturating or unsigned `-` would produce:
+// `3 - 5` is `-2` on `Int`, and only a backend that quietly fell back to the
+// `Nat` node would make this assertion pass.
+//
+// Deliberately NOT named `test_*.tg`: `make tg-test` globs that pattern and a
+// file that must fail would fail the gate by design. Deliberately outside
+// `tg-test-tiers.toml`'s `must_declare` glob for the same reason.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_int};
+
+/// Asserts `3 - 5` is `0` — the saturating `Nat` answer, which `Int` must
+/// NOT give. The name is the failure signature the gate greps for — rename
+/// it together with the `case` arm in make/quality/tg-tests.mk.
+fn test_sub_is_not_saturating() -> () {
+    assert_eq_int(3 - 5, 0)
+}

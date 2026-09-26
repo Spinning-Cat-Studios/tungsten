@@ -1,0 +1,186 @@
+// src/compiler/elab/env/strmap/mod.tg
+// Purely-functional String-keyed AVL map (ADR 21.7.26c, design: ADR 17.7.26f §2.2).
+//
+// Backs the constructor-registration dedup index in ModuleContents. O(log n)
+// lookup/insert, immutable rebalancing on the insert path only. The key
+// comparison is the monomorphic `string_compare` FFI (three-way, byte
+// lexicographic), so no comparator threading or hashing is needed.
+
+use driver::ffi::{string_compare};
+use parser::option::{Option, Some, None};
+
+// ===========================================================================
+// COMPARISON RESULT CONSTANTS
+// ===========================================================================
+// Mirror tungsten_core's STRING_CMP_* encoding (ffi/driver/io/compare.rs).
+// Call sites compare against these, never magic numbers.
+
+/// `string_compare` result: first string sorts before the second.
+pub fn CMP_LT() -> Nat { 0 }
+
+/// `string_compare` result: strings are equal.
+pub fn CMP_EQ() -> Nat { 1 }
+
+/// `string_compare` result: first string sorts after the second.
+pub fn CMP_GT() -> Nat { 2 }
+
+// ===========================================================================
+// STRMAP TYPE
+// ===========================================================================
+
+/// Height-balanced (AVL) binary search tree keyed by String.
+/// Node fields: left subtree, key, value, right subtree, height.
+pub type StrMap<V> =
+    | StrMapLeaf
+    | StrMapNode(StrMap<V>, String, V, StrMap<V>, Nat)
+
+/// Height of a subtree (leaves have height 0).
+pub fn strmap_height<V>(m: StrMap<V>) -> Nat {
+    match m {
+        StrMapLeaf() => 0,
+        StrMapNode(_, _, _, _, h) => h
+    }
+}
+
+/// Larger of two heights (local helper for node construction).
+fn taller_of(a: Nat, b: Nat) -> Nat {
+    if a > b { a } else { b }
+}
+
+/// Build a node, deriving its height from the children.
+fn strmap_node<V>(left: StrMap<V>, key: String, value: V, right: StrMap<V>) -> StrMap<V> {
+    StrMapNode(left, key, value, right, taller_of(strmap_height(left), strmap_height(right)) + 1)
+}
+
+// ===========================================================================
+// LOOKUP
+// ===========================================================================
+
+/// Look up a key: O(log n) descent on `string_compare`.
+pub fn strmap_lookup<V>(m: StrMap<V>, key: String) -> Option<V> {
+    match m {
+        StrMapLeaf() => None,
+        StrMapNode(left, node_key, value, right, _) =>
+            let cmp = string_compare(key, node_key);
+            if cmp == CMP_LT() {
+                strmap_lookup(left, key)
+            } else if cmp == CMP_GT() {
+                strmap_lookup(right, key)
+            } else {
+                Some(value)
+            }
+    }
+}
+
+// ===========================================================================
+// INSERT (functional AVL, standard four rotations)
+// ===========================================================================
+
+/// Insert a key/value pair, rebalancing on the way back up.
+/// Last-write-wins on a duplicate key (matching newest-wins registration).
+pub fn strmap_insert<V>(m: StrMap<V>, key: String, value: V) -> StrMap<V> {
+    match m {
+        StrMapLeaf() => StrMapNode(StrMapLeaf, key, value, StrMapLeaf, 1),
+        StrMapNode(left, node_key, node_value, right, h) =>
+            let cmp = string_compare(key, node_key);
+            if cmp == CMP_LT() {
+                strmap_rebalance(strmap_insert(left, key, value), node_key, node_value, right)
+            } else if cmp == CMP_GT() {
+                strmap_rebalance(left, node_key, node_value, strmap_insert(right, key, value))
+            } else {
+                StrMapNode(left, node_key, value, right, h)
+            }
+    }
+}
+
+/// Rebuild a node whose children may differ in height by 2 after one insert,
+/// restoring the AVL invariant (children within 1) with one rotation.
+fn strmap_rebalance<V>(left: StrMap<V>, key: String, value: V, right: StrMap<V>) -> StrMap<V> {
+    let left_height = strmap_height(left);
+    let right_height = strmap_height(right);
+    if left_height > right_height + 1 {
+        strmap_rebalance_left_heavy(left, key, value, right)
+    } else if right_height > left_height + 1 {
+        strmap_rebalance_right_heavy(left, key, value, right)
+    } else {
+        strmap_node(left, key, value, right)
+    }
+}
+
+/// Left subtree is 2 taller: single right rotation (LL), or left-then-right
+/// double rotation (LR) when the left child leans right.
+fn strmap_rebalance_left_heavy<V>(left: StrMap<V>, key: String, value: V, right: StrMap<V>) -> StrMap<V> {
+    match left {
+        // Unreachable: a subtree 2 taller than a sibling is never a leaf.
+        StrMapLeaf() => strmap_node(left, key, value, right),
+        StrMapNode(left_left, _, _, left_right, _) =>
+            if strmap_height(left_left) >= strmap_height(left_right) {
+                strmap_single_right(left, key, value, right)
+            } else {
+                strmap_single_right(strmap_rotate_child_left(left), key, value, right)
+            }
+    }
+}
+
+/// Right subtree is 2 taller: single left rotation (RR), or right-then-left
+/// double rotation (RL) when the right child leans left.
+fn strmap_rebalance_right_heavy<V>(left: StrMap<V>, key: String, value: V, right: StrMap<V>) -> StrMap<V> {
+    match right {
+        // Unreachable: a subtree 2 taller than a sibling is never a leaf.
+        StrMapLeaf() => strmap_node(left, key, value, right),
+        StrMapNode(right_left, _, _, right_right, _) =>
+            if strmap_height(right_right) >= strmap_height(right_left) {
+                strmap_single_left(left, key, value, right)
+            } else {
+                strmap_single_left(left, key, value, strmap_rotate_child_right(right))
+            }
+    }
+}
+
+/// Unconditional single right rotation: the left child becomes the root.
+fn strmap_single_right<V>(left: StrMap<V>, key: String, value: V, right: StrMap<V>) -> StrMap<V> {
+    match left {
+        // Defensive: callers only pass a non-leaf left child.
+        StrMapLeaf() => strmap_node(left, key, value, right),
+        StrMapNode(left_left, pivot_key, pivot_value, left_right, _) =>
+            strmap_node(left_left, pivot_key, pivot_value, strmap_node(left_right, key, value, right))
+    }
+}
+
+/// Unconditional single left rotation: the right child becomes the root.
+fn strmap_single_left<V>(left: StrMap<V>, key: String, value: V, right: StrMap<V>) -> StrMap<V> {
+    match right {
+        // Defensive: callers only pass a non-leaf right child.
+        StrMapLeaf() => strmap_node(left, key, value, right),
+        StrMapNode(right_left, pivot_key, pivot_value, right_right, _) =>
+            strmap_node(strmap_node(left, key, value, right_left), pivot_key, pivot_value, right_right)
+    }
+}
+
+/// Rotate a node's own subtree left (first half of the LR double rotation).
+fn strmap_rotate_child_left<V>(m: StrMap<V>) -> StrMap<V> {
+    match m {
+        StrMapLeaf() => m,
+        StrMapNode(left, key, value, right, _) => strmap_single_left(left, key, value, right)
+    }
+}
+
+/// Rotate a node's own subtree right (first half of the RL double rotation).
+fn strmap_rotate_child_right<V>(m: StrMap<V>) -> StrMap<V> {
+    match m {
+        StrMapLeaf() => m,
+        StrMapNode(left, key, value, right, _) => strmap_single_right(left, key, value, right)
+    }
+}
+
+// ===========================================================================
+// SIZE (test/diagnostic helper)
+// ===========================================================================
+
+/// Number of entries in the map. O(n); intended for tests and diagnostics.
+pub fn strmap_size<V>(m: StrMap<V>) -> Nat {
+    match m {
+        StrMapLeaf() => 0,
+        StrMapNode(left, _, _, right, _) => strmap_size(left) + strmap_size(right) + 1
+    }
+}

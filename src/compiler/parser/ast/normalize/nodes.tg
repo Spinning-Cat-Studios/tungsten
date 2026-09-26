@@ -1,0 +1,137 @@
+// src/compiler/parser/ast/normalize/nodes.tg
+// The driver never reaches this module: span normalization is a test affordance,
+// imported only by the AST-comparison entry files. See normalize/mod.tg
+// (ADR 3.9.26a).
+// Span normalization for the record and helper node types that sit between
+// expressions and items: lambda parameters, motives, record-literal fields,
+// match arms, statements and `if let` chain conditions.
+//
+// `Stmt` reaches `Item` (a block may declare a nested item), which is why this
+// file calls into `normalize::items`.
+
+use parser::ast::nodes::exprs::{
+    Expr, LambdaParam, Motive, MotiveLambda, MotiveExpr, FieldInit, MatchArm,
+    Stmt, StmtLet, StmtLetElse, StmtExpr, StmtItem,
+    IfLetCondition, IfLetBind, IfLetGuard
+};
+use parser::ast::normalize::common::{canonical_span, strip_spans_ident};
+use parser::ast::normalize::patterns::{strip_spans_pattern};
+use parser::ast::normalize::types::{strip_spans_type_expr, strip_spans_maybe_type_expr};
+use parser::ast::normalize::exprs::{strip_spans_expr, strip_spans_maybe_expr};
+use parser::ast::normalize::items::{strip_spans_item};
+use driver::ffi::{List, Nil, Cons};
+
+// ---------------------------------------------------------------------------
+// Lambda parameters
+// ---------------------------------------------------------------------------
+
+pub fn strip_spans_lambda_param(p: LambdaParam) -> LambdaParam {
+    let normalized: LambdaParam = {
+        pattern: strip_spans_pattern(p.pattern),
+        ty: strip_spans_maybe_type_expr(p.ty),
+        span: canonical_span()
+    };
+    normalized
+}
+
+pub fn strip_spans_lambda_param_list(ps: List<LambdaParam>) -> List<LambdaParam> {
+    match ps {
+        Nil() => Nil(),
+        Cons(p, rest) => Cons(strip_spans_lambda_param(p), strip_spans_lambda_param_list(rest))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Motives (`subst` / `natind`)
+// ---------------------------------------------------------------------------
+
+pub fn strip_spans_motive(m: Motive) -> Motive {
+    match m {
+        MotiveLambda(param, ty, _) =>
+            MotiveLambda(strip_spans_lambda_param(param), strip_spans_type_expr(ty), canonical_span()),
+        MotiveExpr(e) => MotiveExpr(strip_spans_expr(e))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Record literal fields
+// ---------------------------------------------------------------------------
+
+pub fn strip_spans_field_init(f: FieldInit) -> FieldInit {
+    let normalized: FieldInit = {
+        name: strip_spans_ident(f.name),
+        value: strip_spans_expr(f.value),
+        span: canonical_span()
+    };
+    normalized
+}
+
+pub fn strip_spans_field_init_list(fs: List<FieldInit>) -> List<FieldInit> {
+    match fs {
+        Nil() => Nil(),
+        Cons(f, rest) => Cons(strip_spans_field_init(f), strip_spans_field_init_list(rest))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Match arms
+// ---------------------------------------------------------------------------
+
+pub fn strip_spans_match_arm(a: MatchArm) -> MatchArm {
+    let normalized: MatchArm = {
+        pattern: strip_spans_pattern(a.pattern),
+        guard: strip_spans_maybe_expr(a.guard),
+        body: strip_spans_expr(a.body),
+        span: canonical_span()
+    };
+    normalized
+}
+
+pub fn strip_spans_match_arm_list(as_: List<MatchArm>) -> List<MatchArm> {
+    match as_ {
+        Nil() => Nil(),
+        Cons(a, rest) => Cons(strip_spans_match_arm(a), strip_spans_match_arm_list(rest))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Statements
+// ---------------------------------------------------------------------------
+
+pub fn strip_spans_stmt(s: Stmt) -> Stmt {
+    match s {
+        StmtLet(pat, ty, v, _) =>
+            StmtLet(strip_spans_pattern(pat), strip_spans_maybe_type_expr(ty),
+                    strip_spans_expr(v), canonical_span()),
+        StmtLetElse(pat, ty, v, diverge, _) =>
+            StmtLetElse(strip_spans_pattern(pat), strip_spans_maybe_type_expr(ty),
+                        strip_spans_expr(v), strip_spans_expr(diverge), canonical_span()),
+        StmtExpr(e, _) => StmtExpr(strip_spans_expr(e), canonical_span()),
+        StmtItem(item) => StmtItem(strip_spans_item(item))
+    }
+}
+
+pub fn strip_spans_stmt_list(ss: List<Stmt>) -> List<Stmt> {
+    match ss {
+        Nil() => Nil(),
+        Cons(s, rest) => Cons(strip_spans_stmt(s), strip_spans_stmt_list(rest))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `if let` chain conditions
+// ---------------------------------------------------------------------------
+
+pub fn strip_spans_if_let_condition(c: IfLetCondition) -> IfLetCondition {
+    match c {
+        IfLetBind(pat, e) => IfLetBind(strip_spans_pattern(pat), strip_spans_expr(e)),
+        IfLetGuard(e) => IfLetGuard(strip_spans_expr(e))
+    }
+}
+
+pub fn strip_spans_if_let_condition_list(cs: List<IfLetCondition>) -> List<IfLetCondition> {
+    match cs {
+        Nil() => Nil(),
+        Cons(c, rest) => Cons(strip_spans_if_let_condition(c), strip_spans_if_let_condition_list(rest))
+    }
+}

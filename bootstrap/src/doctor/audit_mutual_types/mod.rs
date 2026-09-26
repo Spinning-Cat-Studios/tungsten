@@ -11,12 +11,41 @@
 pub mod scc;
 pub mod type_graph;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+use tungsten_core::Type;
 
 use crate::driver;
 
 use type_graph::TypeGraph;
+
+/// The deterministic, dependency-respecting encode/resolution order shared by
+/// the elaborator's Deferred-TyVar Resolution (`resolve_deferred_type_references`) and Encoding Finalization
+/// (`cache_type_encodings`) and by `info type encode-order` (ADRs 22.7.26c/d).
+///
+/// Returns SCCs in reverse-topological order (referents before referrers),
+/// each SCC's members sorted lexicographically. Flatten for the linear pass
+/// order; keep grouped to see which types share a cycle (a multi-member SCC
+/// cannot be internally ordered by topology, so its members resolve in
+/// lexicographic order — the fact `info type encode-order` surfaces).
+///
+/// `edge_targets` restricts which referenced names create *edges*: pass the
+/// inline-relevant targets (ADTs + aliases) only. References to records are
+/// nominal and must not create edges, or they weld unrelated types into one
+/// order-defeating SCC (ADR 22.7.26d). Every `type_refs` key is still a node.
+///
+/// Keeping this the single kernel behind both the live elaborator and the
+/// diagnostic means the tool cannot report an order the compiler does not use.
+#[allow(clippy::implicit_hasher)] // Reason: callers all use the default hasher
+pub fn encode_order_sccs(
+    type_refs: &[(String, Vec<&Type>)],
+    edge_targets: &HashSet<String>,
+) -> Vec<Vec<String>> {
+    let graph = TypeGraph::build_for_resolution_order(type_refs, edge_targets);
+    scc::tarjan_scc(&graph)
+}
 
 /// Run the mutual type recursion audit command.
 pub fn cmd_audit_mutual_types(
@@ -35,7 +64,7 @@ pub fn cmd_audit_mutual_types(
     };
 
     // Build type dependency graph
-    let graph = TypeGraph::build(&project.adt_types);
+    let graph = TypeGraph::build_adt_only(&project.adt_types);
 
     if verbose {
         eprintln!(

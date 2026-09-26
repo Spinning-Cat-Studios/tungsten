@@ -1,0 +1,11 @@
+[E0011] Error: cannot infer type; add a type annotation
+   ╭─[tests/golden/error/docs_record_spread_needs_annotation.tg:6:13]
+   │
+ 6 │     let r = { ...p, x: 5 };
+   │             ───────┬──────  
+   │                    ╰──────── type cannot be inferred
+   │ 
+   │ Help: add type annotation: `{ x: 1, y: 2 } : Point`
+───╯
+
+error: aborting due to 1 error

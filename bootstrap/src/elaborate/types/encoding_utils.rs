@@ -13,7 +13,7 @@ impl<'a> Elaborator<'a> {
     /// An ADT is recursive if:
     /// 1. Any constructor field directly references the ADT by name, OR
     /// 2. The ADT is a member of a mutual recursion group (detected by SCC
-    ///    in Phase 1c.5). Mutual recursion means the type participates in a
+    ///    in Recursion Grouping). Mutual recursion means the type participates in a
     ///    cycle through other types (e.g., MaybeTypeExpr → TypeExpr → ... →
     ///    MaybeTypeExpr). Such types require fold/unfold for their Mu encoding.
     pub(crate) fn adt_is_recursive(&self, name: &str, constructors: &[Constructor]) -> bool {
@@ -70,36 +70,27 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Check if a type references a named type.
+    ///
+    /// Non-uniform arms: the `TyVar` leaf and the `App`/`Adt` head names
+    /// (a name match short-circuits; a miss falls through to the children).
+    /// Every other variant delegates to [`Type::children`] (ADR 23.7.26b).
     pub(crate) fn type_references_name(&self, ty: &Type, name: &str) -> bool {
         match ty {
-            Type::Nat
-            | Type::Bool
-            | Type::Unit
-            | Type::Void
-            | Type::Prop
-            | Type::String
-            | Type::Error => false,
             Type::TyVar(v) => v == name,
-            Type::Arrow(a, b) | Type::Product(a, b) | Type::Sum(a, b) => {
-                self.type_references_name(a, name) || self.type_references_name(b, name)
-            }
-            Type::Forall(_, body) | Type::Mu(_, body) => self.type_references_name(body, name),
-            Type::Eq(ty_arg, _, _) => self.type_references_name(ty_arg, name),
-            Type::Ptr(inner) | Type::Ref(inner) => self.type_references_name(inner, name),
-            Type::App(base_name, args) => {
-                base_name == name || args.iter().any(|a| self.type_references_name(a, name))
-            }
-            Type::Adt(adt_name, type_args, variants) => {
-                adt_name == name
-                    || type_args.iter().any(|a| self.type_references_name(a, name))
-                    || variants
-                        .iter()
-                        .any(|(_, vty)| self.type_references_name(vty, name))
-            }
+            Type::App(head_name, _) if head_name == name => true,
+            Type::Adt(adt_name, _, _) if adt_name == name => true,
+            _ => ty
+                .children()
+                .iter()
+                .any(|child| self.type_references_name(child, name)),
         }
     }
 
     /// Check if two types are equal, using normalization and α-equivalence.
+    ///
+    /// Deliberately NOT on the `children`/`map_children` discipline
+    /// (ADR 23.7.26b): the underlying `types_equal_alpha` walks *two* types
+    /// in lockstep, not a single tree.
     pub(crate) fn types_equal(&self, a: &Type, b: &Type) -> bool {
         let a_norm = self.normalize_for_comparison(a);
         let b_norm = self.normalize_for_comparison(b);
@@ -111,6 +102,19 @@ impl<'a> Elaborator<'a> {
     /// Normalizes both sides using `tungsten_core::eval::eval` and compares
     /// structurally. This is scoped to the existing normalizer's capabilities —
     /// no new reduction rules or proof search.
+    ///
+    /// **This is the whole δ story, and it is "no δ" (ADR 11.8.26b §1.2).**
+    /// `tungsten_core::eval::eval` is the *environment-free* evaluator, in which
+    /// `Term::Global` is Stuck — so conversion unfolds no constant at all, and a
+    /// `#[partial]` one is opaque here for the same reason a certified one is.
+    /// 29.6.26e's invariant "the kernel does not unfold a tainted constant during
+    /// conversion" therefore already holds, and an `is_delta_reducible` check at
+    /// the δ step would guard a step that never happens. Do **not** answer that
+    /// by moving the check to `EvalEnv::lookup` instead: that evaluator is
+    /// `run`/`test` execution, where partial constants are legitimate — 1043 of
+    /// the self-hosted compiler's 2107 definitions are tainted, and refusing to
+    /// unfold them would stop the compiler running. If δ-reduction is ever added
+    /// here, the admission check belongs beside it.
     pub(crate) fn terms_definitionally_equal(
         &self,
         t1: &tungsten_core::Term,
@@ -122,39 +126,114 @@ impl<'a> Elaborator<'a> {
         n1 == n2
     }
 
-    /// Encode ADT constructors to a sum type (for normalization/comparison).
+    /// Encode ADT constructors to the canonical comparison shape (for
+    /// normalization/pattern matching), without type-parameter substitution.
     ///
-    /// Creates the right-nested sum encoding: A + (B + (C + D))
-    /// without type parameter substitution.
-    pub(crate) fn encode_adt_constructors_to_sum(&self, constructors: &[Constructor]) -> Type {
-        if constructors.is_empty() {
-            return Type::Void;
-        }
-        if constructors.len() == 1 {
-            return self.encode_constructor_payload_simple(&constructors[0]);
-        }
-        let mut iter = constructors.iter().rev();
-        let mut result = self.encode_constructor_payload_simple(iter.next().unwrap());
-        for ctor in iter {
-            let payload = self.encode_constructor_payload_simple(ctor);
-            result = Type::sum(payload, result);
-        }
-        result
+    /// Uses the SAME builders as the canonical stored encoder (ADR 21.7.26e
+    /// wall 1): left-nested field products via `ctor_fields_product`, and the
+    /// ADR 2.2.26 sum policy via `build_adt_sum_body` (2 ctors → `Sum`,
+    /// 3+ → `Adt`). This was the third parallel encoder copy — its
+    /// right-nested products silently failed `types_pattern_match` for
+    /// ≥3-field constructors, and its right-nested `Sum` chains could
+    /// false-match a 3+-constructor ADT against a nested sum type argument.
+    pub(crate) fn encode_adt_constructors_to_sum(
+        &self,
+        adt_name: &str,
+        params: &[String],
+        constructors: &[Constructor],
+    ) -> Type {
+        let constructor_types: Vec<Type> = constructors
+            .iter()
+            .map(|ctor| super::encoding::ctor_fields_product(ctor.fields.clone()))
+            .collect();
+        let param_args: Vec<Type> = params
+            .iter()
+            .map(|param| Type::TyVar(param.clone()))
+            .collect();
+        super::encoding::build_adt_sum_body(constructor_types, constructors, adt_name, &param_args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tungsten_core::{Context, Type};
+
+    fn references(ty: &Type, name: &str) -> bool {
+        let mut ctx = Context::new();
+        let elab = crate::elaborate::Elaborator::new(&mut ctx);
+        elab.type_references_name(ty, name)
     }
 
-    /// Encode a single constructor's payload type (simple, no substitution).
-    fn encode_constructor_payload_simple(&self, ctor: &Constructor) -> Type {
-        if ctor.fields.is_empty() {
-            Type::Unit
-        } else if ctor.fields.len() == 1 {
-            ctor.fields[0].clone()
-        } else {
-            let mut iter = ctor.fields.iter().rev();
-            let mut result = iter.next().unwrap().clone();
-            for t in iter {
-                result = Type::product(t.clone(), result);
-            }
-            result
-        }
+    #[test]
+    fn tyvar_leaf_matches_name() {
+        assert!(references(&Type::TyVar("List".into()), "List"));
+        assert!(!references(&Type::TyVar("Tree".into()), "List"));
+    }
+
+    #[test]
+    fn app_head_matches_name() {
+        let ty = Type::app("List", vec![Type::Nat]);
+        assert!(references(&ty, "List"));
+    }
+
+    #[test]
+    fn app_arg_matches_via_children() {
+        // Head misses, but an arg references the name — found through the
+        // children() structural default (ADR 23.7.26b).
+        let ty = Type::app("Option", vec![Type::TyVar("List".into())]);
+        assert!(references(&ty, "List"));
+        assert!(!references(&ty, "Tree"));
+    }
+
+    #[test]
+    fn adt_name_and_variant_payload_match() {
+        let ty = Type::adt("Foo", vec![], vec![("V".into(), Type::TyVar("Bar".into()))]);
+        assert!(references(&ty, "Foo"));
+        assert!(references(&ty, "Bar"));
+        assert!(!references(&ty, "Baz"));
+    }
+
+    /// ADR 11.8.26b §1.2: conversion is δ-opaque, so admission has nothing to
+    /// gate there.
+    ///
+    /// Asserted in both polarities on purpose. The `false` case is the invariant
+    /// (a global does not reduce to its body); the `true` case is what stops the
+    /// test passing vacuously — if `terms_definitionally_equal` answered `false`
+    /// for everything, the first assertion alone would still look like proof.
+    #[test]
+    fn conversion_does_not_unfold_a_global() {
+        use tungsten_core::{Context, Term};
+
+        let mut ctx = Context::new();
+        let elab = crate::elaborate::Elaborator::new(&mut ctx);
+        let global = Term::Global("two".to_string());
+        let body = Term::NatLit(2);
+
+        assert!(
+            !elab.terms_definitionally_equal(&global, &body, &Type::Nat),
+            "a global must stay Stuck through conversion, never δ-reduce to its body"
+        );
+        assert!(
+            elab.terms_definitionally_equal(&global, &global.clone(), &Type::Nat),
+            "the same global is still definitionally equal to itself"
+        );
+        let beta_redex = Term::app(
+            Term::lambda("x", Type::Nat, Term::var("x")),
+            Term::NatLit(2),
+        );
+        assert!(
+            elab.terms_definitionally_equal(&beta_redex, &Term::NatLit(2), &Type::Nat),
+            "reduction that does not need a global still happens — it is δ that is absent, not evaluation"
+        );
+    }
+
+    #[test]
+    fn structural_recursion_through_compound_types() {
+        let ty = Type::arrow(
+            Type::Nat,
+            Type::mu("α_L", Type::product(Type::TyVar("List".into()), Type::Unit)),
+        );
+        assert!(references(&ty, "List"));
+        assert!(!references(&ty, "Tree"));
     }
 }

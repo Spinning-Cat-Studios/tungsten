@@ -1,0 +1,18 @@
+// src/compiler/lexer/scanner/chars/literal_markers.tg
+// The codes that open, close or annotate a literal: the two quote characters,
+// the escape introducer, and the letters that carry meaning only inside a
+// literal — radix prefixes (`0x`, `0o`, `0b`, in either case), the `u` of a
+// unicode escape, and the 'f'/'F' that bound the hexadecimal digit range.
+
+pub fn char_double_quote() -> Nat { 34 }
+pub fn char_single_quote() -> Nat { 39 }
+pub fn char_backslash() -> Nat { 92 }
+pub fn char_x() -> Nat { 120 }
+pub fn char_X() -> Nat { 88 }
+pub fn char_o() -> Nat { 111 }
+pub fn char_O() -> Nat { 79 }
+pub fn char_b() -> Nat { 98 }
+pub fn char_B() -> Nat { 66 }
+pub fn char_f() -> Nat { 102 }
+pub fn char_F() -> Nat { 70 }
+pub fn char_u() -> Nat { 117 }

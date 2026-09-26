@@ -1,8 +1,8 @@
-warning: Phase A.5 global collection failed with 1 error; cross-module imports may not resolve.
+warning: Signature Collection global collection failed with 1 error; cross-module imports may not resolve.
   first error: error[E0007]: the name `Foo` is imported multiple times (at 99..102)
   note: first imported here (at 83..86)
   help: use `as` to rename one import: `use mymod::Foo as foo_alias;`
-  hint: run `tungsten doctor check phase-a5 <file>` for details
+  hint: run `tungsten doctor check module signature-collection <file>` for details
 [E0007] Error: the name `Foo` is imported multiple times
    ╭─[tests/golden/error/import_duplicate/main.tg:6:12]
    │

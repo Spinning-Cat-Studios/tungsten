@@ -1,0 +1,100 @@
+// src/compiler/driver/pipeline/test/harness/runner.tg
+// The parts of the harness both modes share: `main`, and the per-test runner
+// chain (ADR 7.8.26b §2.1).
+//
+// Tree mode and standalone mode differ in exactly four call forms — how to
+// begin a test, how to read the failure flag, how to render a Nat, and how to
+// exit. Everything else about the generated harness is identical, so the
+// difference is a record of four strings rather than two copies of a template.
+// A second copy is how the `"many"` cap survived in one mode after being fixed
+// in the other.
+//
+// These functions are `pub` because they are the ADR's unit-test surface: they
+// bottom out in `++` (a native term) and literals, so no extern is reachable
+// and the Stuck class cannot arise. `generate_harness_source` itself is NOT
+// testable that way — see `harness/mod.tg`.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{nat_to_string};
+
+/// The four call forms that distinguish the two modes.
+///
+/// `exit_fn` is a *statement* in the template, not a value, precisely because
+/// the two differ: tree mode's `process_exit` returns `Never` (a real
+/// one-constructor ADT, not bottom, so it does not coerce to `Nat`) while
+/// standalone's `tg_exit` is declared `-> Unit`. Exit-then-return-the-code is
+/// the shape that types under both, and it is the idiom `src/compiler/main.tg`
+/// already uses.
+pub type HarnessCalls = {
+    test_begin: String,
+    test_check_failure: String,
+    nat_to_string: String,
+    exit_fn: String
+}
+
+/// The generated `main`.
+///
+/// The failure count is rendered through `calls.nat_to_string` — the real
+/// `nat_to_string` in tree mode, a digit loop in standalone. Neither caps at 9,
+/// which is what kills the old `_harness_nat_to_string`'s `"many"` (§1.3) in
+/// BOTH modes rather than only in the one that was looked at.
+pub fn generate_harness_main(calls: HarnessCalls, test_count: Nat) -> String {
+    let count = nat_to_string(test_count);
+    "pub fn main() -> Nat {\n" ++
+    "    _harness_println(\"running " ++ count ++ " tests\");\n" ++
+    "    let failed = _harness_run_tests(0);\n" ++
+    "    let code = if failed == 0 {\n" ++
+    "        _harness_println(\"test result: ok. " ++ count ++ " passed\");\n" ++
+    "        0\n" ++
+    "    } else {\n" ++
+    "        _harness_println(\"test result: FAILED. \" ++ " ++
+             calls.nat_to_string ++ "(failed) ++ \" failed\");\n" ++
+    "        1\n" ++
+    "    };\n" ++
+    "    " ++ calls.exit_fn ++ "(code);\n" ++
+    "    code\n" ++
+    "}\n"
+}
+
+/// The chain of one-test-per-link runner functions, plus its terminal link.
+///
+/// The user's test is called UNQUALIFIED in both modes — it is spliced in at
+/// root, so it is a root name — while everything the harness reaches into the
+/// compiler for is qualified. That asymmetry is the whole of tree mode.
+pub fn generate_runner_chain(calls: HarnessCalls, names: List<String>, index: Nat) -> String {
+    match names {
+        Nil() => generate_terminal_runner(index),
+        Cons(name, rest) =>
+            generate_test_runner_fn(calls, name, index) ++ "\n" ++
+            generate_runner_chain(calls, rest, index + 1)
+    }
+}
+
+/// The entry point plus the base case, which returns the accumulated count.
+pub fn generate_terminal_runner(index: Nat) -> String {
+    let last = nat_to_string(index);
+    "fn _harness_run_tests(failed: Nat) -> Nat {\n" ++
+    "    _harness_run_test_0(failed)\n" ++
+    "}\n\n" ++
+    "fn _harness_run_test_" ++ last ++ "(failed: Nat) -> Nat {\n" ++
+    "    failed\n" ++
+    "}\n"
+}
+
+/// One link: begin the test, run it, consult the failure flag, tail into the
+/// next link carrying the running count.
+pub fn generate_test_runner_fn(calls: HarnessCalls, name: String, index: Nat) -> String {
+    let this_index = nat_to_string(index);
+    let next_index = nat_to_string(index + 1);
+    "fn _harness_run_test_" ++ this_index ++ "(failed: Nat) -> Nat {\n" ++
+    "    " ++ calls.test_begin ++ "(\"" ++ name ++ "\");\n" ++
+    "    " ++ name ++ "();\n" ++
+    "    if " ++ calls.test_check_failure ++ "() == 1 {\n" ++
+    "        _harness_println(\"  " ++ name ++ " ... FAILED\");\n" ++
+    "        _harness_run_test_" ++ next_index ++ "(failed + 1)\n" ++
+    "    } else {\n" ++
+    "        _harness_println(\"  " ++ name ++ " ... ok\");\n" ++
+    "        _harness_run_test_" ++ next_index ++ "(failed)\n" ++
+    "    }\n" ++
+    "}\n"
+}

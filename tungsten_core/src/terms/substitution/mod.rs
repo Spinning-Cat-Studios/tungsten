@@ -26,6 +26,7 @@ impl Term {
             | Term::Unit
             | Term::Zero
             | Term::NatLit(_)
+            | Term::IntLit(_)
             | Term::Sorry => self.clone(),
 
             // Binding forms with single binder + type + body
@@ -98,6 +99,7 @@ impl Term {
             | Term::Unit
             | Term::Zero
             | Term::NatLit(_)
+            | Term::IntLit(_)
             | Term::Sorry => self.clone(),
 
             Term::Lambda(x, ty, body) => Term::Lambda(

@@ -2,8 +2,13 @@
 //!
 //! Functions for analyzing term structure: free variables, type variables, and value checking.
 
+pub mod shape;
+mod sorry_sites;
 mod spans;
 mod use_count;
+
+pub use shape::{former_of, Eliminator, Former, ShapeMismatch};
+pub use sorry_sites::{Construct, SorryCounts, SorrySite};
 
 use std::collections::HashSet;
 
@@ -50,6 +55,7 @@ impl Term {
             | Term::Unit
             | Term::Zero
             | Term::NatLit(_)
+            | Term::IntLit(_)
             | Term::Sorry
             | Term::StringLit(_) => HashSet::new(),
 
@@ -79,6 +85,9 @@ impl Term {
             | Term::Refl(_, t)
             | Term::Annot(t, _)
             | Term::StrLen(t)
+            | Term::IntNeg(t)
+            | Term::NatToInt(t)
+            | Term::IntToNat(t)
             | Term::Fold(_, t)
             | Term::Unfold(_, t)
             | Term::BoolNot(t)
@@ -92,6 +101,7 @@ impl Term {
             | Term::Pair(t1, t2)
             | Term::StrConcat(t1, t2)
             | Term::StrEq(t1, t2)
+            | Term::IntBin(_, t1, t2)
             | Term::NatAdd(t1, t2)
             | Term::NatSub(t1, t2)
             | Term::NatMul(t1, t2)
@@ -157,6 +167,7 @@ impl Term {
             | Term::Unit
             | Term::Zero
             | Term::NatLit(_)
+            | Term::IntLit(_)
             | Term::Sorry
             | Term::StringLit(_) => HashSet::new(),
 
@@ -179,6 +190,9 @@ impl Term {
             | Term::Fst(t)
             | Term::Snd(t)
             | Term::StrLen(t)
+            | Term::IntNeg(t)
+            | Term::NatToInt(t)
+            | Term::IntToNat(t)
             | Term::BoolNot(t)
             | Term::RefNew(t)
             | Term::RefGet(t)
@@ -190,6 +204,7 @@ impl Term {
             | Term::Pair(t1, t2)
             | Term::StrConcat(t1, t2)
             | Term::StrEq(t1, t2)
+            | Term::IntBin(_, t1, t2)
             | Term::NatAdd(t1, t2)
             | Term::NatSub(t1, t2)
             | Term::NatMul(t1, t2)
@@ -246,7 +261,7 @@ impl Term {
         match self {
             Term::Lambda(_, _, _) => true,
             Term::True | Term::False => true,
-            Term::Zero | Term::NatLit(_) => true,
+            Term::Zero | Term::NatLit(_) | Term::IntLit(_) => true,
             Term::Succ(t) => t.is_value(),
             Term::Unit => true,
             Term::Pair(t1, t2) => t1.is_value() && t2.is_value(),

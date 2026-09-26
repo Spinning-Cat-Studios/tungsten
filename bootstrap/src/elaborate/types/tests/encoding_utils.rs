@@ -48,7 +48,7 @@ fn test_no_self_reference_not_recursive() {
 fn test_mutual_recursion_group_detected() {
     let mut elab = make_elaborator();
 
-    // Simulate Phase 1c.5: MaybeTypeExpr is in a mutual recursion group
+    // Simulate Recursion Grouping: MaybeTypeExpr is in a mutual recursion group
     // with TypeExpr (even though its constructors don't self-reference).
     let group = vec!["MaybeTypeExpr".to_string(), "TypeExpr".to_string()];
     elab.mutual_recursion_groups
@@ -135,9 +135,9 @@ fn test_consistency_lint_agrees_across_calls() {
         Constructor::test_stub("LeafB", 1),
     ];
 
-    // Full constructors — simulates encoding.rs (Phase 1e) call
+    // Full constructors — simulates encoding.rs (Encoding Finalization) call
     assert!(elab.adt_is_recursive("A", &ctors_a));
-    // Full constructors — simulates normalize/adt.rs (Phase 1e) call
+    // Full constructors — simulates normalize/adt.rs (Encoding Finalization) call
     assert!(elab.adt_is_recursive("B", &ctors_b));
 
     // Subset of constructors — simulates patterns/wrapping.rs (Phase 2) call

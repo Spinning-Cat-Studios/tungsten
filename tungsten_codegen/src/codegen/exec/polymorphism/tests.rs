@@ -245,7 +245,7 @@ fn test_extract_poly_body_returns_parts_for_poly() {
 }
 
 /// Compound type containing @-prefixed TyVar should NOT be considered
-/// mono-blocking — @Token is a Phase 1c reference to a concrete record type.
+/// mono-blocking — @Token is a Type-Body Collection reference to a concrete record type.
 #[test]
 fn test_has_mono_blocking_tyvar_compound_at_prefix() {
     let context = Context::create();

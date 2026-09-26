@@ -2,10 +2,29 @@
 //!
 //! These wrap binary and unary operations on Nat, Bool, and String
 //! values into Term constructors accessible from C.
+//!
+//! All constructors are O(1) node pushes (ADR 2.7.26a §4). The repeated
+//! binary shape shares one helper.
 
-use crate::terms::Term;
-
+use super::nodes::TermNode;
+use super::{valid_terms, valid_types};
 use crate::ffi::{with_arena, TermHandle, TypeHandle, INVALID_HANDLE};
+use crate::terms::IntBinOp;
+
+/// Shared O(1) binary-operation constructor.
+fn binary_term(
+    a: TermHandle,
+    b: TermHandle,
+    make: fn(TermHandle, TermHandle) -> TermNode,
+) -> TermHandle {
+    with_arena!(|arena| {
+        if !valid_terms(arena, &[a, b]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(make(a, b))
+    })
+}
+
 // ============================================================================
 // Arithmetic Term Constructors (Phase 3C)
 // ============================================================================
@@ -13,161 +32,61 @@ use crate::ffi::{with_arena, TermHandle, TypeHandle, INVALID_HANDLE};
 /// Construct natural addition: a + b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_add(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatAdd(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatAdd)
 }
 
 /// Construct natural subtraction: a - b (saturating at 0)
 #[no_mangle]
 pub extern "C" fn tg_term_nat_sub(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatSub(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatSub)
 }
 
 /// Construct natural multiplication: a * b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_mul(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatMul(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatMul)
 }
 
 /// Construct natural division: a / b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_div(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatDiv(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatDiv)
 }
 
 /// Construct natural modulo: a % b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_mod(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatMod(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatMod)
 }
 
 /// Construct natural equality: a == b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_eq(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatEq(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatEq)
 }
 
 /// Construct natural less-than: a < b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_lt(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatLt(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatLt)
 }
 
 /// Construct natural less-than-or-equal: a <= b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_le(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatLe(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatLe)
 }
 
 /// Construct natural greater-than: a > b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_gt(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatGt(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatGt)
 }
 
 /// Construct natural greater-than-or-equal: a >= b
 #[no_mangle]
 pub extern "C" fn tg_term_nat_ge(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::NatGe(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::NatGe)
 }
 
 // ============================================================================
@@ -177,94 +96,27 @@ pub extern "C" fn tg_term_nat_ge(a: TermHandle, b: TermHandle) -> TermHandle {
 /// Construct boolean AND: a && b
 #[no_mangle]
 pub extern "C" fn tg_term_bool_and(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::BoolAnd(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::BoolAnd)
 }
 
 /// Construct boolean OR: a || b
 #[no_mangle]
 pub extern "C" fn tg_term_bool_or(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::BoolOr(Box::new(a), Box::new(b)))
-    })
+    binary_term(a, b, TermNode::BoolOr)
 }
 
 /// Construct boolean NOT: !a
 #[no_mangle]
 pub extern "C" fn tg_term_bool_not(a: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::BoolNot(Box::new(a)))
+        if !valid_terms(arena, &[a]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::BoolNot(a))
     })
 }
 
-// ============================================================================
-// String Term Constructors (Phase 3C)
-// ============================================================================
-
-/// Construct string concatenation: a ++ b
-#[no_mangle]
-pub extern "C" fn tg_term_str_concat(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::StrConcat(Box::new(a), Box::new(b)))
-    })
-}
-
-/// Construct string equality: a == b
-#[no_mangle]
-pub extern "C" fn tg_term_str_eq(a: TermHandle, b: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let a = match arena.get_term(a) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let b = match arena.get_term(b) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::StrEq(Box::new(a), Box::new(b)))
-    })
-}
-
-/// Construct string length: strlen s
-#[no_mangle]
-pub extern "C" fn tg_term_str_len(s: TermHandle) -> TermHandle {
-    with_arena!(|arena| {
-        let s = match arena.get_term(s) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::StrLen(Box::new(s)))
-    })
-}
+// String term constructors live in the `strings` sibling (ADR 20.8.26c).
 
 /// Construct reflexivity proof: refl [τ] t
 ///
@@ -273,15 +125,10 @@ pub extern "C" fn tg_term_str_len(s: TermHandle) -> TermHandle {
 #[no_mangle]
 pub extern "C" fn tg_term_refl(ty: TypeHandle, t: TermHandle) -> TermHandle {
     with_arena!(|arena| {
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t = match arena.get_term(t) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::refl(ty, t))
+        if !valid_types(arena, &[ty]) || !valid_terms(arena, &[t]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Refl(ty, t))
     })
 }
 
@@ -296,23 +143,10 @@ pub extern "C" fn tg_term_subst(
     witness: TermHandle,
 ) -> TermHandle {
     with_arena!(|arena| {
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let motive = match arena.get_type(motive) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let eq = match arena.get_term(eq_proof) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let witness = match arena.get_term(witness) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::subst(ty, motive, eq, witness))
+        if !valid_types(arena, &[ty, motive]) || !valid_terms(arena, &[eq_proof, witness]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::Subst(ty, motive, eq_proof, witness))
     })
 }
 
@@ -325,23 +159,64 @@ pub extern "C" fn tg_term_natind(
     n: TermHandle,
 ) -> TermHandle {
     with_arena!(|arena| {
-        let motive = match arena.get_type(motive) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let base = match arena.get_term(base) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let step = match arena.get_term(step) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let n = match arena.get_term(n) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::natind(motive, base, step, n))
+        if !valid_types(arena, &[motive]) || !valid_terms(arena, &[base, step, n]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::NatInd(motive, base, step, n))
+    })
+}
+
+// ============================================================================
+// Signed Integer Term Constructors (ADR 14.9.26c)
+// ============================================================================
+
+/// Construct a signed integer literal.
+#[no_mangle]
+pub extern "C" fn tg_term_int_lit(value: i64) -> TermHandle {
+    with_arena!(|arena| arena.alloc_term_node(TermNode::IntLit(value)))
+}
+
+/// Construct a signed binary operation. `op` is [`IntBinOp::code`]
+/// (0 = `+`, 1 = `-`, 2 = `*`, 3 = `/`, 4 = `%`, 5 = `==`, 6 = `<`, 7 = `<=`,
+/// 8 = `>`, 9 = `>=`); any other code is `INVALID_HANDLE`.
+#[no_mangle]
+pub extern "C" fn tg_term_int_bin(op: u64, a: TermHandle, b: TermHandle) -> TermHandle {
+    let Some(op) = IntBinOp::from_code(op) else {
+        return INVALID_HANDLE;
+    };
+    with_arena!(|arena| {
+        if !valid_terms(arena, &[a, b]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::IntBin(op, a, b))
+    })
+}
+
+/// Construct signed negation: −a
+#[no_mangle]
+pub extern "C" fn tg_term_int_neg(a: TermHandle) -> TermHandle {
+    unary_term(a, TermNode::IntNeg)
+}
+
+/// Construct the `Nat → Int` bridge: `to_int(n)`
+#[no_mangle]
+pub extern "C" fn tg_term_nat_to_int(n: TermHandle) -> TermHandle {
+    unary_term(n, TermNode::NatToInt)
+}
+
+/// Construct the `Int → Nat` bridge: `from_int(i)`
+#[no_mangle]
+pub extern "C" fn tg_term_int_to_nat(i: TermHandle) -> TermHandle {
+    unary_term(i, TermNode::IntToNat)
+}
+
+/// Shared O(1) unary-operation constructor.
+fn unary_term(a: TermHandle, make: fn(TermHandle) -> TermNode) -> TermHandle {
+    with_arena!(|arena| {
+        if !valid_terms(arena, &[a]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(make(a))
     })
 }
 
@@ -354,22 +229,9 @@ pub extern "C" fn tg_term_natrec(
     n: TermHandle,
 ) -> TermHandle {
     with_arena!(|arena| {
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let base = match arena.get_term(base) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let step = match arena.get_term(step) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let n = match arena.get_term(n) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_term(Term::natrec(ty, base, step, n))
+        if !valid_types(arena, &[ty]) || !valid_terms(arena, &[base, step, n]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_term_node(TermNode::NatRec(ty, base, step, n))
     })
 }

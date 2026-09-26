@@ -1,7 +1,7 @@
 // src/compiler/parser/ast/nodes/types.tg
 // Type expression AST node types.
 // Note: TypeExpr has mutual recursion with Expr (via TyEq). The three-phase
-// elaboration pipeline (Phase A stubs + Phase A.5 combined SCC) handles this
+// elaboration pipeline (Stub Registration stubs + Signature Collection combined SCC) handles this
 // across file boundaries.
 
 use lexer::span::Span;

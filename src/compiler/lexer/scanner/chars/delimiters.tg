@@ -1,0 +1,16 @@
+// src/compiler/lexer/scanner/chars/delimiters.tg
+// The bracketing and separator codes: characters that open, close or divide a
+// syntactic group rather than combine operands.
+
+pub fn char_lparen() -> Nat { 40 }
+pub fn char_rparen() -> Nat { 41 }
+pub fn char_lbrace() -> Nat { 123 }
+pub fn char_rbrace() -> Nat { 125 }
+pub fn char_lbracket() -> Nat { 91 }
+pub fn char_rbracket() -> Nat { 93 }
+pub fn char_langle() -> Nat { 60 }
+pub fn char_rangle() -> Nat { 62 }
+pub fn char_comma() -> Nat { 44 }
+pub fn char_semicolon() -> Nat { 59 }
+pub fn char_colon() -> Nat { 58 }
+pub fn char_dot() -> Nat { 46 }

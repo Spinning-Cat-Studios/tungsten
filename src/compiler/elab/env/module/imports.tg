@@ -1,0 +1,103 @@
+// src/compiler/elab/env/module/imports.tg
+// Import entries and the by-`local_name` import store (ADR 5.8.26b).
+
+use lexer::span::Span;
+use parser::ast::Visibility;
+use parser::option::{Option, Some, None};
+use driver::ffi::{List, Nil, Cons};
+use elab::env::module::path::{ElabModulePath};
+use elab::env::strmap::{StrMap, StrMapLeaf, strmap_lookup, strmap_insert};
+
+// ===========================================================================
+// IMPORT
+// ===========================================================================
+
+/// An import entry with span tracking for error reporting.
+pub type Import = {
+    source_path: ElabModulePath,  // Where the item comes from
+    source_name: String,      // Original name
+    local_name: String,       // Name in current scope (may differ due to `as`)
+    visibility: Visibility,   // Re-export visibility
+    import_span: Span         // Span of the import declaration (for error reporting)
+}
+
+/// Create a new import.
+pub fn import_new(
+    source_path: ElabModulePath,
+    source_name: String,
+    local_name: String,
+    visibility: Visibility,
+    import_span: Span
+) -> Import {
+    { source_path: source_path, source_name: source_name, local_name: local_name, visibility: visibility, import_span: import_span }
+}
+
+/// Optional import result.
+pub type MaybeImport =
+    | NoImport
+    | SomeImport(Import)
+
+// ===========================================================================
+// IMPORT STORE (list + by-local_name index)
+// ===========================================================================
+
+/// A module's imports: the authoritative insertion-ordered list (newest first)
+/// paired with an index over it keyed on `local_name` (ADR 5.8.26b).
+///
+/// This is the `CtorStore` shape from ADR 21.7.26c applied to the other
+/// quadratic registration scan. The list stays the source of truth for
+/// iteration and for the re-export resolution walks in `env/resolve.tg`; the
+/// index serves only keyed lookup, which was **56.98%** of the self-compiled
+/// check before it existed.
+///
+/// Invariant: `by_local_name` maps each `local_name` present in `all` to the
+/// *front-most* entry carrying it. `import_store_add` is the only writer, so
+/// the two cannot drift.
+pub type ImportStore = {
+    all: List<Import>,
+    by_local_name: StrMap<Import>
+}
+
+/// An empty import store.
+pub fn import_store_empty() -> ImportStore {
+    { all: Nil(), by_local_name: StrMapLeaf }
+}
+
+/// Add an import: prepend to the list, overwrite in the index.
+///
+/// The two agree by construction — a front-first list scan returns the most
+/// recently added entry for a `local_name`, and `strmap_insert` is
+/// last-write-wins — so the index is equivalent to the former linear
+/// `import_list_lookup` scan whether or not two imports ever share a
+/// `local_name`. It does **not** rest on the dedup guard in
+/// `elab/items/imports/dedup.tg` that currently makes such a pair unreachable.
+pub fn import_store_add(store: ImportStore, imp: Import) -> ImportStore {
+    {
+        all: Cons(imp, store.all),
+        by_local_name: strmap_insert(store.by_local_name, imp.local_name, imp)
+    }
+}
+
+/// Look up an import by local name — O(log n) through the index.
+pub fn import_store_lookup(store: ImportStore, name: String) -> MaybeImport {
+    match strmap_lookup(store.by_local_name, name) {
+        None() => NoImport,
+        Some(imp) => SomeImport(imp)
+    }
+}
+
+/// The linear cons scan the index replaced. Retained as the executable
+/// reference semantics for `import_store_lookup`: `test_import_store.tg`
+/// asserts the two agree, including on the duplicate `local_name` the dedup
+/// guard makes unreachable in production.
+pub fn import_list_lookup(imports: List<Import>, name: String) -> MaybeImport {
+    match imports {
+        Nil() => NoImport,
+        Cons(imp, rest) =>
+            if imp.local_name == name {
+                SomeImport(imp)
+            } else {
+                import_list_lookup(rest, name)
+            }
+    }
+}

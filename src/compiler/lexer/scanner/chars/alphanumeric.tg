@@ -1,0 +1,11 @@
+// src/compiler/lexer/scanner/chars/alphanumeric.tg
+// The range endpoints identifier and decimal-digit classification tests
+// against: '0'/'9', 'A'/'Z', 'a'/'z' and the underscore that joins them.
+
+pub fn char_0() -> Nat { 48 }
+pub fn char_9() -> Nat { 57 }
+pub fn char_A() -> Nat { 65 }
+pub fn char_Z() -> Nat { 90 }
+pub fn char_a() -> Nat { 97 }
+pub fn char_z() -> Nat { 122 }
+pub fn char_underscore() -> Nat { 95 }

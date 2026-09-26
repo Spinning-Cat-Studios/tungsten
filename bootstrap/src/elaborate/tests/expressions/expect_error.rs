@@ -9,7 +9,7 @@ use crate::elaborate::ElabMode;
 
 #[test]
 fn test_expect_error_undefined_variable() {
-    // E0001 = UndefinedVariable in L1
+    // E0001 = UndefinedVariable in the bootstrap
     let result = elab_with_mode(
         r#"
         fn test() -> Unit {
@@ -28,7 +28,7 @@ fn test_expect_error_undefined_variable() {
 
 #[test]
 fn test_expect_error_type_mismatch() {
-    // E0010 = TypeMismatch in L1
+    // E0010 = TypeMismatch in the bootstrap
     let result = elab_with_mode(
         r#"
         fn test() -> Unit {

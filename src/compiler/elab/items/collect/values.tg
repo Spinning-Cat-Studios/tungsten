@@ -1,4 +1,4 @@
-// Phase 2: Value signature collection.
+// Value Collection: value signature collection.
 //
 // Collects function, theorem, axiom, and extern signatures.
 // All types are fully elaborated at this point, so signatures
@@ -38,19 +38,19 @@ use elab::error::elab_error_simple;
 use elab::items::collect::types::helpers::{push_type_params, pop_type_params};
 
 // ===========================================================================
-// PHASE 2: COLLECT VALUE SIGNATURES
+// VALUE COLLECTION: COLLECT VALUE SIGNATURES
 // ===========================================================================
 
 /// Collect function, theorem, and extern signatures.
 /// All types are now fully elaborated, so signatures can reference any type.
-pub fn collect_phase_2(ctx: ElabContext, items: List<Item>) -> ElabContext {
+pub fn collect_values(ctx: ElabContext, items: List<Item>) -> ElabContext {
     match items {
         Nil() => {
             ctx
         },
         Cons(item, rest) => {
             let ctx2 = collect_value_signature(ctx, item);
-            collect_phase_2(ctx2, rest)
+            collect_values(ctx2, rest)
         }
     }
 }
@@ -134,6 +134,8 @@ pub fn build_fn_type(
 }
 
 /// Build a chain of arrow types for function parameters.
+// Partial (ADR 11.8.26b): argument rebuilt, not a subterm — deferred to v2.1.
+#[partial]
 fn build_arrow_chain(env: Env, params: List<Param>, ret: TypeHandle) -> ElabTypeResult {
     match params {
         Nil() => ElabTypeOk(ret, CTUnit()),
@@ -266,6 +268,8 @@ fn build_extern_fn_type(env: Env, params: List<ExternParam>, ret: TypeExpr) -> E
 }
 
 /// Build arrow chain for extern params.
+// Partial (ADR 11.8.26b): argument rebuilt, not a subterm — deferred to v2.1.
+#[partial]
 fn build_extern_arrow_chain(env: Env, params: List<ExternParam>, ret: TypeHandle, ret_ct: CodegenType) -> ElabTypeResult {
     match params {
         Nil() => ElabTypeOk(ret, ret_ct),

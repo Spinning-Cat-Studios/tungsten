@@ -125,15 +125,24 @@ impl<'ctx> CodeGen<'ctx> {
         // where T should be substituted with String
         let resolved_ty_arg = self.types.apply_type_subst(ty_arg);
 
-        // Strip @-prefixes from Phase 1c TyVar references (e.g., @Token → Token).
+        // Strip @-prefixes from Type-Body Collection TyVar references (e.g., @Token → Token).
         // These are concrete named types, not abstract type variables.
         let resolved_ty_arg = self.strip_at_prefix_tyvars(&resolved_ty_arg);
+
+        // Structural-comparator intrinsic (ADR 29.6.26f P6′ step 2): `__cmp<T>` has
+        // no registered def — it is resolved to a synthesized `compare_T`. Handled
+        // before the generic mono path (which would fall through to erasure and
+        // reference a non-existent `__cmp` symbol). By this point mono has made the
+        // type argument concrete.
+        if name == tungsten_core::eval::COMPARE_INTRINSIC {
+            return self.compile_comparator_intrinsic(&resolved_ty_arg);
+        }
 
         // Check for unresolved type variables that can't be monomorphized.
         // TyVars appear in two cases:
         //   1. Abstract type params (T) — can't mono
         //   2. Concrete named types (Token, List) encoded as TyVar — CAN mono
-        // @-prefixed TyVars (@Token) are Phase 1c artifacts stripped above.
+        // @-prefixed TyVars (@Token) are Type-Body Collection artifacts stripped above.
         // For top-level TyVars, use is_concrete_named_type to distinguish.
         // For compound types, recursively check for non-concrete TyVars.
         if self.has_mono_blocking_tyvar(&resolved_ty_arg) {

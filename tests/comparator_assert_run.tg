@@ -1,0 +1,65 @@
+// Runtime test for the generic `.tg` assert_* wrappers over the `compare`
+// intrinsic (ADR 29.6.26f P6) + the evaluator executing the test-assertion FFIs
+// (P6-runtime / T13). Run via `tungsten run`.
+//
+// `main` runs many asserts that must ALL pass, then returns the accumulated
+// failure flag. Expected: 0. A comparison bug OR a broken assert/FFI wiring
+// would set the flag → 1. (The wrappers are defined inline here; landing them in
+// the compiler's `driver::ffi::compare` lib awaits the codegen __cmp hook, P6′
+// step 2, so an uninstantiated generic doesn't break the L2 self-compile.)
+
+type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+type PathSeg =
+    | Field(String)
+    | Pos(Nat)
+    | Index(Nat)
+    | Tag
+    | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult =
+    | Equal
+    | NotEqual(CompareDiff)
+
+type Option<T> =
+    | None
+    | Some(T)
+
+extern "C" fn tg_assert_eq_bool(left: Nat, right: Nat) -> Unit
+extern "C" fn tg_test_check_failure() -> Nat
+
+fn bool_to_nat(b: Bool) -> Nat { if b { 1 } else { 0 } }
+fn assert(cond: Bool) -> Unit { tg_assert_eq_bool(bool_to_nat(cond), 1) }
+fn assert_true(cond: Bool) -> Unit { assert(cond) }
+fn assert_false(cond: Bool) -> Unit { tg_assert_eq_bool(bool_to_nat(cond), 0) }
+fn is_equal(r: CompareResult) -> Bool {
+    match r { Equal() => true, NotEqual(_) => false }
+}
+
+// Generic, over the `compare` intrinsic — works at any concrete instantiation.
+fn assert_eq<T>(a: T, b: T) -> Unit { assert(is_equal(compare(a, b))) }
+fn assert_ne<T>(a: T, b: T) -> Unit { assert_false(is_equal(compare(a, b))) }
+
+fn main() -> Nat {
+    let xs: List<Nat> = Cons(1, Cons(2, Nil));
+    let ys: List<Nat> = Cons(1, Cons(2, Nil));
+    // assert_eq on equal values (all must pass)
+    assert_eq(3, 3);
+    assert_eq(true, true);
+    assert_eq("hello", "hello");
+    assert_eq((1, false), (1, false));
+    assert_eq(Some(7), Some(7));
+    assert_eq(xs, ys);
+    // assert_ne on unequal values (all must pass)
+    assert_ne(3, 4);
+    assert_ne("a", "b");
+    assert_ne(Some(1), Some(2));
+    assert_ne(xs, Cons(1, Nil));
+    // boolean helpers
+    assert_true(true);
+    assert_false(false);
+    tg_test_check_failure()
+}

@@ -1,0 +1,110 @@
+// src/compiler/driver/pipeline/check/diagnostics.tg
+// Post-elaboration diagnostics: WHETHER to report, and which pass to run.
+//
+// The passes themselves are in `diagnostic_passes.tg`. The split is the one
+// this file's own hazard suggests: deciding whether a build can answer at all
+// is a different question from what any single answer is, and conflating them
+// is how a flag came to run happily on a binary that had nothing to run.
+//
+// **Every one of these reports its DENOMINATOR.** A diagnostic that prints
+// only its findings makes "nothing was wrong" and "nothing was examined" the
+// same output — and this file is where that mattered: ADR 19.8.26d spent two
+// invocations of `--dump-core` unable to tell a working flag from a broken
+// one, because a run that dumped nothing and a run that never ran looked
+// identical. So each pass prints how many definitions it looked at, whether
+// or not it found anything.
+
+use driver::ffi::{
+    eprintln,
+    List, Nil, Cons,
+    diagnostic_capabilities
+};
+use driver::util::{Option, Some, None};
+use driver::cli::{CheckOpts};
+use elab::items::{ElabDef};
+use driver::pipeline::check::diagnostic_passes::{
+    dump_core_defs, check_tyvar_escapes, check_free_term_vars, check_well_typed_terms
+};
+
+/// Run post-elaboration diagnostics based on CLI flags.
+///
+/// Refuses to run them silently on a build that has none compiled in. A
+/// stubbed `diagnostic_*` wrapper returns `None`, which is also what a clean
+/// answer looks like, so a requested flag would otherwise parse, run, report
+/// nothing, and exit 0 — the shape that cost ADR 19.8.26d's retrospective two
+/// invocations before it read the Makefile.
+pub fn run_diagnostics(defs: List<ElabDef>, opts: CheckOpts) -> Unit {
+    if diagnostics_requested(opts) && !diagnostics_available() {
+        report_stubbed_build()
+    } else {
+        run_requested_diagnostics(defs, opts)
+    }
+}
+
+/// Whether any diagnostic flag was passed.
+fn diagnostics_requested(opts: CheckOpts) -> Bool {
+    opts.check_tyvar_escape
+        || opts.check_free_vars
+        || opts.check_well_typed
+        || option_is_some(opts.dump_core)
+        || option_is_some(opts.dump_core_terms)
+}
+
+fn option_is_some(value: Option<String>) -> Bool {
+    match value {
+        Some(_) => true,
+        None() => false
+    }
+}
+
+/// Whether this binary has diagnostic tools compiled in.
+///
+/// `diagnostic_capabilities` is the only thing that can tell a stubbed build
+/// from a real one: the stub returns `Nil` and the developer build returns its
+/// list. Asking any individual wrapper cannot, because both answer `None`.
+fn diagnostics_available() -> Bool {
+    match diagnostic_capabilities() {
+        Nil() => false,
+        Cons(_, _) => true
+    }
+}
+
+/// Say that the flags did nothing, and how to get a binary where they would.
+fn report_stubbed_build() -> Unit {
+    eprintln("[diagnostics] this binary has no diagnostic tools compiled in, so the");
+    eprintln("              requested flag(s) did nothing. The production build stubs");
+    eprintln("              them out (ADR 18.4.26f); rebuild with");
+    eprintln("              `make devcontainer-self-compile-dev` to get a binary that");
+    eprintln("              answers. `tungsten1 info` lists what a build carries.")
+}
+
+fn run_requested_diagnostics(defs: List<ElabDef>, opts: CheckOpts) -> Unit {
+    // --dump-core PATTERN (human-readable, framed)
+    match opts.dump_core {
+        Some(pattern) => dump_core_defs(defs, pattern, false),
+        None() => ()
+    };
+    // --dump-core-terms PATTERN (one `<name>\t<term>` line per match)
+    match opts.dump_core_terms {
+        Some(pattern) => dump_core_defs(defs, pattern, true),
+        None() => ()
+    };
+    // --check-tyvar-escape
+    if opts.check_tyvar_escape {
+        check_tyvar_escapes(defs)
+    } else {
+        ()
+    };
+    // --check-free-vars
+    if opts.check_free_vars {
+        check_free_term_vars(defs)
+    } else {
+        ()
+    };
+    // --check-well-typed
+    if opts.check_well_typed {
+        check_well_typed_terms(defs)
+    } else {
+        ()
+    }
+}

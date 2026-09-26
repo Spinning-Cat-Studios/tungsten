@@ -1,4 +1,4 @@
-//! `tungsten doctor check module-overlap` — detect `foo.rs` + `foo/mod.rs` coexistence.
+//! `tungsten doctor check module overlap` — detect `foo.rs` + `foo/mod.rs` coexistence.
 //!
 //! Walks Rust source directories and reports any module that has both a standalone
 //! `.rs` file and a directory module with `mod.rs`. This prevents Rust compiler
@@ -20,7 +20,7 @@ struct Overlap {
 /// Default scan roots when no explicit `--path` is provided.
 const DEFAULT_ROOTS: &[&str] = &["bootstrap/src", "tungsten_codegen/src"];
 
-/// Entry point for `tungsten doctor check module-overlap`.
+/// Entry point for `tungsten doctor check module overlap`.
 pub fn cmd_check_module_overlap(path: Option<&Path>, json: bool) -> ExitCode {
     let roots: Vec<PathBuf> = if let Some(p) = path {
         if !p.exists() {

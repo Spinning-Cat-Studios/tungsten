@@ -5,6 +5,7 @@ pub(super) fn control_flow(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "DeadCodeAfterReturn" => ErrorExplanation {
             name: "DeadCodeAfterReturn",
+            code: "W0002",
             category: "Control Flow",
             summary: "unreachable code after return",
             detail: "\
@@ -22,6 +23,7 @@ fn foo() -> Nat {\n\
 
         "TryOnNonTryType" => ErrorExplanation {
             name: "TryOnNonTryType",
+            code: "E0040",
             category: "Control Flow",
             summary: "? on non-Result/Option type",
             detail: "\
@@ -40,6 +42,7 @@ fn foo() -> Result<Nat, String> {\n\
 
         "TryReturnMismatch" => ErrorExplanation {
             name: "TryReturnMismatch",
+            code: "E0041",
             category: "Control Flow",
             summary: "? return type mismatch",
             detail: "\
@@ -67,6 +70,7 @@ fn foo() -> Result<Nat, String> {\n\
 
         "TryOutsideReturnContext" => ErrorExplanation {
             name: "TryOutsideReturnContext",
+            code: "E0042",
             category: "Control Flow",
             summary: "? outside function body",
             detail: "\
@@ -89,6 +93,7 @@ fn process() -> Result<Nat, String> {\n\
 
         "LetElseNonDiverging" => ErrorExplanation {
             name: "LetElseNonDiverging",
+            code: "E0043",
             category: "Control Flow",
             summary: "let-else branch does not diverge",
             detail: "\
@@ -111,6 +116,7 @@ fn foo(x: Option<Nat>) -> Nat {\n\
 
         "LetElseIrrefutable" => ErrorExplanation {
             name: "LetElseIrrefutable",
+            code: "W0003",
             category: "Control Flow",
             summary: "irrefutable pattern in let-else",
             detail: "\
@@ -131,6 +137,7 @@ fn foo(x: Nat) -> Nat {\n\
 
         "IfLetIrrefutable" => ErrorExplanation {
             name: "IfLetIrrefutable",
+            code: "W0004",
             category: "Control Flow",
             summary: "irrefutable pattern in if let",
             detail: "\
@@ -148,6 +155,102 @@ fn foo(x: Nat) -> Nat {\n\
     y\n\
 }",
             see_also: &["LetElseIrrefutable"],
+        },
+
+        "ReturnOutsideFunction" => ErrorExplanation {
+            name: "ReturnOutsideFunction",
+            code: "E0048",
+            category: "Control Flow",
+            summary: "return with no function return type in scope",
+            detail: "\
+`return` needs an enclosing function whose return type it can check \
+against, and no function body is in scope here.\n\
+\n\
+Common causes:\n\
+• `return` in a theorem or lemma body — proof terms are expressions, \
+not function bodies\n\
+• `return` in any other non-function elaboration context",
+            example: "\
+theorem t : Nat = return 5    // error: no function to return from\n\
+\n\
+// Fix: a proof term is an expression — write the value itself\n\
+theorem t : Nat = 5",
+            see_also: &["TryOutsideReturnContext", "ReturnInsideTryBlock"],
+        },
+
+        "ReturnInsideTryBlock" => ErrorExplanation {
+            name: "ReturnInsideTryBlock",
+            code: "E0044",
+            category: "Control Flow",
+            summary: "return inside a try block",
+            detail: "\
+A `try` block evaluates to a `Result`; a `return` inside it would leave the \
+block without producing one, and would return from the *enclosing function* \
+rather than from the block — almost never what was meant.\n\
+\n\
+Propagate with `?` instead: it exits the block with the error, which is the \
+behaviour `return` looks like it is asking for.",
+            example: "\
+let r = try {\n\
+    let x = step()?;      // fine: `?` exits the block\n\
+    return x;             // error: `return` would exit the function\n\
+};",
+            see_also: &["TryOutsideReturnContext", "TryReturnMismatch"],
+        },
+
+        "TryBlockRequiresResultType" => ErrorExplanation {
+            name: "TryBlockRequiresResultType",
+            code: "E0045",
+            category: "Control Flow",
+            summary: "try block has no Result type in scope",
+            detail: "\
+A `try` block produces a `Result<T, E>`, so a `Result` type must be resolvable \
+where the block appears — and which `Result`, with which error type, cannot be \
+inferred from the block alone.\n\
+\n\
+Add a type annotation on the binding, or import the `Result` the block should \
+produce.",
+            example: "\
+let r: Result<Nat, Error> = try { step()? };   // fine\n\
+let r = try { step()? };                       // error: which Result?",
+            see_also: &["TryBlockExpectedSumEncoding", "CannotInferType"],
+        },
+
+        "TryBlockExpectedSumEncoding" => ErrorExplanation {
+            name: "TryBlockExpectedSumEncoding",
+            code: "E0046",
+            category: "Control Flow",
+            summary: "try block's Result type is not a two-constructor sum",
+            detail: "\
+The desugaring builds and matches the Ok/Err arms directly, so the annotated \
+type must encode as a Sum — a two-constructor ADT. A record, an alias to a \
+non-sum, or a type with the wrong constructor count cannot carry the block's \
+result.\n\
+\n\
+Inspect the encoding with `tungsten info type adt <name> <file>` rather than \
+guessing: the Sum shape is not visible in the source spelling.",
+            example: "\
+type Result<T, E> = Ok(T) | Err(E)    // fine: two constructors -> Sum\n\
+type Result<T, E> = { ok: T }         // error: a record has no Sum encoding",
+            see_also: &["TryBlockMissingConstructor", "TryOnNonTryType"],
+        },
+
+        "TryBlockMissingConstructor" => ErrorExplanation {
+            name: "TryBlockMissingConstructor",
+            code: "E0047",
+            category: "Control Flow",
+            summary: "try block's Result type lacks a required constructor",
+            detail: "\
+The desugaring names the constructors it builds — the message says which one \
+is absent. A `Result` shaped correctly but spelled differently (`Success`/\
+`Failure`) will not do: the names are what the generated code references.\n\
+\n\
+Confirm the constructors and their source order with `tungsten info type \
+constructors <name> <file>`; order matters, since index 0 maps to left/inl.",
+            example: "\
+type Result<T, E> = Ok(T) | Err(E)          // fine\n\
+type Result<T, E> = Good(T) | Bad(E)        // error: no `Ok` constructor",
+            see_also: &["TryBlockExpectedSumEncoding", "UndefinedConstructor"],
         },
 
         _ => return None,

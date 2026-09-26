@@ -18,11 +18,15 @@
 //!
 //! ## Constructors → Products
 //!
-//! Each constructor's fields are encoded as right-nested products:
+//! Each constructor's fields are encoded as **left-nested** products
+//! (`ctor_fields_product`, shared with `normalize_for_comparison`):
 //!
 //! - `Cons(T, List<T>)` → `T × α` (where `α` is the μ-variable)
+//! - `Node(α, String, V)` → `(α × String) × V`
 //! - `Leaf(Nat)` → `Nat`
 //! - `Nil` (no fields) → `Unit`
+//!
+//! Note this differs from record fields (right-nested, `encode_record_type`).
 //!
 //! ## ADTs → Sums
 //!
@@ -191,9 +195,11 @@ impl<'a> Elaborator<'a> {
         };
 
         let TypeDefKind::ADT(ref constructors) = type_def.kind else {
-            return Err(ElabError::new(
+            // Every caller gates on `TypeDefKind::ADT` before asking for an
+            // ADT encoding; aliases and records take their own paths.
+            return Err(ElabError::internal(
                 type_def.span,
-                ElabErrorKind::Other(format!("`{}` is not an ADT", name)),
+                format!("encoding requested for `{}`, which is not an ADT", name),
             ));
         };
 
@@ -262,7 +268,8 @@ impl<'a> Elaborator<'a> {
         let constructor_types = self.encode_constructors(constructors, &ctx, mu_encoding_stack);
 
         // Build sum type from constructors (ADR 2.2.26 policy)
-        let body = Self::build_adt_sum_body(constructor_types, constructors, name, type_args);
+        let body =
+            constructors::build_adt_sum_body(constructor_types, constructors, name, type_args);
 
         mu_encoding_stack.remove(name);
 
@@ -341,3 +348,5 @@ fn format_type_args(type_args: &[Type]) -> String {
 }
 
 mod constructors;
+
+pub(crate) use constructors::{build_adt_sum_body, ctor_fields_product};

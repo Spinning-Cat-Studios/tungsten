@@ -1,0 +1,18 @@
+warning: Signature Collection global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0061]: `C` is not strictly positive: `D` reaches a forbidden position in constructor `MkC`, field 0 (at 225..245)
+  note: strict positivity is required for structural recursion to be well-founded
+  help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+  hint: run `tungsten doctor check module signature-collection <file>` for details
+[E0061] Error: `C` is not strictly positive: `D` reaches a forbidden position in constructor `MkC`, field 0
+   ╭─[tests/golden/error/positivity_alias_mutual_cycle.tg:5:1]
+   │
+ 5 │ type C = MkC(Fun<D>)
+   │ ──────────┬─────────  
+   │           ╰─────────── 
+   │ 
+   │ Help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+   │ 
+   │ Note: strict positivity is required for structural recursion to be well-founded
+───╯
+
+error: aborting due to 1 error

@@ -14,13 +14,18 @@ impl<'a> Elaborator<'a> {
     /// Resolve ADT match context from constructor patterns.
     ///
     /// Finds the first constructor pattern in the arms, resolves its path,
-    /// and looks up the ADT type definition.
+    /// and looks up the ADT type definition. `None` is the poison verdict
+    /// (ADR 15.8.26d): the ADT's own body failed, its stub has no
+    /// constructor list, and the fault is already reported at its span —
+    /// the match is transit, not a second complaint.
     pub(super) fn resolve_adt_match_context(
         &self,
         arms: &[ast::MatchArm],
         span: Span,
-    ) -> ElabResult<AdtMatchContext> {
+    ) -> ElabResult<Option<AdtMatchContext>> {
         // Find the first constructor pattern (may not be arms[0] due to catch-alls)
+        // Defensive: callers classify a match as an ADT match only after
+        // finding a constructor pattern — uncoded by design (ADR 15.8.26b).
         let ctor_path = self.find_first_constructor_pattern(arms).ok_or_else(|| {
             ElabError::new(
                 span,
@@ -37,34 +42,34 @@ impl<'a> Elaborator<'a> {
             .lookup_type(&ctor_info.type_name)
             .cloned()
             .ok_or_else(|| {
-                ElabError::new(
-                    span,
-                    ElabErrorKind::Other(format!(
-                        "internal error: type `{}` not found",
-                        ctor_info.type_name
-                    )),
-                )
+                ElabError::internal(span, format!("type `{}` not found", ctor_info.type_name))
             })?;
+
+        if type_def.is_poison() {
+            return Ok(None);
+        }
 
         // Extract constructors from ADT
         let constructors = match &type_def.kind {
             elab_env::TypeDefKind::ADT(ctors) => ctors.clone(),
             _ => {
-                return Err(ElabError::new(
+                // A resolved constructor implies its owning type is an ADT —
+                // same invariant `constructors/context.rs` asserts.
+                return Err(ElabError::internal(
                     span,
-                    ElabErrorKind::Other(format!("`{}` is not an ADT", ctor_info.type_name)),
-                ))
+                    format!("`{}` is not an ADT", ctor_info.type_name),
+                ));
             }
         };
 
         // Check if it's recursive (self-recursive or in a mutual recursion group)
         let is_recursive = self.adt_is_recursive(&ctor_info.type_name, &constructors);
 
-        Ok(AdtMatchContext {
+        Ok(Some(AdtMatchContext {
             type_def,
             constructors,
             is_recursive,
-        })
+        }))
     }
 
     /// Find the first constructor pattern in a list of match arms.

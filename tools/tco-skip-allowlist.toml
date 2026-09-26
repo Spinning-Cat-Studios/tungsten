@@ -1,0 +1,24 @@
+# tco-skip-allowlist — the ONLY HIGH-risk musttail SKIPs permitted past the
+# `tungsten doctor check tco-coverage --gate` gate (ADR 1.7.26e §5, R7/R8).
+#
+# POLICY (read before adding an entry):
+#   * An entry is legal ONLY for a function that does NOT participate in internal
+#     self/mutual recursion — i.e. a genuine varargs or extern-boundary shape that
+#     can never be a `musttail` edge anyway.
+#   * A recursion-participating SKIP is a HARD FAILURE even if listed here: the
+#     gate rejects such an entry (it MUST reach EMIT/DECOMPOSE via indirect-param
+#     lowering instead). `tco-coverage` ranks only self-recursive functions, so in
+#     practice this file stays empty — it is a guarded, forward-looking escape
+#     hatch, not a way to silence a real O(N)-stack SKIP.
+#
+# Schema (each entry):
+#   [[skip]]
+#   symbol        = "some_boundary$direct"      # function symbol
+#   reason        = "NON_FLATTENABLE_PARAM"      # stable ReasonCode string
+#   justification = "varargs C boundary; never a musttail edge"
+
+schema_version = 1
+
+# (no entries — every internal recursion-participating function must reach
+#  EMIT/DECOMPOSE; see ADR 1.7.26e.)
+skip = []

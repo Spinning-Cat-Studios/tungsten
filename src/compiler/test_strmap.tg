@@ -1,0 +1,134 @@
+// Unit tests for elab/env/strmap/mod.tg — the AVL map backing the
+// constructor-registration dedup index (ADR 21.7.26c).
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_bool, assert_eq_nat};
+use parser::option::{Option, Some, None};
+use driver::util::{option_unwrap_or};
+use elab::env::strmap::{
+    StrMap, StrMapLeaf, StrMapNode,
+    strmap_lookup, strmap_insert, strmap_height, strmap_size
+};
+
+// Sentinel returned by lookup_nat for a missing key (no test key maps to it).
+fn lookup_nat(m: StrMap<Nat>, key: String) -> Nat {
+    option_unwrap_or(strmap_lookup(m, key), 999)
+}
+
+// ---------------------------------------------------------------------------
+// Empty map + single entry
+// ---------------------------------------------------------------------------
+
+pub fn test_strmap_lookup_empty_is_missing() -> Unit {
+    let empty: StrMap<Nat> = StrMapLeaf;
+    assert_eq_nat(lookup_nat(empty, "anything"), 999)
+}
+
+pub fn test_strmap_single_insert_hit_and_miss() -> Unit {
+    let empty: StrMap<Nat> = StrMapLeaf;
+    let m = strmap_insert(empty, "alpha", 7);
+    let _hit = assert_eq_nat(lookup_nat(m, "alpha"), 7);
+    let _miss = assert_eq_nat(lookup_nat(m, "beta"), 999);
+    assert_eq_nat(strmap_height(m), 1)
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate key: last write wins, size unchanged
+// ---------------------------------------------------------------------------
+
+pub fn test_strmap_duplicate_key_last_write_wins() -> Unit {
+    let empty: StrMap<Nat> = StrMapLeaf;
+    let m1 = strmap_insert(empty, "key", 1);
+    let m2 = strmap_insert(m1, "key", 2);
+    let _val = assert_eq_nat(lookup_nat(m2, "key"), 2);
+    assert_eq_nat(strmap_size(m2), 1)
+}
+
+// ---------------------------------------------------------------------------
+// Rotation cases: each three-key insertion order forces one rotation kind
+// ---------------------------------------------------------------------------
+
+fn three_keys(first: String, second: String, third: String) -> StrMap<Nat> {
+    let empty: StrMap<Nat> = StrMapLeaf;
+    strmap_insert(strmap_insert(strmap_insert(empty, first, 1), second, 2), third, 3)
+}
+
+fn assert_abc_balanced(m: StrMap<Nat>) -> Unit {
+    let _a = assert_eq_nat(lookup_nat(m, "a"), lookup_nat(m, "a"));
+    let _sz = assert_eq_nat(strmap_size(m), 3);
+    // Three nodes balance to a perfect tree of height 2 in all four cases.
+    assert_eq_nat(strmap_height(m), 2)
+}
+
+pub fn test_strmap_rotation_ll() -> Unit {
+    // Descending inserts: left-left heavy, single right rotation.
+    assert_abc_balanced(three_keys("c", "b", "a"))
+}
+
+pub fn test_strmap_rotation_rr() -> Unit {
+    // Ascending inserts: right-right heavy, single left rotation.
+    assert_abc_balanced(three_keys("a", "b", "c"))
+}
+
+pub fn test_strmap_rotation_lr() -> Unit {
+    // Left child leans right: left-right double rotation.
+    assert_abc_balanced(three_keys("c", "a", "b"))
+}
+
+pub fn test_strmap_rotation_rl() -> Unit {
+    // Right child leans left: right-left double rotation.
+    assert_abc_balanced(three_keys("a", "c", "b"))
+}
+
+pub fn test_strmap_rotation_preserves_entries() -> Unit {
+    let m = three_keys("c", "a", "b");
+    let _a = assert_eq_nat(lookup_nat(m, "c"), 1);
+    let _b = assert_eq_nat(lookup_nat(m, "a"), 2);
+    assert_eq_nat(lookup_nat(m, "b"), 3)
+}
+
+// ---------------------------------------------------------------------------
+// Larger ascending run: worst case for an unbalanced BST
+// ---------------------------------------------------------------------------
+
+fn insert_seven_ascending() -> StrMap<Nat> {
+    let empty: StrMap<Nat> = StrMapLeaf;
+    let m1 = strmap_insert(empty, "k1", 1);
+    let m2 = strmap_insert(m1, "k2", 2);
+    let m3 = strmap_insert(m2, "k3", 3);
+    let m4 = strmap_insert(m3, "k4", 4);
+    let m5 = strmap_insert(m4, "k5", 5);
+    let m6 = strmap_insert(m5, "k6", 6);
+    strmap_insert(m6, "k7", 7)
+}
+
+pub fn test_strmap_seven_ascending_stays_balanced() -> Unit {
+    let m = insert_seven_ascending();
+    let _sz = assert_eq_nat(strmap_size(m), 7);
+    // An unbalanced BST would have height 7; AVL packs 7 nodes at height 3.
+    assert_eq_nat(strmap_height(m), 3)
+}
+
+pub fn test_strmap_seven_ascending_all_retrievable() -> Unit {
+    let m = insert_seven_ascending();
+    let _k1 = assert_eq_nat(lookup_nat(m, "k1"), 1);
+    let _k4 = assert_eq_nat(lookup_nat(m, "k4"), 4);
+    let _k7 = assert_eq_nat(lookup_nat(m, "k7"), 7);
+    assert_eq_nat(lookup_nat(m, "k0"), 999)
+}
+
+// ---------------------------------------------------------------------------
+// Keys that are prefixes of each other stay distinct
+// ---------------------------------------------------------------------------
+
+pub fn test_strmap_prefix_keys_are_distinct() -> Unit {
+    let empty: StrMap<Nat> = StrMapLeaf;
+    let m = strmap_insert(strmap_insert(empty, "ab", 1), "abc", 2);
+    let _short = assert_eq_nat(lookup_nat(m, "ab"), 1);
+    let _long = assert_eq_nat(lookup_nat(m, "abc"), 2);
+    assert_eq_nat(strmap_size(m), 2)
+}

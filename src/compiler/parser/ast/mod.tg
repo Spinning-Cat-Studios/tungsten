@@ -4,8 +4,14 @@
 pub mod common;
 pub mod pattern;
 pub mod nodes;
+pub mod normalize;
 
 // Re-export everything for convenient access via `use parser::ast::*`
 pub use parser::ast::common::*;
 pub use parser::ast::pattern::*;
 pub use parser::ast::nodes::*;
+
+// `normalize` is deliberately NOT glob-re-exported: it is opt-in test support
+// (ADR 29.6.26f AC 7), and pulling ~50 `strip_spans_*` names into every
+// `use parser::ast::*` site would be noise. Import it by path instead:
+//   use parser::ast::normalize::{strip_spans};

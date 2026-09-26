@@ -1,0 +1,62 @@
+// Regression pin for ADR 4.9.26f: two `.tg` modules MAY import each other.
+//
+// The answer settled by that ADR is "cycles are accepted" — by Import
+// Resolution, by Recursion Grouping and by the evaluator, in every one of the
+// four shapes it measured. The four shapes themselves are golden fixtures
+// (`tests/golden/run/module_cycle_*`); this suite pins the one the file-split
+// convention actually produces, a driver in `mod.tg` and its helper beside it,
+// where a regression would be most expensive: it would make every future split
+// of an over-threshold `.tg` file look illegal again.
+//
+// The extern is declared here rather than imported from `driver::ffi::test`
+// deliberately. A `mod driver;` would elaborate the whole self-hosted compiler
+// before the first assertion ran (~38 s, ADR 5.8.26d) to reach a two-line
+// wrapper — the same standalone shape `tests/test_runner_allpass.tg` uses.
+
+mod module_cycles;
+
+use module_cycles::{CycleFuel, CycleMore, CycleEmpty, CycleGo, CycleStop, cycle_run};
+use module_cycles::steps::{cycle_classify, cycle_drain_from};
+
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+
+fn assert_eq_nat(left: Nat, right: Nat) -> Unit {
+    tg_assert_eq_nat(left, right)
+}
+
+/// `CycleStep` has no comparator, so score it to a Nat the assertion can read.
+fn step_code(f: CycleFuel) -> Nat {
+    match cycle_classify(f) {
+        CycleGo => 1,
+        CycleStop => 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mod.tg -> sibling: the driver calls the helper
+// ---------------------------------------------------------------------------
+
+pub fn test_driver_calls_sibling() -> Unit {
+    assert_eq_nat(cycle_run(CycleMore(CycleMore(CycleEmpty))), 2)
+}
+
+pub fn test_driver_on_empty() -> Unit {
+    assert_eq_nat(cycle_run(CycleEmpty), 0)
+}
+
+// ---------------------------------------------------------------------------
+// sibling -> mod.tg: the helper calls the driver, closing the cycle
+// ---------------------------------------------------------------------------
+
+pub fn test_sibling_calls_driver() -> Unit {
+    assert_eq_nat(cycle_drain_from(CycleMore(CycleMore(CycleMore(CycleEmpty)))), 3)
+}
+
+// ---------------------------------------------------------------------------
+// sibling -> mod.tg: the helper matches on a type declared in the driver
+// ---------------------------------------------------------------------------
+
+pub fn test_sibling_matches_driver_type() -> Unit {
+    assert_eq_nat(step_code(CycleMore(CycleEmpty)), 1);
+    assert_eq_nat(step_code(CycleEmpty), 0)
+}

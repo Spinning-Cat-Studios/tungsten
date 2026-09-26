@@ -1,0 +1,9 @@
+use shapes::{Box};
+
+pub fn pass_box(b: Box) -> Box { b }
+
+// ADR 15.8.26d AC 1: a CROSS-MODULE construction site. Here the dependent
+// used to see the Stub Registration placeholder, whose field type is the
+// unresolved source name, and mismatched (E0010) — the poisoned stub now
+// replaces the placeholder in the exports, so this site is transit too.
+pub fn build_box() -> Box { Box { width: 3, height: 4 } }

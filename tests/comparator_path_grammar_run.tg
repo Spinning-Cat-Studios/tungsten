@@ -1,0 +1,73 @@
+// ADR 29.6.26f §2.3 / AC 8 — first-differing-path source-level grammar + canonical
+// order, run via the evaluator. Verifies the comparator attributes a first
+// difference to the right §2.3 segment:
+//   record field  → `.field`  (Field, by name)
+//   tuple element → `[index]` (Index)
+//   constructor payload → `.N` (Pos)
+//   constructor tag → `.tag`  (Tag)
+// and canonical order (record fields in declaration order: `a` before `b`).
+// (List `[i]`/`.len` are covered by comparator_p4_paths_run.tg.)
+//
+// Expected: 127 (bits 0..6 all set). Run: tungsten run tests/comparator_path_grammar_run.tg
+
+type List<T> = | Nil | Cons(T, List<T>)
+type PathSeg = | Field(String) | Pos(Nat) | Index(Nat) | Tag | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult = | Equal | NotEqual(CompareDiff)
+
+type Rec = { a: Nat, b: Nat }
+type Choice = | CA(Nat) | CB(Nat)
+
+fn b2n(b: Bool) -> Nat { if b { 1 } else { 0 } }
+
+fn first_is_field(r: CompareResult, name: String) -> Bool {
+    match r {
+        Equal() => false,
+        NotEqual(d) => match d.path {
+            Nil() => false,
+            Cons(seg, _) => match seg { Field(n) => n == name, _ => false }
+        }
+    }
+}
+fn first_is_index(r: CompareResult, i: Nat) -> Bool {
+    match r {
+        Equal() => false,
+        NotEqual(d) => match d.path {
+            Nil() => false,
+            Cons(seg, _) => match seg { Index(k) => k == i, _ => false }
+        }
+    }
+}
+fn first_is_pos(r: CompareResult, i: Nat) -> Bool {
+    match r {
+        Equal() => false,
+        NotEqual(d) => match d.path {
+            Nil() => false,
+            Cons(seg, _) => match seg { Pos(k) => k == i, _ => false }
+        }
+    }
+}
+fn first_is_tag(r: CompareResult) -> Bool {
+    match r {
+        Equal() => false,
+        NotEqual(d) => match d.path {
+            Nil() => false,
+            Cons(seg, _) => match seg { Tag() => true, _ => false }
+        }
+    }
+}
+
+fn main() -> Nat {
+    let r1: Rec = { a: 1, b: 2 };
+    // Records → `.field` by name; canonical (declaration) order a-before-b.
+    b2n(first_is_field(compare(r1, { a: 9, b: 2 }), "a"))            // bit 0: a differs
+    + 2 * b2n(first_is_field(compare(r1, { a: 1, b: 9 }), "b"))      // bit 1: b differs (a equal first)
+    + 4 * b2n(first_is_field(compare(r1, { a: 9, b: 9 }), "a"))      // bit 2: both differ → a first
+    // Tuples → `[index]`.
+    + 8 * b2n(first_is_index(compare((1, true), (9, true)), 0))      // bit 3: element 0
+    + 16 * b2n(first_is_index(compare((1, true), (1, false)), 1))    // bit 4: element 1
+    // Sum/ADT → `.tag` on tag mismatch, `.N` on payload mismatch.
+    + 32 * b2n(first_is_tag(compare(CA(1), CB(1))))                  // bit 5: tag
+    + 64 * b2n(first_is_pos(compare(CA(1), CA(2)), 0))               // bit 6: payload .0
+}

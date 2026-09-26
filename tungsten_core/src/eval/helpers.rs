@@ -24,14 +24,15 @@ pub fn term_to_nat(term: &Term) -> Option<usize> {
     }
 }
 
-/// Convert a usize to a Nat term (zero/succ chain)
+/// Convert a usize to a Nat term.
+///
+/// Delegates to `Term::nat_smart` (ADR 21.7.26e wall 2): computed results —
+/// arithmetic, FFI marshalling — must not materialize deep unary `Succ`
+/// chains any more than literals may, or a large computed Nat re-opens the
+/// stack-guard-page wedge that `nat_smart`'s threshold closes.
 #[must_use]
 pub fn nat_to_term(n: usize) -> Term {
-    let mut term = Term::Zero;
-    for _ in 0..n {
-        term = Term::succ(term);
-    }
-    term
+    Term::nat_smart(n as u64)
 }
 
 // ============================================================================

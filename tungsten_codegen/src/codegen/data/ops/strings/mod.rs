@@ -339,16 +339,7 @@ impl<'ctx> CodeGen<'ctx> {
         size: inkwell::values::IntValue<'ctx>,
         name: &str,
     ) -> Result<PointerValue<'ctx>, CodeGenError> {
-        let malloc_fn = self.get_malloc();
-        let buf = self
-            .builder
-            .build_call(malloc_fn, &[size.into()], name)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CodeGenError::LlvmError("malloc returned void".to_string()))?
-            .into_pointer_value();
-        Ok(buf)
+        self.build_malloc_call(size, crate::codegen::AllocClass::Str, name)
     }
 
     /// Build a {ptr, len} string struct from a pointer and length.

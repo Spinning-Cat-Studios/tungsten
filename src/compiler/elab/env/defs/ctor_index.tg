@@ -1,0 +1,91 @@
+// src/compiler/elab/env/defs/ctor_index.tg
+// Constructor dedup index over the generic StrMap (ADRs 21.7.26c, 23.7.26c).
+//
+// Originally a hand-monomorphised AVL copy of `elab::env::strmap` (the
+// ADR 21.7.26c shape, forced by the since-fixed bootstrap stored-generic walls,
+// ADR 21.7.26e). The fold to `StrMap<CtorBucket>` was deferred twice on self-compiled-
+// side OOM evidence: the mono depot compiled a recursive generic instance's
+// self-recursion through its closure-returning wrapper, allocating an
+// environment every recursion step — ~36 GB integrated over this index's
+// hot loop (ADR 21.7.26k's profile). ADR 23.7.26c fixed the depot calling
+// convention (saturated generic calls ride `$direct`), completing the fold.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{nat_to_string};
+use elab::env::defs::constructors::{ConstructorInfo, constructor_list_contains_exact};
+use elab::env::strmap::{StrMap, StrMapLeaf, strmap_lookup, strmap_insert};
+use parser::option::{Option, Some, None};
+
+// ===========================================================================
+// BUCKET TYPE
+// ===========================================================================
+
+/// A dedup-index bucket: the constructors sharing one rendered
+/// `(parent_type, name, index)` key, newest first.
+pub type CtorBucket = { entries: List<ConstructorInfo> }
+
+// ===========================================================================
+// CONSTRUCTOR STORE (the dedup choke point)
+// ===========================================================================
+
+/// The constructor store: the authoritative insertion-ordered list plus the
+/// dedup index over it, bucketed by `(parent_type, name, index)`.
+///
+/// Invariant: every entry of `all` is present in its key's bucket in
+/// `dedup_index`, and both structures are updated only by `ctor_store_add`.
+/// The list stays the iteration/export source of truth (newest first); the
+/// index only accelerates the ADR 7.5.26f idempotence guard, which was a
+/// full-list scan costing ~91% of the self-compiled check (ADR 21.7.26c).
+pub type CtorStore = {
+    all: List<ConstructorInfo>,
+    dedup_index: StrMap<CtorBucket>
+}
+
+/// Create an empty constructor store.
+pub fn ctor_store_empty() -> CtorStore {
+    { all: Nil(), dedup_index: StrMapLeaf }
+}
+
+/// Deterministic bucket key over the partial identity
+/// `(parent_type, name, index)`. A name containing the separator can only
+/// merge two buckets, never corrupt dedup: bucket membership is still decided
+/// by the full `ctor_fields_match`, so a collision costs a slightly longer
+/// bucket scan, not a correctness bug.
+fn ctor_dedup_key(info: ConstructorInfo) -> String {
+    info.parent_type ++ "|" ++ info.name ++ "|" ++ nat_to_string(info.index)
+}
+
+/// The candidate bucket entries for a key (empty when the key is absent).
+fn ctor_bucket_for(store: CtorStore, key: String) -> List<ConstructorInfo> {
+    let entries: List<ConstructorInfo> = match strmap_lookup(store.dedup_index, key) {
+        None() => Nil,
+        Some(bucket) => bucket.entries
+    };
+    entries
+}
+
+/// Indexed idempotence check: O(log n) descent plus a small bucket scan,
+/// with semantics identical to `constructor_list_contains_exact` on `all` —
+/// including the documented cross-phase miss (ADR 10.5.26e): a Stub Registration stub
+/// (INVALID_HANDLE field_types) never matches its later real registration,
+/// so both coexist here exactly as they do in the list.
+pub fn ctor_store_contains_exact(store: CtorStore, target: ConstructorInfo) -> Bool {
+    constructor_list_contains_exact(ctor_bucket_for(store, ctor_dedup_key(target)), target)
+}
+
+/// Add a constructor unless an identical entry already exists (the
+/// ADR 7.5.26f idempotent-registration guard). The newest entry is prepended
+/// to both the list and its bucket, preserving newest-wins shadowing.
+pub fn ctor_store_add(store: CtorStore, info: ConstructorInfo) -> CtorStore {
+    let key = ctor_dedup_key(info);
+    let bucket = ctor_bucket_for(store, key);
+    if constructor_list_contains_exact(bucket, info) {
+        store
+    } else {
+        let widened_bucket: CtorBucket = { entries: Cons(info, bucket) };
+        {
+            all: Cons(info, store.all),
+            dedup_index: strmap_insert(store.dedup_index, key, widened_bucket)
+        }
+    }
+}

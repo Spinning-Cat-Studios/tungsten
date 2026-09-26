@@ -1,0 +1,40 @@
+// == a record member of a mutually recursive type cluster is a descent root
+//
+// This is the class ADR 11.8.26b recovered: 43 of the self-hosted compiler's
+// definitions — the `strip_spans_*` AST walk chief among them — were rejected
+// not because their recursion was unsound but because a NON-ENTRY member of a
+// mutually recursive type cluster reaches Core as the bare marker
+// `TyVar("FieldT")` rather than as its own `Mu`. `is_supported_inductive`
+// accepted only `Mu`/`Adt`, so the root's type was unrecognised and the whole
+// group failed with "no parameter has an inductive type to descend on".
+//
+// `strip_field` below is exactly that shape, minimised: `f.ty` IS a strict
+// subterm of `f`, and `(Ty, FieldT)` is a well-founded mutual family. Narrowing
+// the predicate back to `Mu | Adt` turns this file's clean census into two
+// rejections — which is what the unit test cannot show, because it asserts on
+// the predicate rather than on a corpus the predicate is applied to.
+type Ty = TyUnit | TyArrow(Ty, Ty) | TyRec(FieldT)
+
+type FieldT = { name: Nat, ty: Ty }
+
+fn strip_ty(t: Ty) -> Ty {
+    match t {
+        TyUnit() => TyUnit,
+        TyArrow(a, b) => TyArrow(strip_ty(a), strip_ty(b)),
+        TyRec(f) => TyRec(strip_field(f)),
+    }
+}
+
+fn strip_field(f: FieldT) -> FieldT {
+    FieldT { name: f.name, ty: strip_ty(f.ty) }
+}
+
+// The other half of the discriminator: a `TyVar` the definition BINDS is an
+// abstract `T`, stays refused, and so this stays `#[partial]`. If the widening
+// were "admit every TyVar" rather than "admit an unbound one", this annotation
+// would become unnecessary and the fixture would fail — which is how the file
+// pins the rule rather than just its happy direction.
+#[partial]
+fn spin_generic<T>(x: T) -> Nat { spin_generic(x) }
+
+fn main() -> Nat { 0 }

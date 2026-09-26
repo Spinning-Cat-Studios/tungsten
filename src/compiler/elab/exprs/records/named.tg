@@ -15,7 +15,8 @@ use elab::env::{
     TypeDefInfo,
     MaybeTypeDef, NoTypeDef, SomeTypeDef,
     MaybeRecordFields, NoRecordFields, SomeRecordFields,
-    RecordFieldInfo
+    MaybeRecordField, NoRecordField, SomeRecordField,
+    RecordFieldInfo, record_field_at_index
 };
 use elab::exprs::forms::result::{ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error};
 use elab::exprs::records::deep_eq::{check_record_fields, get_structural_type};
@@ -136,34 +137,53 @@ fn reorder_fields(
     } else if user_count < def_count {
         ReorderErr("missing field in named record constructor")
     } else {
-        reorder_fields_loop(def_fields, user_fields, Nil)
+        reorder_fields_loop(def_fields, user_fields, 0, Nil)
     }
 }
 
-/// For each definition field (in order), find the matching user field.
+/// For each definition field, by ascending canonical `index`, find the matching
+/// user field.
+///
+/// **Keyed on `index`, never on position in `def_fields`** (ADR 7.9.26b D1).
+/// That list arrives newest-first from `elaborate_record_body`, so walking it
+/// positionally and reversing the accumulator produced *reverse* declaration
+/// order — two mistakes that looked like none on an all-`Nat` record and
+/// rejected the file outright as soon as two fields had different types.
+/// Running out of indices, not out of list, is what ends the walk.
+// Partial (ADR 11.8.26b): `index + 1` is not a strict structural subterm of
+// anything, so this is a measure recursion bounded by the field count, which
+// Non-Goals defers to v2.1. Executable compiler code no proof reaches; E0063
+// guards that.
+#[partial]
 fn reorder_fields_loop(
     def_fields: List<RecordFieldInfo>,
     user_fields: List<FieldInit>,
+    index: Nat,
     acc: List<FieldInit>
 ) -> ReorderResult {
-    match def_fields {
-        Nil() => ReorderOk(list_reverse(acc)),
-        Cons(def_field, rest_defs) =>
-            reorder_one_field(def_field, rest_defs, user_fields, acc)
+    match record_field_at_index(def_fields, index) {
+        NoRecordField() => ReorderOk(list_reverse(acc)),
+        SomeRecordField(def_field) =>
+            reorder_one_field(def_field, def_fields, user_fields, index, acc)
     }
 }
 
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn reorder_one_field(
     def_field: RecordFieldInfo,
-    rest_defs: List<RecordFieldInfo>,
+    def_fields: List<RecordFieldInfo>,
     user_fields: List<FieldInit>,
+    index: Nat,
     acc: List<FieldInit>
 ) -> ReorderResult {
     match find_user_field(user_fields, def_field.name) {
         NoUserField() =>
             ReorderErr("missing field in named record constructor"),
         SomeUserField(found) =>
-            reorder_fields_loop(rest_defs, user_fields, Cons(found, acc))
+            reorder_fields_loop(def_fields, user_fields, index + 1, Cons(found, acc))
     }
 }
 

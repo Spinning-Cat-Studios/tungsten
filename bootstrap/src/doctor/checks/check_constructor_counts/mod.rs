@@ -1,4 +1,5 @@
-//! `tungsten doctor check constructor-counts` — validate constructor-list integrity (ADR 7.5.26e).
+//! `tungsten doctor check type integrity constructor-counts` — validate
+//! constructor-list integrity (ADR 7.5.26e).
 //!
 //! For each ADT, checks that the constructor list satisfies five invariants:
 //! 1. Entry count equals declared variant count
@@ -22,7 +23,7 @@ pub use validator::{
     ConstructorViolation,
 };
 
-/// Entry point for `tungsten doctor check constructor-counts <file>`.
+/// Entry point for `tungsten doctor check type integrity constructor-counts <file>`.
 pub fn cmd_check_constructor_counts(
     file: &PathBuf,
     verbose: bool,

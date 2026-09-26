@@ -29,7 +29,7 @@ impl<'ctx> TypeLowering<'ctx> {
     fn lower_type_inner(&mut self, ty: &Type) -> BasicTypeEnum<'ctx> {
         match ty {
             Type::Bool => self.context.bool_type().into(),
-            Type::Nat => self.context.i64_type().into(),
+            Type::Nat | Type::Int => self.context.i64_type().into(),
 
             // Zero-size types — empty structs
             Type::Unit | Type::Prop | Type::Void | Type::Eq(_, _, _) => {
@@ -63,9 +63,19 @@ impl<'ctx> TypeLowering<'ctx> {
             Type::App(name, args) => self.lower_app(name, args),
             Type::Adt(name, type_args, variants) => self.lower_adt(name, type_args, variants),
 
+            // Poison must never be lowered (ADR 7.8.26d D3). It reaches here
+            // only if a producer fired without its error being recorded, and
+            // the previous behaviour — warn to stderr, emit `{}` — is a silent
+            // miscompile: the empty struct compiles, links and runs. Suppression
+            // is a compare-boundary concept; codegen is not a compare boundary.
             Type::Error => {
-                eprintln!("Warning: Type::Error reached codegen - using empty struct");
-                self.context.struct_type(&[], false).into()
+                let def_name = self.current_def_name.as_deref().unwrap_or("<unknown>");
+                panic!(
+                    "internal error: the poison type Type::Error reached codegen while \
+                     compiling '{def_name}'. A failed elaboration poisoned an environment \
+                     entry without recording an error, so a broken definition was admitted \
+                     as if it had elaborated (ADR 7.8.26d §2.2)."
+                );
             }
         }
     }
@@ -93,15 +103,19 @@ impl<'ctx> TypeLowering<'ctx> {
         self.report_tyvar_fallthrough(name)
     }
 
-    /// Lower a 0-parameter ADT type to its LLVM representation.
+    /// Lower a 0-parameter ADT type referenced by name.
+    ///
+    /// Recursive → opaque ptr; single-constructor → bare payload (matching the
+    /// elaborator's no-tag encoding); n ≥ 2 → the W5 tagged-union blob via
+    /// [`Self::tagged_union_blob_type`], byte-identical to what the structural
+    /// `Sum` route and `lower_app`/`lower_adt` produce — the named reference
+    /// and every other spelling of the same type MUST agree (ADR 2.7.26b T2;
+    /// the 16d2f4f1 named-vs-structural miscompile class).
     fn lower_nullary_adt(
         &mut self,
         name: &str,
         constructors: &[super::CodegenConstructor],
     ) -> BasicTypeEnum<'ctx> {
-        // Use flat { i32 tag, [N x i8] data } representation for ALL non-recursive ADTs
-        // This includes n≤2 constructor ADTs which were previously lowered as Sum types.
-        // Using flat representation avoids infinite recursion through TyVar -> lower_type.
         if self.is_recursive_adt(name) {
             return self.context.ptr_type(AddressSpace::default()).into();
         }
@@ -121,8 +135,6 @@ impl<'ctx> TypeLowering<'ctx> {
             return *cached;
         }
 
-        // W4: Compute flat ADT type using largest variant's concrete LLVM type
-        let tag_type = self.context.i32_type();
         let variants: Vec<(String, Type)> = constructors
             .iter()
             .map(|c| {
@@ -132,14 +144,8 @@ impl<'ctx> TypeLowering<'ctx> {
                 )
             })
             .collect();
-        let data_type = self.compute_largest_payload_llvm_type(&variants);
+        let result = self.tagged_union_blob_type(&variants);
 
-        let result: BasicTypeEnum<'ctx> = self
-            .context
-            .struct_type(&[tag_type.into(), data_type], false)
-            .into();
-
-        // Cache the result
         self.adt_type_cache.insert(name.to_string(), result);
         result
     }
@@ -208,8 +214,9 @@ impl<'ctx> TypeLowering<'ctx> {
                 .collect();
 
             let result = if constructors.len() >= 3 {
-                // W4: Use largest variant's concrete LLVM type instead of opaque [N x i8]
-                let tag_type = self.context.i32_type();
+                // W5 blob via the shared layout authority — formerly the last
+                // W4 (typed largest-variant) island after 16d2f4f1 fixed
+                // `lower_nullary_adt`; every route must agree on one layout.
                 let variants: Vec<(String, Type)> = constructors
                     .iter()
                     .map(|c| {
@@ -219,11 +226,7 @@ impl<'ctx> TypeLowering<'ctx> {
                         )
                     })
                     .collect();
-                let data_type = self.compute_largest_payload_llvm_type(&variants);
-
-                self.context
-                    .struct_type(&[tag_type.into(), data_type], false)
-                    .into()
+                self.tagged_union_blob_type(&variants)
             } else {
                 // n≤2: Use existing Sum representation
                 let expanded = self.encode_adt_type(&constructors, &subst);
@@ -239,6 +242,18 @@ impl<'ctx> TypeLowering<'ctx> {
     }
 
     /// Lower a `Type::Adt` (flat enum with direct tag + payload).
+    ///
+    /// **Contract: `Type::Adt` is only ever spelled for a *flat enum* — a
+    /// non-recursive ADT with ≥2 constructors.** Unlike `lower_nullary_adt` /
+    /// `lower_app`, this path does NOT special-case the other shapes: a
+    /// single-constructor ADT lowers to its bare payload (no tag), a
+    /// zero-constructor ADT to an empty struct, and a recursive ADT to `ptr` —
+    /// none is ever encoded as `Type::Adt`, so `lower_adt` is never invoked for
+    /// them and would (incorrectly) build a tagged blob if it were. The
+    /// `lowering-consistency` check enforces this by gating the flat-adt route
+    /// to exactly this shape (ADR 12.7.26c D4 / `flat_adt_route_applies`); if a
+    /// future change ever emits `Type::Adt` for one of those shapes, add the
+    /// missing special-casing here rather than blobbing it.
     fn lower_adt(
         &mut self,
         name: &str,
@@ -252,23 +267,10 @@ impl<'ctx> TypeLowering<'ctx> {
             }
         }
 
-        // W5: Lower to { i32 tag, [N x i8] } with opaque byte array for data.
-        //
-        // We use a byte array instead of the typed largest variant to avoid
-        // ABI decomposition issues on ARM64 (and potentially other platforms).
-        // When LLVM passes a struct in registers, it decomposes based on field
-        // types. If variant A has an i32 at offset X but variant B has a ptr at
-        // the same offset, the upper bytes of the pointer get truncated.
-        // Using [N x i8] ensures uniform byte-level decomposition.
-        let tag_type = self.context.i32_type();
-        let largest_type = self.compute_largest_payload_llvm_type(variants);
-        let data_size = self.type_size(largest_type);
-        let data_type = self.context.i8_type().array_type(data_size as u32);
-
-        let result: BasicTypeEnum<'ctx> = self
-            .context
-            .struct_type(&[tag_type.into(), data_type.into()], false)
-            .into();
+        // W5 blob via the shared layout authority (see its doc for the ABI
+        // rationale and the split-brain hazard it prevents). Safe here because
+        // the contract above guarantees a ≥2-ctor non-recursive flat enum.
+        let result = self.tagged_union_blob_type(variants);
 
         // Cache 0-param ADTs
         if type_args.is_empty() {
@@ -303,27 +305,15 @@ impl<'ctx> TypeLowering<'ctx> {
         ret_ty.fn_type(&[env_ptr.into(), param_ty.into()], false)
     }
 
-    /// Lower a sum type (tagged union).
-    ///
-    /// W5 (ADR 11.4.26c): Uses opaque `[N x i8]` for the data field, matching
-    /// the `lower_adt` strategy. W4 originally used the larger variant's
-    /// concrete LLVM type, but W5 demonstrated this is ABI-unsafe: when LLVM
-    /// decomposes structs for register passing, typed fields cause
-    /// variant-dependent register sizing that can truncate pointers.
-    /// Using `[N x i8]` ensures uniform byte-level decomposition.
+    /// Lower a structural sum type (tagged union) — the W5 blob via the shared
+    /// layout authority (see its doc for the ABI rationale and the
+    /// split-brain hazard it prevents).
     fn lower_sum_type(&mut self, t1: &Type, t2: &Type) -> BasicTypeEnum<'ctx> {
-        let tag_type = self.context.i32_type();
-        let llvm_t1 = self.lower_type(t1);
-        let llvm_t2 = self.lower_type(t2);
-
-        let size1 = self.type_size(llvm_t1);
-        let size2 = self.type_size(llvm_t2);
-        let data_size = std::cmp::max(size1, size2);
-        let data_type = self.context.i8_type().array_type(data_size as u32);
-
-        self.context
-            .struct_type(&[tag_type.into(), data_type.into()], false)
-            .into()
+        let variants = [
+            ("inl".to_string(), t1.clone()),
+            ("inr".to_string(), t2.clone()),
+        ];
+        self.tagged_union_blob_type(&variants)
     }
 
     /// Lower a sum type directly from its Type representation.

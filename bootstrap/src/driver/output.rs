@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use crate::config::MAX_TYPE_DISPLAY_DEPTH;
 use crate::elaborate::Constructor;
+use tungsten_core::eval::term_to_nat;
 use tungsten_core::{Term, Type};
 
 use super::modules::SourceMap;
@@ -20,6 +21,11 @@ pub type AdtTypes = HashMap<String, (Vec<String>, Vec<Constructor>)>;
 /// Type alias definitions: name -> (params, target type).
 /// Used by `info` commands for display.
 pub type TypeAliases = HashMap<String, (Vec<String>, Type)>;
+
+/// Per-module value import targets keyed by canonical module path
+/// (ADR 12.7.26a §2.1). Codegen's colliding-import resolution input.
+pub type ValueImportTargetsByModule =
+    std::collections::BTreeMap<Vec<String>, crate::elaborate::ValueImportTargets>;
 
 /// Optional trace filters for elaboration diagnostics.
 #[derive(Clone, Default)]
@@ -58,6 +64,10 @@ pub struct ModuleCodegenUnit {
 /// Aggregates elaboration results at the project level (driver output).
 /// Unlike `ElabOutput` (per-module elaboration), this includes the source map
 /// and omits warnings (which are rendered inline during elaboration).
+///
+/// `Default` yields the all-empty output, for stub and test-fixture sites; the
+/// genuine builder spells out every field, so a new one is a compile error there.
+#[derive(Default)]
 pub struct ProjectOutput {
     /// The elaborated definitions (flat, for backward compatibility)
     pub defs: Vec<crate::elaborate::CoreDef>,
@@ -73,17 +83,25 @@ pub struct ProjectOutput {
     pub type_provenance: crate::elaborate::TypeProvenance,
     /// Source map for multi-file error reporting
     pub source_map: SourceMap,
-    /// Cached type encodings from Phase 1e (ADR 20.4.26c)
+    /// Cached type encodings from Encoding Finalization (ADR 20.4.26c)
     pub encoded_types: std::collections::HashMap<String, Type>,
-    /// Mutual recursion groups from Phase 1c.5 SCC (ADR 20.4.26c)
+    /// Mutual recursion groups from Recursion Grouping SCC (ADR 20.4.26c)
     pub mutual_recursion_groups: std::collections::HashMap<String, Vec<String>>,
     /// Parent type visibilities (ADR 14.5.26c).
-    /// Maps type name → declared visibility. Used by `info type visibility`.
+    /// Maps type name → declared visibility. Used by `info type members visibility`.
     pub type_visibilities: std::collections::HashMap<String, crate::ast::Visibility>,
     /// Per-field visibility overrides for record types (ADR 14.5.26c).
     /// Maps record name → per-field visibility (None = inherit parent).
     pub record_field_visibilities:
         std::collections::HashMap<String, Vec<Option<crate::ast::Visibility>>>,
+    /// Per-module value import targets, keyed by canonical module path
+    /// (ADR 12.7.26a §2.1): each module's `original name → canonical defining
+    /// module` table, consumed by codegen's colliding-import resolution.
+    pub value_import_targets: ValueImportTargetsByModule,
+    /// Termination annotations and proof-relevance (ADR 29.6.26e), so
+    /// `doctor check type termination` re-runs the gate's analysis on the
+    /// gate's own input rather than on a reconstruction of it.
+    pub termination_meta: std::collections::HashMap<String, crate::elaborate::DefTerminationMeta>,
 }
 
 impl ProjectOutput {
@@ -106,6 +124,8 @@ impl ProjectOutput {
 pub fn format_value(term: &Term) -> String {
     match term {
         Term::Zero => "0".to_string(),
+        Term::NatLit(n) => n.to_string(),
+        Term::IntLit(i) => i.to_string(),
         Term::Succ(n) => {
             if let Some(n) = term_to_nat(term) {
                 n.to_string()
@@ -126,15 +146,6 @@ pub fn format_value(term: &Term) -> String {
         Term::StringLit(s) => format!("\"{}\"", s),
         Term::Fold(_, t) => format_value(t),
         _ => format!("{:?}", term),
-    }
-}
-
-/// Try to convert a Term to a natural number.
-fn term_to_nat(term: &Term) -> Option<u64> {
-    match term {
-        Term::Zero => Some(0),
-        Term::Succ(n) => term_to_nat(n).map(|n| n + 1),
-        _ => None,
     }
 }
 
@@ -229,13 +240,10 @@ fn format_type_with_depth(ty: &Type, depth: usize) -> String {
 
 /// Format base (leaf) types that require no recursion.
 fn format_base_type(ty: &Type) -> Option<String> {
+    if let Some(name) = ty.primitive_name() {
+        return Some(name.to_string());
+    }
     match ty {
-        Type::Unit => Some("Unit".to_string()),
-        Type::Void => Some("Void".to_string()),
-        Type::Bool => Some("Bool".to_string()),
-        Type::Nat => Some("Nat".to_string()),
-        Type::Prop => Some("Prop".to_string()),
-        Type::String => Some("String".to_string()),
         Type::Error => Some("<error>".to_string()),
         Type::TyVar(name) => Some(name.strip_prefix('@').unwrap_or(name).to_string()),
         _ => None,
@@ -296,9 +304,25 @@ mod tests {
     use tungsten_core::types::Type;
 
     #[test]
+    fn test_format_value_renders_nat_representations_as_numerals() {
+        // Both Nat spellings must print as plain numerals (ADR 21.7.26e:
+        // literals > 64 are NatLit, so run output would otherwise show
+        // `NatLit(99)` — the golden regression that motivated this).
+        assert_eq!(format_value(&Term::NatLit(99)), "99");
+        // 14.9.26c: an `Int` result prints signed, not as its debug form.
+        assert_eq!(format_value(&Term::IntLit(-42)), "-42");
+        assert_eq!(format_value(&Term::nat(3)), "3");
+        assert_eq!(format_value(&Term::Zero), "0");
+        // A mixed chain (Succ over NatLit) can arise when evaluation wraps a
+        // literal — it must still render as one numeral.
+        assert_eq!(format_value(&Term::succ(Term::NatLit(9))), "10");
+    }
+
+    #[test]
     fn test_format_base_type_returns_some_for_base_types() {
         assert_eq!(format_base_type(&Type::Bool), Some("Bool".to_string()));
         assert_eq!(format_base_type(&Type::Nat), Some("Nat".to_string()));
+        assert_eq!(format_base_type(&Type::Int), Some("Int".to_string()));
         assert_eq!(format_base_type(&Type::Unit), Some("Unit".to_string()));
         assert_eq!(format_base_type(&Type::String), Some("String".to_string()));
         assert_eq!(format_base_type(&Type::Error), Some("<error>".to_string()));

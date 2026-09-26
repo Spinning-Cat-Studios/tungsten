@@ -5,6 +5,7 @@ use crate::error::ParseErrorKind;
 use crate::span::{Span, Spanned};
 use crate::token::TokenKind;
 
+mod attributes;
 mod extern_fns;
 
 use super::Parser;
@@ -50,13 +51,22 @@ impl Parser<'_> {
             return self.handle_stray_semicolon();
         }
 
+        // Attributes come first, so the dispatcher below still peeks at `fn`
+        // rather than at a `#`.
+        let attrs = self.parse_termination_attrs();
         let (item_kind, has_pub, has_pub_crate) = self.resolve_item_visibility();
+
+        if !attrs.is_empty() && item_kind != TokenKind::Fn {
+            self.error(ParseErrorKind::Expected(
+                "`fn` after a termination attribute".to_string(),
+            ));
+        }
 
         // Dispatch based on item kind (shared for both pub and non-pub paths)
         match item_kind {
             TokenKind::Mod => Some(Item::Mod(self.parse_mod_decl()?)),
             TokenKind::Use => Some(Item::Use(self.parse_use_decl()?)),
-            TokenKind::Fn => Some(Item::Function(self.parse_function()?)),
+            TokenKind::Fn => Some(Item::Function(self.parse_function(attrs)?)),
             TokenKind::Type => self.parse_type_item(),
             TokenKind::Struct => Some(Item::TypeDef(self.parse_struct()?)),
             TokenKind::Enum => Some(Item::TypeDef(self.parse_enum()?)),
@@ -152,7 +162,7 @@ impl Parser<'_> {
         self.peek_n(1)
     }
 
-    pub(super) fn parse_function(&mut self) -> Option<FunctionDef> {
+    pub(super) fn parse_function(&mut self, attrs: TerminationAttrs) -> Option<FunctionDef> {
         let start = self.current_span().start;
 
         // Parse visibility
@@ -174,6 +184,7 @@ impl Parser<'_> {
         let end = body.span().end;
 
         Some(FunctionDef {
+            attrs,
             visibility,
             name,
             type_params,

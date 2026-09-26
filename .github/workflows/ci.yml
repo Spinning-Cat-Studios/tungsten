@@ -13,7 +13,21 @@ jobs:
     name: Check (no codegen)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # tools/claude-hooks and tools/scs-notify are git submodules AND
+          # workspace members (ADR 20.7.26b, 14.8.26c) — every cargo
+          # invocation needs both checked out. Both are pinned by HTTPS URL
+          # in .gitmodules precisely so the PAT below can fetch them; an SSH
+          # URL is unauthenticatable here, because actions/checkout injects
+          # an HTTPS auth header and has no key.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo + scs-claude-hooks + scs-notify); the
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -29,6 +43,70 @@ jobs:
       - name: Test (no codegen)
         run: cargo test -p tungsten_core -p tungsten_bootstrap --no-default-features
 
+      # This workflow ships with the public repository, so it invokes only make
+      # targets the public make files define (ADR 25.9.26l D6, checked by
+      # `tungsten-snapshot leak-check`). The supply-chain, coverage,
+      # interception-table and playground jobs read files that do not ship and
+      # run in private-checks.yml instead.
+
+      # Cache-poisoning canary (ADR 4.7.26d). Host-side, no LLVM, ~2s, so it
+      # rides the fast check job. Catches a cold-vs-warm elab-cache divergence
+      # — the 4.7.26c class, which surfaces as "no tests found" / a spurious
+      # E0030 and is silent to every other gate.
+      - name: Cache-poisoning canary (cold vs warm)
+        run: make check-cache-poisoning-canary
+
+      # ADR 1.8.26b D1/D2, now CLOSED. The two repro fixtures are retained as
+      # regression fixtures: each returns a bit-packed vector where a set bit
+      # means the comparator called two DIFFERING values Equal, so the correct
+      # output is 0. Without this nothing executes them, and a fixture no gate
+      # runs stops testing anything. Until the fix landed this asserted the
+      # opposite — that both still went Stuck — which is why it caught the
+      # transition. ~10s.
+      - name: Comparator regression fixtures
+        run: make check-comparator-repros
+
+      # ADR 29.6.26f §4.1 / 1.8.26b. A passing `assert_eq` is not evidence that
+      # anything was compared: before 1.8.26b's D3 gate, `compare` at a type
+      # whose comparator could not be synthesized went silently Stuck and the
+      # test was reported `ok`. `mustfail_ast_compare.tg` asserts every type the
+      # positive suite covers the WRONG way round and requires each case to
+      # FAIL, so a type that silently stops being compared turns this red.
+      #
+      # D3 made that failure mode loud (NEVER COMPARED), but it closed one
+      # instance, not the class — an unlisted extern goes Stuck the same way —
+      # so the twin stays the standing guard. It ran nowhere automatically
+      # between 29.6.26f and here, which is the failure mode it exists to
+      # prevent, applied to itself. ~2min (elaborates the compiler's own graph).
+      - name: AST comparison suite is non-vacuous
+        run: make check-ast-compare-nonvacuous
+
+      # The same failure mode, applied to the CLASS rather than one instance
+      # (ADR 7.8.26a `/check-adr`). `mustfail_test_discovery.tg` proved that
+      # skipped tests do not satisfy `--require-tests`, was verified once by
+      # hand, and was then run by nothing — the exact state the step above was
+      # written to escape. This gate requires every `mustfail_*.tg` to be red
+      # AND to carry its own declared failure signature, so a fixture that
+      # starts failing to parse cannot pass as a fixture that still asserts.
+      # A new fixture with no declared signature is an error, not a skip.
+      # Seconds, not minutes: the ast_compare file is delegated, not re-run.
+      - name: Must-fail fixtures are red for their own reason
+        run: make check-mustfail-fixtures
+
+      # ADR 28.7.26a AC 3. The wasm32 build is verified in CI rather than by
+      # local report, because the ways it breaks are invisible locally to
+      # anyone not building for the target: a dependency that only fails on
+      # wasm32 (heed's C/LMDB step, uuid's randomness), or a module whose
+      # `#[cfg]` gate someone widens without thinking about the port.
+      #
+      # `--lib` is required — the package also declares a `[[bin]] tungsten`
+      # (clap, a filesystem CLI) that is not part of this port.
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build LLVM-free bootstrap for wasm32
+        run: cargo build -p tungsten_bootstrap --lib --no-default-features --target wasm32-unknown-unknown
+
   # Full build with LLVM codegen
   build-with-llvm:
     name: Build with LLVM (${{ matrix.os }})
@@ -42,7 +120,21 @@ jobs:
             llvm-prefix: /opt/homebrew/opt/llvm@18
     
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # tools/claude-hooks and tools/scs-notify are git submodules AND
+          # workspace members (ADR 20.7.26b, 14.8.26c) — every cargo
+          # invocation needs both checked out. Both are pinned by HTTPS URL
+          # in .gitmodules precisely so the PAT below can fetch them; an SSH
+          # URL is unauthenticatable here, because actions/checkout injects
+          # an HTTPS auth header and has no key.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo + scs-claude-hooks + scs-notify); the
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -70,7 +162,9 @@ jobs:
         env:
           LLVM_SYS_180_PREFIX: ${{ matrix.llvm-prefix }}
           LIBRARY_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/lib' || '' }}
-        run: cargo test
+        run: |
+          cargo build -p tungsten_core
+          cargo test
       
       - name: Test codegen crate
         env:
@@ -78,13 +172,73 @@ jobs:
           LIBRARY_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/lib' || '' }}
         run: cargo test -p tungsten_codegen
 
+      # ADR 12.7.26b: fail on any colliding-name extern-map misresolution in
+      # the self-hosted compiler (the ADR 12.7.26a silent-miscompile class).
+      # The self-host audit is clean as of the resolve_path dedup; this step
+      # keeps it clean. No LLVM emission — elaborate + partition only.
+      - name: Extern-map ambiguity audit
+        env:
+          LLVM_SYS_180_PREFIX: ${{ matrix.llvm-prefix }}
+          LIBRARY_PATH: ${{ runner.os == 'macOS' && '/opt/homebrew/lib' || '' }}
+        run: make check-extern-map-ambiguity
+
+      # ADR 28.7.26e: emit the self-hosted compiler's LLVM IR once and run all
+      # six dir-scanning `doctor check ir` audits over it in --strict mode.
+      # Until this step every one of them ran only when a human remembered, and
+      # three of the six were red on the compiler's own output — all false
+      # positives from heuristics that had drifted from emitted IR while their
+      # hand-written fixtures stayed green. `--strict` also fails a *vacuous*
+      # pass, so an emitter rename cannot quietly empty an audit's candidate set.
+      #
+      # main-push only, and Ubuntu only: it costs a full codegen emit (~2,055
+      # `.ll` files), and one host corpus is the unit of work (the ADR's
+      # non-goal on a second architecture).
+      - name: IR audits over the compiler's emitted IR
+        if: matrix.os == 'ubuntu-latest' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          LLVM_SYS_180_PREFIX: ${{ matrix.llvm-prefix }}
+        run: make check-ir-audits
+
+      # ADR 5.8.26a D4a: the musttail TCO gate (ADR 1.7.26e R7/R8) — fail on any
+      # un-allowlisted HIGH-risk self-recursive SKIP, or an allowlist entry that
+      # participates in recursion.
+      #
+      # It was fully implemented in July, described by `info pipeline` as "the
+      # deterministic CI form", and run by nothing: no make target, no workflow.
+      # That is what let 17.7.26d park mutual-tail Class-P musttail as
+      # "self-guarding — the R8 gate cannot let this land silently". A gate
+      # nobody runs looks exactly like a gate that passes.
+      #
+      # Same guard and cadence as the IR audits above, and for the same reason:
+      # it costs a full sequential codegen run over the self-hosted compiler,
+      # and one host run is the unit of work.
+      - name: musttail TCO gate
+        if: matrix.os == 'ubuntu-latest' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          LLVM_SYS_180_PREFIX: ${{ matrix.llvm-prefix }}
+        run: make check-tco-gate
+
   # Integration tests — golden tests, example type-checking, interpreter runs
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: build-with-llvm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # tools/claude-hooks and tools/scs-notify are git submodules AND
+          # workspace members (ADR 20.7.26b, 14.8.26c) — every cargo
+          # invocation needs both checked out. Both are pinned by HTTPS URL
+          # in .gitmodules precisely so the PAT below can fetch them; an SSH
+          # URL is unauthenticatable here, because actions/checkout injects
+          # an HTTPS auth header and has no key.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo + scs-claude-hooks + scs-notify); the
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -105,7 +259,7 @@ jobs:
       - name: Golden tests
         env:
           LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-        run: make check-golden
+        run: make golden
       
       - name: Type-check examples
         run: |
@@ -166,7 +320,7 @@ jobs:
 
           echo "PASS: Docker compile smoke test succeeded"
 
-  # Self-host build + L2–L4 verification (macOS only)
+  # Self-host build + verification ladder: self-host → self-compiled → L4 (macOS only)
   # x86_64 self-host deferred to v2.0
   self-host:
     name: Self-Host (macOS)
@@ -174,7 +328,21 @@ jobs:
     needs: build-with-llvm
     
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # tools/claude-hooks and tools/scs-notify are git submodules AND
+          # workspace members (ADR 20.7.26b, 14.8.26c) — every cargo
+          # invocation needs both checked out. Both are pinned by HTTPS URL
+          # in .gitmodules precisely so the PAT below can fetch them; an SSH
+          # URL is unauthenticatable here, because actions/checkout injects
+          # an HTTPS auth header and has no key.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo + scs-claude-hooks + scs-notify); the
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -189,7 +357,7 @@ jobs:
           LIBRARY_PATH: /opt/homebrew/lib
         run: cargo build --release
       
-      - name: L2 — Bootstrap typechecks self-hosted source
+      - name: Self-host — bootstrap typechecks self-hosted source
         run: ./target/release/tungsten check src/compiler/main.tg --max-errors=0
       
       - name: Self-compile — bootstrap → tungsten1
@@ -198,14 +366,13 @@ jobs:
           LIBRARY_PATH: /opt/homebrew/lib
         run: ./target/release/tungsten compile src/compiler/main.tg -o tungsten1 -v
       
-      - name: L3 — tungsten1 typechecks self-hosted source
+      - name: Self-compiled — tungsten1 typechecks self-hosted source
         run: ./tungsten1 check src/compiler/main.tg --max-errors=0
       
       - name: Self-compile step 2 — tungsten1 → tungsten2
         env:
           LLVM_SYS_180_PREFIX: /opt/homebrew/opt/llvm@18
           LIBRARY_PATH: /opt/homebrew/lib
-          TUNGSTEN_CODEGEN_JOBS: 1
         run: ./tungsten1 compile src/compiler/main.tg -o tungsten2 -v
       
       - name: L4 — tungsten2 typechecks self-hosted source

@@ -1,0 +1,13 @@
+[E0010] Error: expected `Bool`, found `Nat`
+   ╭─[tests/golden/error/int_match_non_bool_guard.tg:4:14]
+   │
+ 2 │ fn main() -> Nat {
+   │              ─┬─  
+   │               ╰─── expected due to return type
+   │ 
+ 4 │         x if x => 1,
+   │              ┬  
+   │              ╰── expected `Bool`, found `Nat`
+───╯
+
+error: aborting due to 1 error

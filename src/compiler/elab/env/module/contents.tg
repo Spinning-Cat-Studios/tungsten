@@ -1,0 +1,133 @@
+// src/compiler/elab/env/module/contents.tg
+// Module contents: the per-module type/value/constructor/import tables.
+
+use driver::ffi::{List, Nil, Cons};
+use elab::env::defs::{
+    TypeDefInfo, ValueDefInfo, ConstructorInfo,
+    CtorStore, ctor_store_empty, ctor_store_add
+};
+use elab::env::module::path::{ElabModulePath};
+use elab::env::module::imports::{
+    Import, MaybeImport, ImportStore,
+    import_store_empty, import_store_add, import_store_lookup
+};
+
+// ===========================================================================
+// MODULE CONTENTS
+// ===========================================================================
+
+/// Contents of a module (types, values, constructors, imports).
+///
+/// Two fields are list+index **stores** rather than bare lists:
+/// `constructors` (`CtorStore`, ADR 21.7.26c) and `imports` (`ImportStore`,
+/// ADR 5.8.26b). Both nest the pair inside one value so it cannot be threaded
+/// apart at a call site; iteration consumers read `.all` on either.
+///
+/// **`values` and `types` are bare lists deliberately, not by omission.**
+/// `values` was indexed and reverted: its scan is the profile's #1 symbol but
+/// the path is insert-dominated 42:1, so the index cost more than it saved and
+/// the run got 1.47× slower (ADR 5.8.26c §6.3 — the argument is on
+/// `value_def_list_lookup`). `types` was measured at 3.96% ≈ 0.13 s, below any
+/// gate worth acting on, and shares the same insert-heavy registration path.
+pub type ModuleContents = {
+    path: ElabModulePath,
+    types: List<TypeDefInfo>,
+    values: List<ValueDefInfo>,
+    constructors: CtorStore,
+    imports: ImportStore
+}
+
+/// Single construction point for ModuleContents (ADR 21.7.26c D3): `.tg` has
+/// no record-update syntax, so every builder funnels through this one literal
+/// — a future field is a one-function edit instead of five.
+fn module_contents_with(
+    path: ElabModulePath,
+    types: List<TypeDefInfo>,
+    values: List<ValueDefInfo>,
+    constructors: CtorStore,
+    imports: ImportStore
+) -> ModuleContents {
+    {
+        path: path,
+        types: types,
+        values: values,
+        constructors: constructors,
+        imports: imports
+    }
+}
+
+/// Create empty module contents.
+pub fn module_contents_empty(path: ElabModulePath) -> ModuleContents {
+    module_contents_with(path, Nil(), Nil(), ctor_store_empty(), import_store_empty())
+}
+
+/// Add a type to module contents.
+pub fn module_contents_add_type(contents: ModuleContents, def: TypeDefInfo) -> ModuleContents {
+    module_contents_with(
+        contents.path, Cons(def, contents.types), contents.values,
+        contents.constructors, contents.imports
+    )
+}
+
+/// Add a value to module contents.
+pub fn module_contents_add_value(contents: ModuleContents, def: ValueDefInfo) -> ModuleContents {
+    module_contents_with(
+        contents.path, contents.types, Cons(def, contents.values),
+        contents.constructors, contents.imports
+    )
+}
+
+/// Add a constructor to module contents.
+/// Idempotent: skips if an identical entry already exists (ADR 7.5.26f).
+/// "Identical" means matching (parent_type, name, index, arity, field_types).
+/// The check is O(log n) via the CtorStore dedup index (ADR 21.7.26c),
+/// replacing the full-list scan that dominated the self-compiled check.
+pub fn module_contents_add_constructor(contents: ModuleContents, info: ConstructorInfo) -> ModuleContents {
+    module_contents_with(
+        contents.path, contents.types, contents.values,
+        ctor_store_add(contents.constructors, info), contents.imports
+    )
+}
+
+/// Add an import to module contents — the sole insertion funnel, and so the
+/// sole writer of `import_index` (ADR 5.8.26b).
+pub fn module_contents_add_import(contents: ModuleContents, imp: Import) -> ModuleContents {
+    module_contents_with(
+        contents.path, contents.types, contents.values,
+        contents.constructors, import_store_add(contents.imports, imp)
+    )
+}
+
+/// Look up an import by local name — O(log n) through the index, replacing
+/// the linear `import_list_lookup` cons scan that the 2026-08-05 profile put
+/// at 56.98% of the self-compiled check (ADR 5.8.26b).
+pub fn module_contents_lookup_import(contents: ModuleContents, name: String) -> MaybeImport {
+    import_store_lookup(contents.imports, name)
+}
+
+/// Add multiple types to module contents in one step.
+pub fn module_contents_add_types(contents: ModuleContents, defs: List<TypeDefInfo>) -> ModuleContents {
+    match defs {
+        Nil() => contents,
+        Cons(def, rest) =>
+            module_contents_add_types(module_contents_add_type(contents, def), rest)
+    }
+}
+
+/// Add multiple values to module contents in one step.
+pub fn module_contents_add_values(contents: ModuleContents, defs: List<ValueDefInfo>) -> ModuleContents {
+    match defs {
+        Nil() => contents,
+        Cons(def, rest) =>
+            module_contents_add_values(module_contents_add_value(contents, def), rest)
+    }
+}
+
+/// Add multiple constructors to module contents in one step.
+pub fn module_contents_add_constructors(contents: ModuleContents, infos: List<ConstructorInfo>) -> ModuleContents {
+    match infos {
+        Nil() => contents,
+        Cons(info, rest) =>
+            module_contents_add_constructors(module_contents_add_constructor(contents, info), rest)
+    }
+}

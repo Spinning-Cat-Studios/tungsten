@@ -1,0 +1,208 @@
+// src/compiler/elab/items/termination/mod.tg
+// Registration half of the termination mirror (ADR 19.8.26d §2.3).
+//
+// The soundness RULE is not mirrored here. Both compilers call one
+// `termination::analyze_with_carried` in `tungsten_core`; what crosses this
+// seam is the definition environment the rule runs over.
+//
+// ## Where the two halves are read
+//
+// A definition's ANNOTATIONS and ROLE come from its `Item`, during Body
+// Elaboration — `#[partial]` / `#[decreasing(arg)]` and whether the item is a
+// theorem, lemma or axiom. Its TYPE and TERM come from the `ElabDef` the same
+// elaboration produced, and are read once the whole module tree is done, which
+// is the only point at which imported and freshly elaborated definitions are
+// in one set. That is the bootstrap's reason for running its gate there too.
+//
+// ## Why the definition list is walked three times
+//
+// Once to declare (names only), once to reduce, once to retain. The protocol
+// and the measurement behind it are in `elab/ffi/termination.tg`; the short
+// version is that holding every definition's whole elaborated body live at
+// once cost +587 MiB, and the analysis needs a real term only inside a
+// recursive component.
+//
+// What this file can get wrong is the ENVIRONMENT, not the verdict — and a
+// lost definition is a program that passes termination only because its
+// offending recursion never arrived. Every extern therefore returns Bool and
+// every helper threads that Bool, so a mid-stream failure is neither invisible
+// nor folded away by a later success.
+
+pub mod report;
+
+pub use elab::items::termination::report::*;
+
+use parser::ast::{Item, ItemFn, ItemTheorem, ItemLemma, ItemAxiom, ident_name};
+use parser::ast::nodes::attributes::{attribute_list_has, attribute_list_arg};
+use parser::ast::nodes::items::{item_attributes};
+use parser::option::{Option, None, Some};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::{
+    tg_string_to_cstr,
+    tg_termination_reset, tg_termination_note_item, tg_termination_declare,
+    tg_termination_add_def, tg_termination_plan, tg_termination_check
+};
+use elab::items::result::{ElabDef};
+
+// ===========================================================================
+// PASS BOUNDARY
+// ===========================================================================
+
+/// Start a fresh definition environment for one whole-program elaboration.
+pub fn termination_begin_program() -> Unit {
+    tg_termination_reset()
+}
+
+// ===========================================================================
+// PER-ITEM NOTES
+// ===========================================================================
+
+/// Note one item's attributes and proof-relevance.
+///
+/// Called for every item during Body Elaboration, not only the annotated ones:
+/// the registry keys on name and last-write-wins, so re-entering an item
+/// overwrites rather than duplicates, and an item that never becomes an
+/// `ElabDef` is simply never declared and so never read.
+///
+/// The four kinds that make a definition proof-relevant are the four the
+/// bootstrap's `record_termination_meta` matches on — theorem, lemma and axiom
+/// are proofs; a function is executable.
+pub fn termination_note_item(item: Item) -> Bool {
+    let name = termination_item_name(item);
+    if name == "" {
+        true
+    } else {
+        let attrs = item_attributes(item);
+        tg_termination_note_item(
+            tg_string_to_cstr(name),
+            attribute_list_has(attrs, "partial"),
+            termination_decreasing_cstr(attribute_list_arg(attrs, "decreasing")),
+            termination_item_is_proof(item)
+        )
+    }
+}
+
+/// The name a definition is registered under, or `""` for an item that
+/// produces no definition.
+fn termination_item_name(item: Item) -> String {
+    match item {
+        ItemFn(f) => ident_name(f.name),
+        ItemTheorem(t) => ident_name(t.name),
+        ItemLemma(t) => ident_name(t.name),
+        ItemAxiom(a) => ident_name(a.name),
+        _ => ""
+    }
+}
+
+/// Whether the item is proof-relevant. The distinction is the whole point of
+/// taint: a partial constant is welcome in executable code and inadmissible in
+/// a proof.
+fn termination_item_is_proof(item: Item) -> Bool {
+    match item {
+        ItemTheorem(_) => true,
+        ItemLemma(_) => true,
+        ItemAxiom(_) => true,
+        _ => false
+    }
+}
+
+/// The `#[decreasing(arg)]` parameter as a C string, or NULL when absent.
+///
+/// A null pointer rather than `INVALID_HANDLE`: this argument is a string
+/// address, not an arena index, so address 0 cannot be mistaken for a real
+/// value the way handle 0 can.
+fn termination_decreasing_cstr(arg: Option<Ident>) -> Nat {
+    match arg {
+        None => 0,
+        Some(ident) => tg_string_to_cstr(ident_name(ident))
+    }
+}
+
+// ===========================================================================
+// THE THREE STREAMS
+// ===========================================================================
+
+/// Whether this compiler mirrors the DESCENT half of the termination gate.
+///
+/// **False, and the reason is in this compiler's own Core, not in the engine.**
+/// The elaborator does not emit a match's payload projections into the Core
+/// term: for a constructor pattern with more than one field,
+/// `bind_constructor_in_scope` binds the source variables in the elaboration
+/// ENVIRONMENT and gives the `Case` arm the synthetic binder `_payload`, so
+/// the arm body references `t` as a **free** variable rather than as
+/// `let t = snd _payload in …`. Descent reasons about size by following
+/// exactly those bindings, so it can establish no relation between `t` and the
+/// decreasing root and refuses every multi-field structural recursion:
+/// measured at **282** false E0710 rejections over `src/compiler/main.tg`,
+/// where the bootstrap has none.
+///
+/// A one-field constructor is accepted, because there the source variable IS
+/// the arm binder — which is the minimal reproducer, and the reason this is a
+/// Core-fidelity gap rather than a disagreement about the rule.
+///
+/// The taint half needs none of that: it follows `Global` occurrences and the
+/// `#[partial]` / proof annotations, both of which this compiler's Core and
+/// parser carry faithfully. So E0711 is mirrored and E0710 waits for the
+/// lowering fix (ADR 19.8.26d §7 records the successor).
+pub fn termination_mirrors_descent() -> Bool { false }
+
+/// Declare, reduce, plan, retain and check the whole program's definitions.
+///
+/// Returns the rejection count; the rejections themselves are read back
+/// through `report.tg`.
+pub fn termination_check_program(defs: List<ElabDef>) -> Nat {
+    let declared = termination_declare_all(defs, true);
+    let reduced = termination_stream_all(defs, declared);
+    let planned = tg_termination_plan(termination_mirrors_descent());
+    // Nothing planned means nothing to retain, so the second stream is skipped
+    // rather than run for its side effects — which is the whole saving of the
+    // taint-only configuration.
+    let retained = if planned == 0 {
+        reduced
+    } else {
+        termination_stream_all(defs, reduced)
+    };
+    if retained {
+        tg_termination_check()
+    } else {
+        // A stream that lost a definition cannot be checked into a verdict:
+        // the missing one is exactly the definition whose absence makes the
+        // rest look admissible. Report nothing and let the protocol error the
+        // externs recorded stand.
+        0
+    }
+}
+
+/// Declare every definition name, fixing the node set before any reduction.
+fn termination_declare_all(defs: List<ElabDef>, ok: Bool) -> Bool {
+    match defs {
+        Nil() => ok,
+        Cons(def, rest) => {
+            let declared = tg_termination_declare(tg_string_to_cstr(def.name));
+            termination_declare_all(rest, termination_both_ok(ok, declared))
+        }
+    }
+}
+
+/// Offer every definition's payload, in whichever phase the registry is in.
+fn termination_stream_all(defs: List<ElabDef>, ok: Bool) -> Bool {
+    match defs {
+        Nil() => ok,
+        Cons(def, rest) => {
+            let added = tg_termination_add_def(
+                tg_string_to_cstr(def.name), def.ty, def.term
+            );
+            termination_stream_all(rest, termination_both_ok(ok, added))
+        }
+    }
+}
+
+/// Whether BOTH protocol calls succeeded — the failure-keeping fold the
+/// streams thread.
+///
+/// Named for what the answer means rather than for its place in a sequence, and
+/// matching `positivity_both_ok` next door: a `false` from either side
+/// survives, so a lost definition cannot be folded away by a later success.
+pub fn termination_both_ok(ok_so_far: Bool, ok_now: Bool) -> Bool {
+    ok_so_far && ok_now
+}

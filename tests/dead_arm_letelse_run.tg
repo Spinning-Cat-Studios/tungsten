@@ -1,0 +1,86 @@
+// tests/dead_arm_letelse_run.tg — ADR 3.7.26a regression fixture
+//
+// Mirrors the shape of src/compiler/elab/env/resolve.tg
+// (env_resolve_type_via_imports and siblings): a self-recursive list walk
+// whose Cons arm guards with `if`, then uses
+// `let <Ctor>(x) = expr else { return <recursive call> }` — a let-else whose
+// else block terminates control flow with an early return of the recursive
+// call. The function returns a payload-carrying ADT, so on the unfixed
+// compiler the dead (terminated) else arm's unit placeholder `{}` is unified
+// into the result type and the ADR 2.7.26b T1 guard refuses the shrinking
+// aggregate cast `{ i32, [N x i8] }` → `{}`.
+//
+// Pre-fix:  `tungsten compile tests/dead_arm_letelse_run.tg` fails with the
+//           T1 shrinking-cast error (pinning the buggy lowering path).
+// Post-fix: compiles, and `tungsten test` passes all test_* value checks.
+
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+fn assert_eq_nat(a: Nat, b: Nat) -> Unit { tg_assert_eq_nat(a, b) }
+
+type List<T> = Cons(T, List<T>) | Nil
+
+type MaybeHit = NoHit() | SomeHit(Nat)
+
+type Entry = { key: Nat, payload: Nat }
+
+fn probe(n: Nat) -> MaybeHit {
+    if n >= 100 { SomeHit(n) } else { NoHit() }
+}
+
+// Self-recursive list walk; the let-else's else block early-returns the
+// recursive call (the dead arm), the happy path falls through to a
+// payload-carrying constructor.
+fn walk(entries: List<Entry>, target: Nat) -> MaybeHit {
+    match entries {
+        Nil() => NoHit(),
+        Cons(e, rest) =>
+            if e.key == target {
+                let SomeHit(v) = probe(e.payload) else {
+                    return walk(rest, target)
+                };
+                SomeHit(v + 1)
+            } else {
+                walk(rest, target)
+            }
+    }
+}
+
+fn hit_value(m: MaybeHit) -> Nat {
+    match m {
+        NoHit() => 0,
+        SomeHit(v) => v
+    }
+}
+
+fn sample() -> List<Entry> {
+    Cons({ key: 1, payload: 5 },       // key matches target=1, probe misses (5 < 100) → dead-arm return path
+    Cons({ key: 2, payload: 200 },     // key mismatch → plain recursive arm
+    Cons({ key: 1, payload: 150 },     // key matches, probe hits → SomeHit(151)
+    Nil())))
+}
+
+// Happy path resolves through the let-else success continuation.
+pub fn test_walk_hit() -> Unit {
+    assert_eq_nat(hit_value(walk(sample(), 1)), 151)
+}
+
+// Every arm early-returns / recurses to exhaustion → NoHit.
+pub fn test_walk_miss() -> Unit {
+    assert_eq_nat(hit_value(walk(sample(), 9)), 0)
+}
+
+// First element takes the dead-arm early-return (probe misses), recursion
+// must still deliver the later hit — value-correctness of the dead-arm path.
+pub fn test_walk_first_probe_misses() -> Unit {
+    assert_eq_nat(hit_value(walk(sample(), 1)), 151)
+}
+
+// Exit-code gate (classp convention): 0 iff every path is value-correct.
+// Non-zero identifies the failing scenario.
+fn main() -> Nat {
+    if hit_value(walk(sample(), 1)) == 151 {
+        if hit_value(walk(sample(), 9)) == 0 {
+            if hit_value(walk(sample(), 2)) == 201 { 0 } else { 3 }
+        } else { 2 }
+    } else { 1 }
+}

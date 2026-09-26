@@ -13,11 +13,11 @@ impl Env {
     // Type definitions
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Register a type name as a stub (for Phase 1a).
+    /// Register a type name as a stub (for Type-Name Registration).
     ///
     /// This makes the type name available for import resolution before
     /// the type body is fully elaborated. The stub will be replaced
-    /// by the full definition in Phase 1c.
+    /// by the full definition in Type-Body Collection.
     ///
     /// The `params` argument captures the type parameter names so that
     /// forward references to generic types (e.g., `Forest<T>` referenced

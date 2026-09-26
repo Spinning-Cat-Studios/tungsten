@@ -1,0 +1,15 @@
+[W0001] Warning: unreachable pattern
+   ╭─[tests/golden/check/int_match_duplicate_literal.tg:6:13]
+   │
+ 5 │         3 => 1,
+   │         ┬  
+   │         ╰── an earlier arm already matches this value
+ 6 │         1 | 3 => 2,
+   │             ┬  
+   │             ╰── 
+   │ 
+   │ Help: remove the duplicate literal
+───╯
+
+warning: 1 warning emitted
+✓ tests/golden/check/int_match_duplicate_literal.tg: 1 definition(s), all OK

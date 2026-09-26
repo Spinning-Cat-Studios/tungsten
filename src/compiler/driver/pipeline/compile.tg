@@ -4,16 +4,34 @@
 // Delegates codegen to the bootstrap compiler binary via subprocess.
 // The self-hosted check runs first for diagnostics; if it passes,
 // the bootstrap binary produces the actual binary.
+//
+// ## The consequence, which is easy to miss (ADR 3.9.26a)
+//
+// The self-host's OWN elaboration never reaches the emitted binary. `tungsten2`
+// is elaborated twice — once by `tungsten1` here, discarded, and once by the
+// bootstrap below, and it is the BOOTSTRAP's elaboration that becomes machine
+// code. Two things follow, and both have already cost an ADR:
+//
+// - A defect in the self-hosted elaborator can produce a wrong Core term AND a
+//   correct `tungsten2`, so no test that runs `tungsten2` can see it. ADR
+//   20.8.26c's thesis predicted a lexing failure in `tungsten2` that cannot
+//   happen, for exactly this reason.
+// - `src/compiler/codegen/` is on no driver path at all. It is imported only by
+//   `test_codegen*.tg` / `test_cir_captures.tg`; see its mod.tg.
+//
+// Census: `tungsten doctor audit-driver-reach src/compiler/main.tg`.
 
 use driver::ffi::{
     eprintln, stderr_is_tty,
     List, Nil, Cons,
-    exec_process, get_env_var, current_exe_dir,
-    file_exists, path_join, string_len
+    exec_process_outcome, exec_succeeded, string_len
 };
 use driver::util::{
     Option, Some, None,
     string_eq, nat_to_string, list_reverse
+};
+use driver::pipeline::bootstrap_lookup::{
+    find_bootstrap_choice, bootstrap_source_label, bootstrap_failure_message
 };
 use driver::cli::{CheckOpts, CompileOpts};
 use driver::modules::build::{strip_tg_extension};
@@ -33,15 +51,15 @@ pub fn run_compile(opts: CompileOpts) -> PipelineResult {
     
     // First, run the check pipeline
     let max_errors = default_max_errors();
-    let check_opts: CheckOpts = { file: opts.file, verbose: opts.verbose, max_errors: max_errors, dump_core: None, check_tyvar_escape: false, elab_mode: ElabCompile };
+    let check_opts: CheckOpts = { file: opts.file, verbose: opts.verbose, max_errors: max_errors, dump_core: None, dump_core_terms: None, check_tyvar_escape: false, check_free_vars: false, check_well_typed: false, elab_mode: ElabCompile };
     let check_result = run_check(check_opts);
     
     match check_result {
         PipelineErr(n) => PipelineErr(n),
         PipelineOk(def_count) => {
             // Check succeeded — delegate codegen to bootstrap binary
-            let bootstrap = find_bootstrap_binary();
-            
+            let bootstrap = find_bootstrap_choice();
+
             // Use sentinel: empty string means "not specified", derive from file
             let output = if string_eq(opts.output, "") {
                 strip_tg_extension(opts.file)
@@ -56,50 +74,28 @@ pub fn run_compile(opts: CompileOpts) -> PipelineResult {
             
             if opts.verbose {
                 eprintln(colorize_bold("info", ColorCyan, use_color) ++
-                        ": delegating codegen to bootstrap (" ++ bootstrap ++ ")")
+                        ": delegating codegen to bootstrap (" ++ bootstrap.path ++
+                        ", chosen by " ++ bootstrap_source_label(bootstrap.source) ++ ")")
             };
-            
-            let exit_code = exec_process(bootstrap, args);
-            
-            if exit_code == 0 {
+
+            // `let` first: an effectful call written into an `if` condition runs
+            // TWICE on the self-compiled binary (see driver/pipeline/test/execute.tg).
+            let outcome = exec_process_outcome(bootstrap.path, args);
+
+            if exec_succeeded(outcome) {
                 if opts.verbose {
                     eprintln(colorize_bold("info", ColorCyan, use_color) ++
                             ": compilation succeeded (" ++ nat_to_string(def_count) ++ " definitions)")
                 };
                 PipelineOk(def_count)
             } else {
+                // Unconditionally — not only under `-v`. The path is the whole
+                // diagnosis when the resolution was wrong (ADR 3.9.26b §2.2).
                 eprintln(colorize_bold("error", ColorRed, use_color) ++
-                        ": bootstrap codegen failed (exit code " ++ nat_to_string(exit_code) ++ ")");
+                        bootstrap_failure_message(bootstrap, outcome));
                 PipelineErr(1)
             }
         }
-    }
-}
-
-/// Find the bootstrap compiler binary.
-///
-/// Resolution order:
-/// 1. TUNGSTEN_BOOTSTRAP_BIN env var (explicit override)
-/// 2. <exe_dir>/tungsten-bootstrap (release archive layout)
-/// 3. ./target/release/tungsten (dev fallback)
-pub fn find_bootstrap_binary() -> String {
-    match get_env_var("TUNGSTEN_BOOTSTRAP_BIN") {
-        Some(path) => path,
-        None() => find_bootstrap_beside_exe()
-    }
-}
-
-fn find_bootstrap_beside_exe() -> String {
-    match current_exe_dir() {
-        Some(dir) => {
-            let candidate = path_join(dir, "tungsten-bootstrap");
-            if file_exists(candidate) {
-                candidate
-            } else {
-                "./target/release/tungsten"
-            }
-        },
-        None() => "./target/release/tungsten"
     }
 }
 

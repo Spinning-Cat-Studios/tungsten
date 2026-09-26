@@ -144,3 +144,39 @@ fn test_category_dead_code_after_return() {
         HintCategory::ControlFlow
     );
 }
+
+#[test]
+fn test_category_internal_error() {
+    let kind = ElabErrorKind::InternalError("broken invariant".to_string());
+    assert_eq!(HintCategory::from_error_kind(&kind), HintCategory::General);
+}
+
+#[test]
+fn test_category_match_scrutinee_not_adt() {
+    let kind = ElabErrorKind::MatchScrutineeNotAdt {
+        adt_name: Some("Opt".to_string()),
+        found: Type::Nat,
+    };
+    assert_eq!(
+        HintCategory::from_error_kind(&kind),
+        HintCategory::PatternMatching
+    );
+}
+
+#[test]
+fn test_category_return_outside_function() {
+    let kind = ElabErrorKind::ReturnOutsideFunction;
+    assert_eq!(
+        HintCategory::from_error_kind(&kind),
+        HintCategory::ControlFlow
+    );
+}
+
+#[test]
+fn test_category_comparator_unavailable() {
+    let kind = ElabErrorKind::ComparatorUnavailable("Nat -> Nat".to_string());
+    assert_eq!(
+        HintCategory::from_error_kind(&kind),
+        HintCategory::TypeMismatch
+    );
+}

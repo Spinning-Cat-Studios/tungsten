@@ -104,13 +104,14 @@ impl<'ctx> CodeGen<'ctx> {
             return Ok(None);
         }
 
-        // ABI safety: struct returns/params may be incompatible with
-        // musttail depending on target and call kind (ADR 12.5.26e/f).
-        // Indirect closure calls remain strict on AArch64.
-        if let Err(_reason) = self.check_musttail_abi_safety(
-            callee_fn_type,
-            crate::codegen::abi::MusttailCallKind::IndirectClosure,
-        ) {
+        // ABI safety (ADR 1.7.26e R6): exact lowered-signature gate over the
+        // flat (by-value) descriptors of caller and callee — a by-value struct
+        // return/param or any signature mismatch blocks musttail (LLVM 18).
+        // Indirect closure calls remain strict on AArch64 (ADR 12.5.26e/f).
+        let caller_sig =
+            crate::codegen::abi::LoweredSignature::from_flat_fn_type(current_fn.get_type());
+        let callee_sig = crate::codegen::abi::LoweredSignature::from_flat_fn_type(callee_fn_type);
+        if caller_sig.musttail_compatible(&callee_sig).is_err() {
             return Ok(None);
         }
 

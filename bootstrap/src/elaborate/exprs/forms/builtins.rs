@@ -118,6 +118,36 @@ impl<'a> Elaborator<'a> {
         Ok((Term::str_len(str_term), Type::Nat))
     }
 
+    /// Elaborate `to_int(n)` — the `Nat → Int` bridge (ADR 14.9.26c §2.4).
+    /// The identity on the value; traps above the signed maximum.
+    pub(in crate::elaborate::exprs) fn elab_to_int(
+        &mut self,
+        args: &[Expr],
+        span: Span,
+    ) -> ElabResult<(Term, Type)> {
+        if args.len() != 1 {
+            return Err(ElabError::arity_mismatch(span, 1, args.len())
+                .with_help("`to_int` takes exactly one argument: to_int(nat)"));
+        }
+        let nat_term = self.check(&args[0], &Type::Nat)?;
+        Ok((Term::nat_to_int(nat_term), Type::Int))
+    }
+
+    /// Elaborate `from_int(i)` — the `Int → Nat` bridge (ADR 14.9.26c §2.4).
+    /// Clamps negatives to 0, as Lean's `Int.toNat` does.
+    pub(in crate::elaborate::exprs) fn elab_from_int(
+        &mut self,
+        args: &[Expr],
+        span: Span,
+    ) -> ElabResult<(Term, Type)> {
+        if args.len() != 1 {
+            return Err(ElabError::arity_mismatch(span, 1, args.len())
+                .with_help("`from_int` takes exactly one argument: from_int(int)"));
+        }
+        let int_term = self.check(&args[0], &Type::Int)?;
+        Ok((Term::int_to_nat(int_term), Type::Nat))
+    }
+
     /// Elaborate `substring(s, start, len)` - get substring
     pub(in crate::elaborate::exprs) fn elab_substring(
         &mut self,
@@ -141,6 +171,11 @@ impl<'a> Elaborator<'a> {
 
     // ═══════════════════════════════════════════════════════════════════════
     // Test Assertions (ADR 4.5.26g, ADR 12.5.26c)
+    //
+    // Every `ElabError::other` below is a test-harness verdict or a misuse of
+    // the harness itself (wrong arity, non-literal argument, wrong mode) —
+    // deliberately uncoded, because the message is the whole product and a
+    // code would dress the harness up as a language diagnostic (ADR 15.8.26b).
     // ═══════════════════════════════════════════════════════════════════════
 
     /// Elaborate `expect_type(expr, "TypeString")` — compile-time type assertion.

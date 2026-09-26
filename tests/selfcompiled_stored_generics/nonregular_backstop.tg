@@ -1,0 +1,30 @@
+// tests/selfcompiled_stored_generics/nonregular_backstop.tg
+// ADR 21.7.26k (D4): the L2 backstop cell. A NON-REGULAR generic (the
+// recursive occurrence instantiates the parameter at a different type) must
+// surface a RENDERED L2 error under `./tungsten1 check` — never silent
+// divergence or unbounded growth. Pinned behaviour (23 Jul 2026): tungsten1
+// rejects the instantiation with E0999 "cannot instantiate polymorphic type
+// to match expected type" and exits 1. The battery driver expects THIS FILE
+// to FAIL the check; every other fixture in this directory must pass.
+//
+// (L1 handles the same shape via normalize_app's depth-64 backstop —
+// ADR 21.7.26e §2.1 fix 3. L1/L2 error codes diverge by convention; the L2
+// code here is E0999.)
+
+type Pair<T> = { first: T, second: T }
+
+type Nest<T> =
+    | NestDone
+    | NestDeeper(Nest<Pair<T>>)
+
+fn nest_depth<T>(n: Nest<T>) -> Nat {
+    match n {
+        NestDone() => 0,
+        NestDeeper(inner) => 1 + nest_depth(inner)
+    }
+}
+
+pub fn main() -> Nat {
+    let n: Nest<Nat> = NestDone;
+    nest_depth(n)
+}

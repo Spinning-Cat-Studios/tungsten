@@ -77,6 +77,7 @@ pub fn type_of(ctx: &Context, term: &Term) -> TypeResult<Type> {
         Term::True | Term::False => Ok(Type::Bool),
         Term::Unit => Ok(Type::Unit),
         Term::Zero | Term::NatLit(_) => Ok(Type::Nat),
+        Term::IntLit(_) => Ok(Type::Int),
         Term::StringLit(_) => Ok(Type::String),
         Term::Sorry | Term::ExternCall(_, _) => Ok(Type::Unit),
 
@@ -135,6 +136,12 @@ pub fn type_of(ctx: &Context, term: &Term) -> TypeResult<Type> {
             super::rules_ext::type_of_bool_binop(ctx, t1, t2)
         }
         Term::BoolNot(t) => super::rules_ext::type_of_bool_not(ctx, t),
+
+        // Signed integers (ADR 14.9.26c)
+        Term::IntBin(op, t1, t2) => super::rules_ext::type_of_int_bin(ctx, *op, t1, t2),
+        Term::IntNeg(t) => super::rules_ext::type_of_int_neg(ctx, t),
+        Term::NatToInt(t) => super::rules_ext::type_of_nat_to_int(ctx, t),
+        Term::IntToNat(t) => super::rules_ext::type_of_int_to_nat(ctx, t),
 
         // Ref cells
         Term::RefGet(t) => super::rules_ext::type_of_ref_get(ctx, t),

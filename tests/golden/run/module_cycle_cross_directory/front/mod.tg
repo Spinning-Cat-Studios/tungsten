@@ -1,0 +1,13 @@
+// `front` names a type and a function from `back`, which names both from here.
+use back::{Receipt, settle};
+
+pub type Ticket = { amount: Nat }
+
+pub fn open_ticket(amount: Nat) -> Ticket {
+    { amount: amount }
+}
+
+pub fn close_ticket(t: Ticket) -> Nat {
+    let r: Receipt = settle(t);
+    r.paid
+}

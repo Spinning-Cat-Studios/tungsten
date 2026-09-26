@@ -1,0 +1,14 @@
+// SUBJECT — arity 2, product tail (ADR 4.9.26c).
+//
+// One field ahead of the product tail, so a walk that reads the spine has to
+// take a `snd` before it takes its extra `fst`. The head is read too: it is
+// correct under both readings, and reading it in the same program keeps a
+// divergence attributable to the tail rather than to the record as a whole.
+
+type PairTail = { head: Nat, tail: (Nat, Nat) }
+
+pub fn main() -> Nat {
+    let r: PairTail = { head: 1, tail: (2, 3) };
+    let (a, b) = r.tail;
+    r.head * 100 + a * 10 + b
+}

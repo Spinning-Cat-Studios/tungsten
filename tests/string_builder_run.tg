@@ -1,0 +1,113 @@
+// tests/string_builder_run.tg — ADR 14.9.26a AC 4 native-parity fixture
+//
+// `tungsten diff exec` runs this on the evaluator AND natively and compares
+// stdout, so it is the one cheap check that can see the three ways a
+// StringBuilder could disagree with itself: the runtime (one heap, one growth
+// policy, shared by both paths), the evaluator arms in
+// `tungsten_core/src/eval/env/handlers/externs/builder/`, and the codegen's
+// marshalling of a `String` argument as the by-value `{ ptr, len }` pair and
+// of the `String` return from `to_string`.
+//
+// Both sides must agree byte-for-byte:
+//   - natively, via the linked `libtungsten_core.a` symbols;
+//   - on the evaluator, via the builder arms — without which an `ExternCall`
+//     goes silently Stuck and nothing prints, which `diff exec` reports as a
+//     divergence rather than a pass.
+//
+// Standalone on purpose, like `console_println_run.tg`: it declares its own
+// externs so the fixture costs six symbols, not the whole compiler.
+
+extern "C" fn tg_println(s: Nat, len: Nat) -> Unit
+extern "C" fn tg_string_to_cstring(s: String) -> Nat
+extern "C" fn tg_string_len_internal(s: String) -> Nat
+extern "C" fn tg_free_string(s: Nat) -> Unit
+
+extern "C" fn tg_string_builder_new() -> Nat
+extern "C" fn tg_string_builder_with_capacity(capacity: Nat) -> Nat
+extern "C" fn tg_string_builder_push_str(sb: Nat, s: String) -> Nat
+extern "C" fn tg_string_builder_push_char(sb: Nat, code: Nat) -> Nat
+extern "C" fn tg_string_builder_len(sb: Nat) -> Nat
+extern "C" fn tg_string_builder_to_string(sb: Nat) -> String
+
+pub type StringBuilder = MkStringBuilder(Nat)
+
+pub fn println(s: String) -> Unit {
+    let c = tg_string_to_cstring(s);
+    let len = tg_string_len_internal(s);
+    tg_println(c, len);
+    tg_free_string(c)
+}
+
+fn push_str(sb: StringBuilder, s: String) -> StringBuilder {
+    match sb {
+        MkStringBuilder(h) => MkStringBuilder(tg_string_builder_push_str(h, s))
+    }
+}
+
+fn push_char(sb: StringBuilder, code: Nat) -> StringBuilder {
+    match sb {
+        MkStringBuilder(h) => MkStringBuilder(tg_string_builder_push_char(h, code))
+    }
+}
+
+fn builder_len(sb: StringBuilder) -> Nat {
+    match sb {
+        MkStringBuilder(h) => tg_string_builder_len(h)
+    }
+}
+
+fn to_string(sb: StringBuilder) -> String {
+    match sb {
+        MkStringBuilder(h) => tg_string_builder_to_string(h)
+    }
+}
+
+/// Push `piece` `n` times — enough to cross several regrowths from cap 0.
+#[partial]
+fn push_repeated(sb: StringBuilder, piece: String, n: Nat) -> StringBuilder {
+    if n == 0 { sb } else { push_repeated(push_str(sb, piece), piece, n - 1) }
+}
+
+/// Render a Nat in decimal, so a length can be printed and compared.
+#[partial]
+fn nat_to_string(n: Nat) -> String {
+    if n < 10 {
+        digit(n)
+    } else {
+        nat_to_string(n / 10) ++ digit(n % 10)
+    }
+}
+
+fn digit(d: Nat) -> String {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" }
+    else if d == 3 { "3" } else if d == 4 { "4" } else if d == 5 { "5" }
+    else if d == 6 { "6" } else if d == 7 { "7" } else if d == 8 { "8" }
+    else { "9" }
+}
+
+// Emits exactly:
+//   stdout: "hello, world\n"        — pushes, then to_string
+//           "Aé😀\n"                 — push_char across three UTF-8 widths
+//           "\n"                      — an empty builder is the empty string
+//           "4400\n"                  — 100 pushes of 44 bytes, several regrowths
+//           "8\n"                     — with_capacity(8) then exactly 8 bytes
+fn emit() -> Unit {
+    let greeting = push_str(push_str(push_str(MkStringBuilder(tg_string_builder_new()), "hello"), ", "), "world");
+    println(to_string(greeting));
+
+    let chars = push_char(push_char(push_char(MkStringBuilder(tg_string_builder_new()), 65), 233), 128512);
+    println(to_string(chars));
+
+    println(to_string(MkStringBuilder(tg_string_builder_new())));
+
+    let grown = push_repeated(MkStringBuilder(tg_string_builder_new()), "the quick brown fox jumps over the lazy dog!", 100);
+    println(nat_to_string(builder_len(grown)));
+
+    let sized = push_str(MkStringBuilder(tg_string_builder_with_capacity(8)), "12345678");
+    println(nat_to_string(builder_len(sized)))
+}
+
+fn main() -> Nat {
+    emit();
+    0
+}

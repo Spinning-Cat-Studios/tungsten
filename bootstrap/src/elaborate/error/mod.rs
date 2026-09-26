@@ -8,6 +8,7 @@ mod context;
 mod display;
 mod kind;
 mod messages;
+mod messages_modules;
 
 pub use constructors_modules::DuplicateImportInfo;
 pub use context::*;
@@ -117,6 +118,20 @@ impl ElabError {
     }
 
     /// Add a note to this error.
+    ///
+    /// **Only the LAST span-less note survives rendering.** The ariadne
+    /// renderer calls `Report::with_note` once per report
+    /// (`driver/diagnostics/renderers/mod.rs`), and that call overwrites, so an
+    /// error carrying three notes shows one. The full list *is* printed in the
+    /// Signature-Collection summary block, which is why the loss is easy to
+    /// miss when eyeballing output. Put anything load-bearing — the fact a
+    /// reader cannot recover from their own source — in the **message**, and
+    /// use notes for the supplementary lines it is fine to drop. ADR 7.8.26e
+    /// §7 hit this: its multi-note design would have dropped exactly the
+    /// inherited-through chain the diagnostic exists to carry.
+    ///
+    /// Notes WITH a span ([`Self::with_span_note`]) are unaffected — they
+    /// render as secondary labels, and all of them survive.
     #[must_use]
     pub fn with_note(mut self, message: impl Into<String>) -> Self {
         self.notes.push(Note {

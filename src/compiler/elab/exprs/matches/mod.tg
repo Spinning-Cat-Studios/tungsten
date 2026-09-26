@@ -15,13 +15,17 @@
 pub mod patterns;
 pub mod arm_reorder;
 pub mod adt_match;
+pub mod binary_match;
 pub mod multi_arm;
 pub mod desugar;
+pub mod int_match;
 
 // Re-export submodule public API so external imports via matches::item still work
 pub use elab::exprs::matches::patterns::{
     is_catch_all_pattern, is_newtype_unwrap,
     bind_pattern_in_scope, get_arm_binding_type,
+    wrap_arm_payload_projections, wrap_scrutinee_projections,
+    wrap_product_projections, wrap_product_projections_cir,
     pattern_to_var_name, pattern_constructor_name,
     is_bool_type, get_variant_payload
 };
@@ -37,6 +41,9 @@ pub use elab::exprs::matches::multi_arm::{
 pub use elab::exprs::matches::desugar::{
     desugar_nested_arms, DesugarResult, DesugarOk, DesugarErr
 };
+pub use elab::exprs::matches::int_match::{
+    is_integer_type, elab_int_match, elab_int_match_checked
+};
 
 // Re-export ScrutInfo for submodules
 pub use elab::exprs::matches::{ScrutInfo};
@@ -48,6 +55,7 @@ use parser::ast::{
     MaybeExpr, NoExpr, SomeExpr
 };
 use driver::ffi::{List, Nil, Cons};
+use driver::util::list_is_empty;
 use elab::ffi::{
     TermHandle, TypeHandle,
     tg_term_if,
@@ -120,11 +128,22 @@ pub fn check_match(
 fn dispatch_match(env: Env, scrut: ScrutInfo, arms: List<MatchArm>, span: Span) -> ElabExprResult {
     if is_bool_type(scrut.ty) {
         elab_bool_match(env, scrut, arms, span)
-    } else if tg_type_is_mu(scrut.ty) || tg_type_is_sum(scrut.ty) || tg_type_is_product(scrut.ty) {
+    } else if is_adt_match(env, arms, scrut.ty) {
         elab_adt_match(env, scrut, arms, span)
+    } else if is_integer_type(scrut.ty) {
+        elab_int_match(env, scrut, arms, span)
     } else {
         ElabExprErr(elab_expr_error("cannot match on this type", span))
     }
+}
+
+/// Does this match take the ADT route? A μ, sum or product scrutinee, or a
+/// lone constructor arm over a single-field newtype. Asked BEFORE the integer
+/// route, as the bootstrap asks its constructor check (ADR 18.9.26e): a
+/// newtype over `Nat` encodes to `Nat` itself.
+fn is_adt_match(env: Env, arms: List<MatchArm>, scrut_ty: TypeHandle) -> Bool {
+    tg_type_is_mu(scrut_ty) || tg_type_is_sum(scrut_ty) || tg_type_is_product(scrut_ty)
+        || is_single_newtype_arm(env, arms, scrut_ty)
 }
 
 /// Dispatch match with expected type.
@@ -137,10 +156,27 @@ fn dispatch_match_checked(
 ) -> ElabExprResult {
     if is_bool_type(scrut.ty) {
         elab_bool_match_checked(env, scrut, arms, expected, span)
-    } else if tg_type_is_mu(scrut.ty) || tg_type_is_sum(scrut.ty) || tg_type_is_product(scrut.ty) {
+    } else if is_adt_match(env, arms, scrut.ty) {
         elab_adt_match_checked(env, scrut, arms, expected, span)
+    } else if is_integer_type(scrut.ty) {
+        elab_int_match_checked(env, scrut, arms, expected, span)
     } else {
         ElabExprErr(elab_expr_error("cannot match on this type", span))
+    }
+}
+
+/// A lone `Ctor(x)` arm whose constructor is the only one of a one-field ADT
+/// that encodes to the scrutinee's own type (ADR 18.9.26d).
+///
+/// A single-constructor, single-field ADT is unwrapped to its payload, so a
+/// `StringBuilder` scrutinee has type `Nat` and none of the μ/sum/product
+/// tests above fire. The route is the pattern's name, as in the bootstrap —
+/// but `is_newtype_unwrap` also requires the scrutinee to equal the payload
+/// type, so `MkStringBuilder(h)` over a `String` is still refused here.
+fn is_single_newtype_arm(env: Env, arms: List<MatchArm>, scrut_ty: TypeHandle) -> Bool {
+    match arms {
+        Nil() => false,
+        Cons(arm, rest) => is_newtype_unwrap(env, arm, scrut_ty) && list_is_empty(rest)
     }
 }
 

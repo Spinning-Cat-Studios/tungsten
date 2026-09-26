@@ -33,6 +33,8 @@ fn empty_project() -> ProjectOutput {
         mutual_recursion_groups: HashMap::new(),
         type_visibilities: HashMap::new(),
         record_field_visibilities: HashMap::new(),
+        value_import_targets: std::collections::BTreeMap::new(),
+        termination_meta: std::collections::HashMap::new(),
     }
 }
 

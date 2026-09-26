@@ -5,6 +5,9 @@ use crate::terms::Term;
 use crate::eval::env::step_with_env;
 use crate::eval::env::EvalEnv;
 use crate::eval::StepResult;
+
+use super::malformed::malformed_elimination;
+
 /// Step Pair with environment: evaluate both components to values.
 pub(in crate::eval::env) fn step_pair_env(t1: &Term, t2: &Term, env: &EvalEnv) -> StepResult {
     if !t1.is_value() {
@@ -39,7 +42,7 @@ pub(in crate::eval::env) fn step_fst_env(t: &Term, env: &EvalEnv) -> StepResult 
     }
     match t {
         Term::Pair(v1, _) => StepResult::Stepped(v1.as_ref().clone()),
-        _ => StepResult::Stuck,
+        _ => malformed_elimination("Fst", t, env),
     }
 }
 
@@ -54,6 +57,6 @@ pub(in crate::eval::env) fn step_snd_env(t: &Term, env: &EvalEnv) -> StepResult 
     }
     match t {
         Term::Pair(_, v2) => StepResult::Stepped(v2.as_ref().clone()),
-        _ => StepResult::Stuck,
+        _ => malformed_elimination("Snd", t, env),
     }
 }

@@ -1,0 +1,17 @@
+[package]
+name = "golden"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Golden test runner for the Tungsten compiler"
+publish = false
+
+[[bin]]
+name = "golden"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

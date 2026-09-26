@@ -18,7 +18,10 @@ use super::integration_tests::{connect, send_and_recv, start_test_server, INTEGR
 #[test]
 fn test_unknown_request_type_returns_error() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -46,7 +49,10 @@ fn test_unknown_request_type_returns_error() {
 #[test]
 fn test_missing_required_fields_returns_error() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -86,7 +92,10 @@ fn test_missing_required_fields_returns_error() {
 #[test]
 fn test_session_replacement_flushes_first() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -135,7 +144,10 @@ fn test_session_replacement_flushes_first() {
 #[test]
 fn test_suggest_without_session() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -157,7 +169,10 @@ fn test_suggest_without_session() {
 #[test]
 fn test_suggest_empty_results() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -180,7 +195,10 @@ fn test_suggest_empty_results() {
 #[test]
 fn test_end_session_without_start_is_harmless() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -205,7 +223,10 @@ fn test_end_session_without_start_is_harmless() {
 #[test]
 fn test_rapid_outcomes_all_flushed() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let (mut stream, mut reader) = connect(&socket_path);
 
@@ -246,7 +267,10 @@ fn test_rapid_outcomes_all_flushed() {
 #[test]
 fn test_socket_and_pid_cleanup() {
     let _guard = INTEGRATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = TempDir::new().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("tungsten-store-test-")
+        .tempdir()
+        .unwrap();
     let (socket_path, server_handle) = start_test_server(dir.path());
     let pid_path = dir.path().join("sidecar.pid");
 

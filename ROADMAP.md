@@ -78,6 +78,7 @@ v2.0 focuses on making Tungsten a production-ready platform: allocation performa
 - **Termination checking** — structural recursion verification for proof soundness
 - **Universe hierarchy** — stratified `Type 0 : Type 1 : ...` to prevent Girard's paradox
 - **Cross-platform release builds** — CI release matrix for macOS, Linux, and Windows with distributable binaries
+- **Binary-reproducible triple compile** — byte-identical binaries via linker/environment determinism
 
 ---
 
@@ -97,7 +98,6 @@ v2.1 focuses on ecosystem maturity and enabling others to use Tungsten productiv
 - **Full LSP** — completions, rename, code actions, error recovery, incremental re-elaboration
 - **REPL** — interactive evaluation and proof exploration
 - **Lean4 transpiler** — transpile proofs to Lean4 for independent verification
-- **Binary-reproducible triple compile** — byte-identical binaries via linker/environment determinism
 - **Refinement types** — types with predicates
 - **Inductive families** — indexed types (length-indexed vectors, well-typed ASTs)
 - **Proof irrelevance** — Prop universe with compile-time proof erasure

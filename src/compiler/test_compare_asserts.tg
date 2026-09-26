@@ -1,0 +1,41 @@
+// Verifies the generic assert_* wrappers (ADR 29.6.26f §2.4 / P6) are importable
+// and compose from a real test file. Runtime execution is exercised separately
+// (`tests/comparator_assert_run.tg` via `tungsten run`); this checks usage +
+// elaboration of `assert_eq<T>`/`assert_ne`/`assert_contains` at concrete types.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::compare::{
+    assert, assert_true, assert_false, fail,
+    assert_eq, assert_ne, assert_contains
+};
+use driver::ffi::types::{List, Nil, Cons};
+
+pub fn test_assert_eq_nat() -> Unit {
+    assert_eq(3, 3);
+    assert_ne(3, 4)
+}
+
+pub fn test_assert_eq_string() -> Unit {
+    assert_eq("hi", "hi");
+    assert_ne("hi", "bye")
+}
+
+pub fn test_assert_eq_list() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Nil));
+    assert_eq(xs, xs)
+}
+
+pub fn test_assert_bool_helpers() -> Unit {
+    assert(true);
+    assert_true(true);
+    assert_false(false)
+}
+
+pub fn test_assert_contains() -> Unit {
+    let xs: List<Nat> = Cons(1, Cons(2, Cons(3, Nil)));
+    assert_contains(xs, 2)
+}

@@ -23,6 +23,7 @@ use elab::cir::types::{
 };
 use elab::cir::capture::{cir_captures_empty, cir_captures_add};
 use codegen::capture_layout::{capture_env_type, capture_env_size};
+use codegen::ir_header::{emit_extern_declarations, emit_alloc_call, alloc_class_env};
 
 // ===========================================================================
 // llvm_type: CodegenType → LLVM type string
@@ -127,10 +128,19 @@ use codegen::ir_sums::{emit_sum_inl, emit_sum_inr, emit_sum_case};
 use driver::util::string_contains;
 use elab::ffi::tg_string_to_cstr;
 
+// `emit_sum_injection` takes exactly four fresh names from a fresh IRState —
+// %0 mem, %1 tag_ptr, %2 payload_ptr, %3 the loaded result — so the value it
+// returns is `%3`. Both tests below asserted `%4` from the day they were
+// written and neither assertion ever executed (ADR 6.8.26c P1b): the
+// `assert_eq_string` chain reached `tg_assert_eq_string`, which had no
+// evaluator arm, so the test reported `ok` on an expectation that was simply
+// wrong. The three IR-content assertions in each body were passing throughout,
+// which is what makes the emitted IR — not the expected name — the thing worth
+// believing here.
 pub fn test_emit_sum_inl_tag_zero() -> Unit {
     let st = ir_state_new();
     let (result, st) = emit_sum_inl(st, "42", CTSum(CTNat, CTBool));
-    assert_eq_string(result, "%4");
+    assert_eq_string(result, "%3");
     let ir = ir_state_to_string(st);
     // Must contain tag 0 store (inl)
     assert_eq_bool(string_contains(ir, "store i32 0"), true);
@@ -143,7 +153,7 @@ pub fn test_emit_sum_inl_tag_zero() -> Unit {
 pub fn test_emit_sum_inr_tag_one() -> Unit {
     let st = ir_state_new();
     let (result, st) = emit_sum_inr(st, "true", CTSum(CTNat, CTBool));
-    assert_eq_string(result, "%4");
+    assert_eq_string(result, "%3");
     let ir = ir_state_to_string(st);
     // Must contain tag 1 store (inr)
     assert_eq_bool(string_contains(ir, "store i32 1"), true);
@@ -159,7 +169,7 @@ use elab::ffi::{
     tg_type_nat, tg_type_bool, tg_type_sum, tg_type_mu, tg_type_unit,
     tg_type_arrow
 };
-use elab::cir::constructors::type_handle_to_codegen_type;
+use elab::cir::type_constructors::type_handle_to_codegen_type;
 
 pub fn test_type_handle_to_codegen_type_nat() -> Unit {
     let ct = type_handle_to_codegen_type(tg_type_nat());
@@ -277,4 +287,24 @@ pub fn test_emit_lambda_non_capturing() -> Unit {
     // Must build closure pair with null env
     assert_eq_bool(string_contains(ir, "insertvalue { ptr, ptr }"), true);
     assert_eq_bool(string_contains(ir, "ptr null"), true)
+}
+
+// ===========================================================================
+// emit_extern_declarations: the allocation symbol (ADR 14.9.26b AC 7)
+// ===========================================================================
+
+/// The header declares the runtime's one allocation symbol — the same callee
+/// the bootstrap backend emits — and no bare @malloc, so a program either
+/// compiler builds runs on the arena when TUNGSTEN_ARENA selects it.
+pub fn test_extern_declarations_name_the_runtime_alloc_symbol() -> Unit {
+    let header = ir_state_to_string(emit_extern_declarations(ir_state_new()));
+    assert_eq_bool(string_contains(header, "declare ptr @__tungsten_alloc(i64, i32)"), true);
+    assert_eq_bool(string_contains(header, "@malloc"), false)
+}
+
+/// The class a closure environment carries is CLASS_ENV = 1, the source-order
+/// constant the runtime and the bootstrap's AllocClass share.
+pub fn test_alloc_call_text_carries_the_env_class() -> Unit {
+    assert_eq_nat(alloc_class_env(), 1);
+    assert_eq_string(emit_alloc_call(24, alloc_class_env()), "call ptr @__tungsten_alloc(i64 24, i32 1)")
 }

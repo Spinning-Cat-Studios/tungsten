@@ -1,0 +1,12 @@
+// ADR 14.8.26g P5: a record whose body fails, referenced from 2 modules,
+// reports ONE diagnostic at the type's span (D3's type-body producer keeps
+// the stub with a poisoned encoding).
+//
+// ADR 15.8.26d AC 1 extends it with construction sites — in-module
+// (`shapes.tg`) and cross-module (`user_two.tg`) — which used to add an
+// E0050 / E0010 each. Still exactly one diagnostic.
+mod shapes;
+mod user_one;
+mod user_two;
+
+fn main() -> Nat { 0 }

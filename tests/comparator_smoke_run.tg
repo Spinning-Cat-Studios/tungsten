@@ -1,0 +1,63 @@
+// Host-side runtime smoke test for synthesized structural comparators
+// (ADR 29.6.26f §T11). Run via `tungsten run` (evaluator) — `main` returns a
+// bit-packed "test vector" where each comparison's tag (Equal = 0,
+// NotEqual = 1) sets one bit. Standalone: defines the CompareResult ADT layer
+// inline so the synthesized `compare_T` references resolve. Small weights keep
+// the result ≤ 63 (large Nat arithmetic builds Succ-chains in the evaluator).
+//
+// Expected: 2730  (binary 101010101010)
+//   bit 0  (×1)   : __compare(3, 3)                = Equal    → 0
+//   bit 1  (×2)   : __compare(3, 4)                = NotEqual → 1
+//   bit 2  (×4)   : __compare("hi","hi")           = Equal    → 0
+//   bit 3  (×8)   : __compare("hi","bye")          = NotEqual → 1
+//   bit 4  (×16)  : __compare(true,true)           = Equal    → 0
+//   bit 5  (×32)  : __compare(true,false)          = NotEqual → 1
+//   bit 6  (×64)  : __compare((1,true),(1,true))   = Equal    → 0  (tuple)
+//   bit 7  (×128) : __compare((1,true),(2,false))  = NotEqual → 1  (tuple)
+//   bit 8  (×256) : __compare(Some(3), Some(3))    = Equal    → 0  (Option/sum)
+//   bit 9  (×512) : __compare(Some(3), Some(4))    = NotEqual → 1  (sum payload)
+//   bit 10 (×1024): __compare(none, none)          = Equal    → 0  (Unit arm)
+//   bit 11 (×2048): __compare(none, Some(3))       = NotEqual → 1  (tag mismatch)
+
+type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+type PathSeg =
+    | Field(String)
+    | Pos(Nat)
+    | Index(Nat)
+    | Tag
+    | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult =
+    | Equal
+    | NotEqual(CompareDiff)
+
+type Option<T> =
+    | None
+    | Some(T)
+
+fn tag_of(r: CompareResult) -> Nat {
+    match r {
+        Equal() => 0,
+        NotEqual(_) => 1
+    }
+}
+
+fn main() -> Nat {
+    let none: Option<Nat> = None;
+    tag_of(__compare(3, 3))
+        + tag_of(__compare(3, 4)) * 2
+        + tag_of(__compare("hi", "hi")) * 4
+        + tag_of(__compare("hi", "bye")) * 8
+        + tag_of(__compare(true, true)) * 16
+        + tag_of(__compare(true, false)) * 32
+        + tag_of(__compare((1, true), (1, true))) * 64
+        + tag_of(__compare((1, true), (2, false))) * 128
+        + tag_of(__compare(Some(3), Some(3))) * 256
+        + tag_of(__compare(Some(3), Some(4))) * 512
+        + tag_of(__compare(none, none)) * 1024
+        + tag_of(__compare(none, Some(3))) * 2048
+}

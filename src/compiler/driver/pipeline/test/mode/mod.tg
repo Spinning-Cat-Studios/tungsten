@@ -1,0 +1,187 @@
+// src/compiler/driver/pipeline/test/mode/mod.tg
+// Choosing a harness mode for a test file, and why the answer is not always
+// the same one (ADR 7.8.26b D2/D5).
+//
+// THE INVARIANT: the harness never introduces a name the program can already
+// reach. Both modes obey it; they differ only in what "already reach" permits
+// them to add.
+//
+//   TreeMode        the file declares `mod` items, so it reaches the compiler.
+//                   The harness adds `main` and `_harness_*` and NOTHING else,
+//                   naming every compiler symbol by canonical qualified path.
+//   StandaloneMode  the file declares no `mod`, so it reaches nothing. The
+//                   harness may declare the `tg_*` externs it needs — but only
+//                   those the program does not already declare, which is the
+//                   invariant rather than an exception to it.
+//   Unsupported     neither is servable: ONE actionable error naming the
+//                   colliding symbol.
+//
+// WHY DETECTION NEEDS BOTH SOURCES (D5): `ElabDef` carries no module path, so
+// it cannot answer "is `test_begin` bound at root or in `driver::ffi::test`?";
+// `ModuleInfo.item_modules` answers exactly that, but records the visibility of
+// MODULES, not of the items inside them. The two drift classes therefore have
+// different sources — *moved* is `item_modules`, *no longer `pub`* is
+// `ElabDef.visibility` joined on name — and consulting only the first would
+// pass a symbol that has stopped being public and rebuild the E0016 wall behind
+// the harness.
+//
+// This file holds only the PROJECTIONS onto plain pairs. Nothing is decided
+// here; `decide.tg` decides, and is what the tests exercise.
+
+pub mod types;
+pub mod decide;
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option, Some, None, list_len, list_append};
+use driver::modules::{ParsedModule, ModuleInfo, ModulePath, module_path_display};
+use driver::modules::info::{ItemModuleEntry};
+use parser::ast::nodes::{Item, ItemExtern};
+use parser::ast::common::{Visibility, VisPublic};
+use elab::items::result::ElabDef;
+use driver::pipeline::test::mode::types::{
+    HarnessMode, TreeMode, StandaloneMode, UnsupportedLayout,
+    HarnessPlan, ItemPath, ItemPublic, ExternNeed,
+    ExternVerdict, ExternsReconciled, ExternsConflict,
+    standalone_extern_needs, tree_mode_symbols
+};
+use driver::pipeline::test::mode::decide::{
+    root_declares_mod, tree_symbol_problem, reconcile_externs, verdict_reused
+};
+use driver::pipeline::test::harness::rewrite::{root_main_name_span};
+
+// ===========================================================================
+// DETECTION
+// ===========================================================================
+
+/// Choose the mode, or say why neither will serve.
+pub fn detect_harness_mode(module: ParsedModule, info: ModuleInfo,
+                           defs: List<ElabDef>) -> HarnessMode {
+    let items = module.source_file.items;
+    if root_declares_mod(items) {
+        tree_mode_or_unsupported(info, defs)
+    } else {
+        standalone_mode_or_unsupported(module)
+    }
+}
+
+fn tree_mode_or_unsupported(info: ModuleInfo, defs: List<ElabDef>) -> HarnessMode {
+    match tree_symbol_problem(tree_mode_symbols(), item_paths_of(info), item_pubs_of(defs)) {
+        Some(msg) => UnsupportedLayout(msg),
+        None() => TreeMode
+    }
+}
+
+fn standalone_mode_or_unsupported(module: ParsedModule) -> HarnessMode {
+    match standalone_extern_verdict(module) {
+        ExternsConflict(msg) => UnsupportedLayout(msg),
+        ExternsReconciled(_) => StandaloneMode
+    }
+}
+
+/// The extern reconciliation for a standalone file.
+///
+/// The subtree walk is not dead code in disguise: a file with no `mod` at root
+/// has no submodules, so the "declared privately inside the tree" arm cannot
+/// fire *today*. Walking anyway keeps the rule true by construction rather than
+/// by an argument about reachability that a future caller could invalidate.
+fn standalone_extern_verdict(module: ParsedModule) -> ExternVerdict {
+    reconcile_externs(standalone_extern_needs(),
+                      root_extern_decls(module.source_file.items),
+                      subtree_extern_names(module.submodules))
+}
+
+/// Build the whole plan: the mode, the tests to run, and the two facts the
+/// templates need about the user's file.
+pub fn plan_harness(module: ParsedModule, info: ModuleInfo, defs: List<ElabDef>,
+                    tests: List<String>) -> HarnessPlan {
+    let mode = detect_harness_mode(module, info, defs);
+    {
+        mode: mode,
+        test_names: tests,
+        test_count: list_len(tests),
+        reused_externs: verdict_reused(standalone_extern_verdict(module)),
+        user_main: root_main_name_span(module.source_file.items)
+    } : HarnessPlan
+}
+
+/// The message an `UnsupportedLayout` carries, for the one error the caller
+/// prints. `None` for the two servable modes.
+pub fn unsupported_reason(mode: HarnessMode) -> Option<String> {
+    match mode {
+        UnsupportedLayout(msg) => Some(msg),
+        TreeMode() => None,
+        StandaloneMode() => None
+    }
+}
+
+// ===========================================================================
+// PROJECTIONS
+// ===========================================================================
+
+/// `ModuleInfo.item_modules`, with each path rendered.
+pub fn item_paths_of(info: ModuleInfo) -> List<ItemPath> {
+    render_item_modules(info.item_modules)
+}
+
+fn render_item_modules(entries: List<ItemModuleEntry>) -> List<ItemPath> {
+    match entries {
+        Nil() => Nil,
+        Cons(entry, rest) =>
+            let (name, path) = entry;
+            Cons((name, module_path_display(path)), render_item_modules(rest))
+    }
+}
+
+/// Each elaborated definition's name paired with whether it is `pub`.
+pub fn item_pubs_of(defs: List<ElabDef>) -> List<ItemPublic> {
+    match defs {
+        Nil() => Nil,
+        Cons(def, rest) => Cons((def.name, visibility_is_public(def.visibility)), item_pubs_of(rest))
+    }
+}
+
+/// The `visibility_` prefix is load-bearing: a plain `is_public` collides with
+/// `elab::items::imports::lookup`'s private one in the flat, name-keyed value
+/// environment, and the resulting E0016 is reported at a call site in THAT
+/// module. D1's mechanism, met while implementing the fix for it.
+fn visibility_is_public(vis: Visibility) -> Bool {
+    match vis {
+        VisPublic() => true,
+        _ => false
+    }
+}
+
+/// Every `extern "C" fn` declared at a file's root, with its parameter count.
+pub fn root_extern_decls(items: List<Item>) -> List<ExternNeed> {
+    match items {
+        Nil() => Nil,
+        Cons(item, rest) => prepend_extern(item, root_extern_decls(rest))
+    }
+}
+
+fn prepend_extern(item: Item, rest: List<ExternNeed>) -> List<ExternNeed> {
+    match item {
+        ItemExtern(e) => Cons({ name: e.name.name, arity: list_len(e.params) } : ExternNeed, rest),
+        _ => rest
+    }
+}
+
+/// Every `extern "C" fn` name anywhere below the root, at any depth.
+pub fn subtree_extern_names(mods: List<ParsedModule>) -> List<String> {
+    match mods {
+        Nil() => Nil,
+        Cons(m, rest) => list_append(module_extern_names(m), subtree_extern_names(rest))
+    }
+}
+
+fn module_extern_names(m: ParsedModule) -> List<String> {
+    list_append(extern_names_of(root_extern_decls(m.source_file.items)),
+                subtree_extern_names(m.submodules))
+}
+
+fn extern_names_of(decls: List<ExternNeed>) -> List<String> {
+    match decls {
+        Nil() => Nil,
+        Cons(decl, rest) => Cons(decl.name, extern_names_of(rest))
+    }
+}

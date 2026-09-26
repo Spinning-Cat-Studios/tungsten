@@ -1,0 +1,8 @@
+// A spread with no annotation has no type to take its fields from.
+type Point = { x: Nat, y: Nat }
+
+fn main() -> Nat {
+    let p: Point = { x: 0, y: 10 };
+    let r = { ...p, x: 5 };
+    r.x
+}

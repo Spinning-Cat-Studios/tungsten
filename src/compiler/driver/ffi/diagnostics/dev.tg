@@ -1,0 +1,154 @@
+// Diagnostic bridge — DEVELOPER build (real FFI wrappers).
+//
+// This file provides real diagnostic tool implementations via FFI.
+// It is copied over the sibling `mod.tg` by `make self-compile-dev` during
+// developer builds, so no `mod` statement names it and the orphan-source census
+// classes it build-swapped rather than stranded (ADR 3.9.26q).
+// See ADR 18.4.26f for conditional compilation design.
+
+pub mod escape_count;
+
+use driver::ffi::types::{
+    CString,
+    string_to_cstring, cstring_to_string, cstring_is_null,
+    tg_free_string,
+    List, Cons, Nil
+};
+use driver::ffi::diagnostics::escape_count::tyvar_escape_count_answer;
+use elab::ffi::{TermHandle, TypeHandle};
+
+// --- Raw FFI Declarations ---
+
+extern "C" fn tg_diagnostic_dump_core(name: CString, term: TermHandle, ty: TypeHandle) -> CString
+extern "C" fn tg_diagnostic_check_tyvar_escape(term: TermHandle) -> CString
+extern "C" fn tg_diagnostic_free_term_vars(term: TermHandle) -> CString
+extern "C" fn tg_diagnostic_core_term(term: TermHandle) -> CString
+extern "C" fn tg_diagnostic_shape_mismatches(term: TermHandle) -> CString
+extern "C" fn tg_diagnostic_tyvar_escape_count(term: TermHandle) -> Nat
+
+// --- Safe Wrappers ---
+
+/// Dump Core IR for a single definition.
+/// Returns a formatted string with term, type, and free TyVars,
+/// or None on error.
+pub fn diagnostic_dump_core(name: String, term: TermHandle, ty: TypeHandle) -> Option<String> {
+    let name_c = string_to_cstring(name);
+    let result_c = tg_diagnostic_dump_core(name_c, term, ty);
+    tg_free_string(name_c);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+/// The free VALUE variables of a definition's body, or None when it is closed.
+///
+/// The term-level twin of `diagnostic_check_tyvar_escape`. A free value
+/// variable means the elaborator resolved a name through its own environment
+/// and never emitted the binding: the body still type-checks, because that
+/// environment is in scope when the check runs, and then nothing downstream
+/// can follow the value (ADR 19.8.26d).
+pub fn diagnostic_free_term_vars(term: TermHandle) -> Option<String> {
+    let result_c = tg_diagnostic_free_term_vars(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+/// A definition's Core term rendered on its own, with no frame around it.
+///
+/// `diagnostic_dump_core`'s output is for humans and is not parseable; this is
+/// what a differ consumes. Both compilers render through the same `Display`,
+/// so comparing these strings compares the terms.
+pub fn diagnostic_core_term(term: TermHandle) -> Option<String> {
+    let result_c = tg_diagnostic_core_term(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+/// The eliminators in a body whose operand's recorded type refuses them, or
+/// None when every shape agrees.
+///
+/// The sibling of `diagnostic_free_term_vars` (ADR 3.9.26h). A closed term can
+/// still take `fst` of a scalar or apply a unary lambda's result to a second
+/// argument: both defects that surfaced while closing ADR 21.8.26a were closed
+/// and ill-shaped. Findings are separated by `; ` and each reads
+/// `<eliminator> over <former>`.
+pub fn diagnostic_shape_mismatches(term: TermHandle) -> Option<String> {
+    let result_c = tg_diagnostic_shape_mismatches(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+/// Check whether a term has free TyVar escapes.
+/// Returns Some with comma-separated TyVar names if escapes exist,
+/// or None if the term is clean (no escapes).
+pub fn diagnostic_check_tyvar_escape(term: TermHandle) -> Option<String> {
+    let result_c = tg_diagnostic_check_tyvar_escape(term);
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let result = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(result)
+    }
+}
+
+/// Count free TyVar escapes in a term.
+///
+/// Returns the count, or None when the call could not count. The failure value
+/// is `tyvar_escape_count_unavailable()`, which is neither the arena's
+/// `invalid_handle()` nor the FFI's `ffi_negative_one()` however much the three
+/// numbers agree (ADR 5.9.26c).
+pub fn diagnostic_tyvar_escape_count(term: TermHandle) -> Option<Nat> {
+    tyvar_escape_count_answer(tg_diagnostic_tyvar_escape_count(term))
+}
+
+// --- Capability Discovery ---
+
+/// Diagnostic capability — one variant per diagnostic tool.
+pub type DiagnosticCapability =
+    | DumpCore
+    | DumpCoreTerms
+    | CheckTyvarEscape
+    | CheckFreeVars
+    | CheckWellTyped
+
+/// Query which diagnostic tools are compiled into this binary.
+/// Developer builds return the full list; production stubs return Nil.
+pub fn diagnostic_capabilities() -> List<DiagnosticCapability> {
+    Cons(DumpCore,
+         Cons(DumpCoreTerms,
+              Cons(CheckTyvarEscape,
+                   Cons(CheckFreeVars,
+                        Cons(CheckWellTyped, Nil)))))
+}
+
+// --- Allocation-profile markers (ADR 2.7.26a) ---
+
+extern "C" fn tg_alloc_profile_marker(name: CString) -> Unit
+
+/// Emit an allocation-profile marker with cumulative totals.
+/// No-op unless this binary was built with --alloc-profile.
+pub fn alloc_profile_marker(name: String) -> Unit {
+    let name_c = string_to_cstring(name);
+    let _ = tg_alloc_profile_marker(name_c);
+    tg_free_string(name_c)
+}

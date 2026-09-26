@@ -11,15 +11,13 @@ impl<'a> Elaborator<'a> {
     /// This is an internal helper - external code should use
     /// `types_structurally_equal_normalized` which handles normalization.
     pub(crate) fn types_structurally_equal_impl(&self, a: &Type, b: &Type) -> bool {
+        // Primitive types: must match exactly (ADR 18.9.26f). A pattern over
+        // both names rather than a match guard: a mixed pair falls through to
+        // the arms below exactly as it did before.
+        if let (Some(a_name), Some(b_name)) = (a.primitive_name(), b.primitive_name()) {
+            return a_name == b_name;
+        }
         match (a, b) {
-            // Base types: must match exactly
-            (Type::Nat, Type::Nat)
-            | (Type::Bool, Type::Bool)
-            | (Type::String, Type::String)
-            | (Type::Unit, Type::Unit)
-            | (Type::Void, Type::Void)
-            | (Type::Prop, Type::Prop) => true,
-
             (Type::TyVar(n1), Type::TyVar(n2)) => n1 == n2,
 
             // Binary recursive types
@@ -44,7 +42,31 @@ impl<'a> Elaborator<'a> {
                         .zip(a2.iter())
                         .all(|(x, y)| self.types_structurally_equal_impl(x, y))
             }
+
+            // ADT nodes: same name, structurally-equal type args, and
+            // variant-wise equal (name + field type). Before ADR 22.7.26b two
+            // `Adt` values fell through to `_ => false`, so identical ADTs
+            // compared unequal (21.7.26j flagged 44 healthy ADTs this way).
+            (Type::Adt(n1, args1, variants1), Type::Adt(n2, args2, variants2)) => {
+                n1 == n2
+                    && args1.len() == args2.len()
+                    && args1
+                        .iter()
+                        .zip(args2.iter())
+                        .all(|(x, y)| self.types_structurally_equal_impl(x, y))
+                    && variants1.len() == variants2.len()
+                    && variants1.iter().zip(variants2.iter()).all(
+                        |((variant1, field1), (variant2, field2))| {
+                            variant1 == variant2
+                                && self.types_structurally_equal_impl(field1, field2)
+                        },
+                    )
+            }
             _ => false,
         }
     }
 }
+// Tests: structural_tests.rs
+#[cfg(test)]
+#[path = "structural_tests.rs"]
+mod tests;

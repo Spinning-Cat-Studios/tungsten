@@ -1,4 +1,7 @@
 // src/compiler/codegen/ir_sums.tg
+// The driver never reaches this module: `run_compile` delegates codegen to the
+// bootstrap binary, so it is compiled and type-checked but executed only by
+// `test_codegen*.tg` / `test_cir_captures.tg`. See codegen/mod.tg (ADR 3.9.26a).
 // Sum type (coproduct) emission — inl, inr, case analysis.
 //
 // Sum layout: { i32, [N x i8] } where N = max(type_size(left), type_size(right))

@@ -1,0 +1,263 @@
+// File I/O FFI declarations and safe wrappers.
+//
+// The failure convention every wrapper here follows — a null or non-zero
+// return, then the driver's last error — is `driver::ffi::last_error`'s, and
+// lives there because process control follows it too (ADR 3.9.26t D2).
+
+use driver::ffi::types::{
+    CString, CInt, Ptr,
+    string_to_cstring, cstring_to_string, cstring_is_null,
+    string_len, string_char_at_internal, string_append_char,
+    tg_free_string,
+    FfiResult, FfiOk, FfiErr
+};
+use driver::ffi::types::{List, Nil, Cons, ffi_list_reverse};
+use driver::ffi::last_error::{tg_driver_get_last_error};
+use driver::util::strings::{string_slice};
+
+// --- Raw FFI Declarations ---
+
+extern "C" fn tg_read_file(path: CString) -> CString
+extern "C" fn tg_write_file(path: CString, content: CString, len: Nat) -> CInt
+extern "C" fn tg_remove_file(path: CString) -> CInt
+extern "C" fn tg_file_exists(path: CString) -> CInt
+extern "C" fn tg_is_directory(path: CString) -> CInt
+extern "C" fn tg_list_directory(path: CString) -> CString
+extern "C" fn tg_parent_directory(path: CString) -> CString
+extern "C" fn tg_path_join(base: CString, child: CString) -> CString
+extern "C" fn tg_sha256(data: CString) -> CString
+extern "C" fn tg_mkdir_p(path: CString) -> CInt
+
+// --- Safe Wrappers ---
+
+pub fn read_file(path: String) -> FfiResult<String> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_read_file(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error reading file")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    } else {
+        let contents = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        FfiOk(contents)
+    }
+}
+
+pub fn write_file(path: String, content: String) -> FfiResult<Unit> {
+    let path_c = string_to_cstring(path);
+    let content_c = string_to_cstring(content);
+    let len = string_len(content);
+    let result = tg_write_file(path_c, content_c, len);
+    tg_free_string(path_c);
+    tg_free_string(content_c);
+    
+    if result == 0 {
+        FfiOk(())
+    } else {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error writing file")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    }
+}
+
+/// Delete a file. `true` means the file is gone — including "was never there".
+///
+/// The generated-harness clean-up funnel (ADR 7.8.26b §2.3) calls this on every
+/// exit path, one of which is "the write failed", so a missing file is the
+/// desired end state rather than an error to report.
+pub fn remove_file(path: String) -> Bool {
+    let path_c = string_to_cstring(path);
+    let result = tg_remove_file(path_c);
+    tg_free_string(path_c);
+    result == 0
+}
+
+pub fn file_exists(path: String) -> Bool {
+    let path_c = string_to_cstring(path);
+    let result = tg_file_exists(path_c);
+    tg_free_string(path_c);
+    result == 1
+}
+
+pub fn is_directory(path: String) -> Bool {
+    let path_c = string_to_cstring(path);
+    let result = tg_is_directory(path_c);
+    tg_free_string(path_c);
+    result == 1
+}
+
+pub fn list_directory(path: String) -> FfiResult<List<String>> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_list_directory(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error listing directory")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    } else {
+        let entries_str = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        FfiOk(split_by_newline(entries_str))
+    }
+}
+
+pub fn parent_directory(path: String) -> Option<String> {
+    let path_c = string_to_cstring(path);
+    let result_c = tg_parent_directory(path_c);
+    tg_free_string(path_c);
+    
+    if cstring_is_null(result_c) {
+        None
+    } else {
+        let parent = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        Some(parent)
+    }
+}
+
+/// Index at which `path`'s final segment begins — one past the last `/`, or
+/// `0` when there is no separator at all.
+///
+/// **This is the decision half of `path_basename`, split out so it can be
+/// tested.** The two halves have different testability, and the difference is
+/// not cosmetic: this one bottoms out in `tg_string_len_internal` and
+/// `tg_string_char_at_internal`, both of which the **evaluator executes**, so a
+/// cost-5 assertion on it actually runs. The slicing half below needs
+/// `tg_string_slice`, which the evaluator does **not** execute (ADR 19.8.26c
+/// D4) — an assertion there would go silently Stuck and report `ok`
+/// (ADR 7.8.26a D2). Confirm either claim with:
+///
+///     tungsten info eval reachable-externs basename_start src/compiler/main.tg
+///
+/// Edge cases, all asserted in `test_test_verb.tg`: a trailing `/` yields
+/// `string_len(path)` (an empty basename, not the last directory), and the
+/// empty path yields `0`.
+pub fn basename_start(path: String) -> Nat {
+    basename_start_scan(path, 0, string_len(path), 0)
+}
+
+// Partial (ADR 11.8.26b): `i` ascends toward `len` rather than descending on a
+// structural subterm — a measure recursion, deferred to v2.1. Executable
+// compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn basename_start_scan(path: String, i: Nat, len: Nat, start: Nat) -> Nat {
+    if i >= len {
+        start
+    } else {
+        let c = string_char_at_internal(path, i);
+        if c == 47 {
+            // '/' — the name restarts after this byte.
+            basename_start_scan(path, i + 1, len, i + 1)
+        } else {
+            basename_start_scan(path, i + 1, len, start)
+        }
+    }
+}
+
+/// The final path segment of `path`, i.e. everything after the last `/`.
+///
+/// The counterpart to `parent_directory`, which the path FFI does not provide:
+/// `tg_parent_directory` gives the head and nothing gives the tail (ADR
+/// 7.8.26a D4). A path with no `/` is its own basename, which is the case a
+/// file passed as a bare filename hits.
+///
+/// Where the name begins is `basename_start`'s decision; this is only the
+/// slice, delegated to the shared `string_slice` (ADR 19.8.26c).
+pub fn path_basename(path: String) -> String {
+    string_slice(path, basename_start(path), string_len(path))
+}
+
+pub fn path_join(base: String, child: String) -> String {
+    let base_c = string_to_cstring(base);
+    let child_c = string_to_cstring(child);
+    let result_c = tg_path_join(base_c, child_c);
+    tg_free_string(base_c);
+    tg_free_string(child_c);
+    
+    if cstring_is_null(result_c) {
+        ""
+    } else {
+        let joined = cstring_to_string(result_c);
+        tg_free_string(result_c);
+        joined
+    }
+}
+
+/// Compute SHA-256 hash of a string, returning the hex-encoded digest.
+pub fn sha256(data: String) -> String {
+    let data_c = string_to_cstring(data);
+    let result_c = tg_sha256(data_c);
+    tg_free_string(data_c);
+    let result = cstring_to_string(result_c);
+    tg_free_string(result_c);
+    result
+}
+
+/// Recursively create directories (like `mkdir -p`).
+pub fn mkdir_p(path: String) -> FfiResult<Unit> {
+    let path_c = string_to_cstring(path);
+    let result = tg_mkdir_p(path_c);
+    tg_free_string(path_c);
+    if result == 0 {
+        FfiOk(())
+    } else {
+        let err_c = tg_driver_get_last_error();
+        if cstring_is_null(err_c) {
+            FfiErr("Unknown error creating directory")
+        } else {
+            let err = cstring_to_string(err_c);
+            tg_free_string(err_c);
+            FfiErr(err)
+        }
+    }
+}
+
+// --- Internal Helpers ---
+
+fn split_by_newline(s: String) -> List<String> {
+    split_by_newline_acc(s, 0, string_len(s), "", Nil)
+}
+
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn split_by_newline_acc(s: String, i: Nat, len: Nat, current: String, acc: List<String>) -> List<String> {
+    if i >= len {
+        if string_len(current) > 0 {
+            ffi_list_reverse(Cons(current, acc))
+        } else {
+            ffi_list_reverse(acc)
+        }
+    } else {
+        let c = string_char_at_internal(s, i);
+        if c == 10 {
+            if string_len(current) > 0 {
+                split_by_newline_acc(s, i + 1, len, "", Cons(current, acc))
+            } else {
+                split_by_newline_acc(s, i + 1, len, "", acc)
+            }
+        } else {
+            split_by_newline_acc(s, i + 1, len, string_append_char(current, c), acc)
+        }
+    }
+}

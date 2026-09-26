@@ -1,0 +1,189 @@
+// Structural comparison of the compiler's mutually recursive AST cluster
+// (ADR 1.8.26c; closes ADR 29.6.26f AC 2 / AC 7 at their literal wording).
+//
+// `test_ast_compare.tg` covers the types whose comparability is self-contained.
+// This file covers the ones that are not: `TypeExpr`, `Stmt` and `Expr` form one
+// SCC, and each reaches a **generic ADT instantiation** as a field type —
+// `TyApp` carries a `List<TypeExpr>`, `ExprBlock` a `List<Stmt>`, `ExprTuple` a
+// `List<Expr>`. Until ADR 1.8.26c every site that resolved a named type required
+// `args.is_empty()`, so an instantiation was an opaque leaf and the whole
+// cluster was noncomparable.
+//
+// These are exactly the types ADR 29.6.26f measured as reporting `ok` while
+// comparing NOTHING: `compare` at an unsynthesizable type left the call Stuck,
+// so the body's asserts never ran. Both `assert_eq(TyPath(..), TyUnit(..))` and
+// `assert_ne(x, x)` were reported `ok` on the real `TypeExpr`. So every case
+// here is mirrored the wrong way round in `mustfail_ast_compare.tg`, which
+// `make check-ast-compare-nonvacuous` requires to FAIL in full.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::compare::{assert_eq, assert_ne};
+use driver::ffi::types::{List, Nil, Cons};
+use lexer::span::{Span, span_new};
+use parser::ast::common::{Ident, ident_new, Path, path_simple, BinOp, OpAdd};
+use parser::ast::pattern::{Pattern, PatVar};
+use parser::ast::nodes::types::{TypeExpr, TyPath, TyApp, TyUnit, MaybeTypeExpr, NoTypeExpr};
+use parser::ast::nodes::exprs::{
+    Expr, ExprIntLit, ExprBinary, ExprTuple, ExprBlock, ExprAnnot,
+    Stmt, StmtLet, StmtExpr, MaybeExpr, NoExpr
+};
+use parser::ast::normalize::{strip_spans_expr, strip_spans_type_expr};
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+fn sp(a: Nat, b: Nat) -> Span {
+    span_new(a, b, "t.tg")
+}
+
+fn id_at(name: String, a: Nat, b: Nat) -> Ident {
+    ident_new(name, sp(a, b))
+}
+
+fn path_at(name: String, a: Nat, b: Nat) -> Path {
+    path_simple(id_at(name, a, b))
+}
+
+fn ty_path(name: String, a: Nat, b: Nat) -> TypeExpr {
+    TyPath(path_at(name, a, b))
+}
+
+// ---------------------------------------------------------------------------
+// `TypeExpr`, including `TyApp` — the instantiation-carrying constructor
+// ---------------------------------------------------------------------------
+
+pub fn test_type_expr_path_equal() -> Unit {
+    assert_eq(ty_path("Nat", 0, 3), ty_path("Nat", 0, 3))
+}
+
+pub fn test_type_expr_path_differs() -> Unit {
+    assert_ne(ty_path("Nat", 0, 3), ty_path("Bool", 0, 4))
+}
+
+/// Constructor tag mismatch with no shared payload to fall back on.
+pub fn test_type_expr_constructor_tag_differs() -> Unit {
+    assert_ne(ty_path("Nat", 0, 3), TyUnit(sp(0, 3)))
+}
+
+/// `TyApp(TypeExpr, List<TypeExpr>, Span)` — the instantiation-carrying
+/// constructor. The difference is inside the argument list.
+pub fn test_type_expr_app_argument_differs() -> Unit {
+    let ls: List<TypeExpr> = Cons(ty_path("Nat", 5, 8), Nil);
+    let rs: List<TypeExpr> = Cons(ty_path("Bool", 5, 9), Nil);
+    assert_ne(TyApp(ty_path("List", 0, 4), ls, sp(0, 9)),
+              TyApp(ty_path("List", 0, 4), rs, sp(0, 9)))
+}
+
+pub fn test_type_expr_app_equal() -> Unit {
+    let ls: List<TypeExpr> = Cons(ty_path("Nat", 5, 8), Nil);
+    let rs: List<TypeExpr> = Cons(ty_path("Nat", 5, 8), Nil);
+    assert_eq(TyApp(ty_path("List", 0, 4), ls, sp(0, 9)),
+              TyApp(ty_path("List", 0, 4), rs, sp(0, 9)))
+}
+
+/// An argument-count difference must be caught, not truncated to the common
+/// prefix — the list `.len` segment of the §2.3 grammar.
+pub fn test_type_expr_app_arity_differs() -> Unit {
+    let one: List<TypeExpr> = Cons(ty_path("Nat", 5, 8), Nil);
+    let two: List<TypeExpr> = Cons(ty_path("Nat", 5, 8), Cons(ty_path("Bool", 10, 14), Nil));
+    assert_ne(TyApp(ty_path("Either", 0, 6), one, sp(0, 9)),
+              TyApp(ty_path("Either", 0, 6), two, sp(0, 15)))
+}
+
+pub fn test_stmt_expr_equal() -> Unit {
+    assert_eq(StmtExpr(ExprIntLit(1, sp(0, 1)), sp(0, 2)),
+              StmtExpr(ExprIntLit(1, sp(0, 1)), sp(0, 2)))
+}
+
+pub fn test_stmt_expr_value_differs() -> Unit {
+    assert_ne(StmtExpr(ExprIntLit(1, sp(0, 1)), sp(0, 2)),
+              StmtExpr(ExprIntLit(2, sp(0, 1)), sp(0, 2)))
+}
+
+/// `StmtLet` crosses into `Pattern`, `MaybeTypeExpr` and `Expr` in one node —
+/// three of the cluster's members from a single constructor.
+pub fn test_stmt_let_pattern_differs() -> Unit {
+    assert_ne(StmtLet(PatVar(id_at("x", 4, 5)), NoTypeExpr, ExprIntLit(1, sp(8, 9)), sp(0, 10)),
+              StmtLet(PatVar(id_at("y", 4, 5)), NoTypeExpr, ExprIntLit(1, sp(8, 9)), sp(0, 10)))
+}
+
+pub fn test_expr_int_lit_differs() -> Unit {
+    assert_ne(ExprIntLit(1, sp(0, 1)), ExprIntLit(2, sp(0, 1)))
+}
+
+/// A four-field constructor whose difference is in a middle operand.
+pub fn test_expr_binary_operand_differs() -> Unit {
+    assert_ne(ExprBinary(OpAdd, ExprIntLit(1, sp(0, 1)), ExprIntLit(2, sp(4, 5)), sp(0, 5)),
+              ExprBinary(OpAdd, ExprIntLit(1, sp(0, 1)), ExprIntLit(3, sp(4, 5)), sp(0, 5)))
+}
+
+/// `ExprTuple(List<Expr>, Span)` — recursion through an instantiation *of the
+/// enclosing type*, which is what makes the cycle key structural rather than
+/// name-keyed (ADR 1.8.26c).
+pub fn test_expr_tuple_element_differs() -> Unit {
+    let ls: List<Expr> = Cons(ExprIntLit(1, sp(1, 2)), Cons(ExprIntLit(2, sp(4, 5)), Nil));
+    let rs: List<Expr> = Cons(ExprIntLit(1, sp(1, 2)), Cons(ExprIntLit(9, sp(4, 5)), Nil));
+    assert_ne(ExprTuple(ls, sp(0, 6)), ExprTuple(rs, sp(0, 6)))
+}
+
+/// `ExprBlock(List<Stmt>, MaybeExpr, Span)` — a `List<Stmt>` inside an `Expr`,
+/// the cluster edge that closes the loop.
+pub fn test_expr_block_statement_differs() -> Unit {
+    let ls: List<Stmt> = Cons(StmtExpr(ExprIntLit(1, sp(2, 3)), sp(2, 4)), Nil);
+    let rs: List<Stmt> = Cons(StmtExpr(ExprIntLit(7, sp(2, 3)), sp(2, 4)), Nil);
+    assert_ne(ExprBlock(ls, NoExpr, sp(0, 6)), ExprBlock(rs, NoExpr, sp(0, 6)))
+}
+
+/// `ExprAnnot` reaches `TypeExpr` from `Expr` — the mutual edge itself.
+pub fn test_expr_annot_type_differs() -> Unit {
+    assert_ne(ExprAnnot(ExprIntLit(1, sp(0, 1)), ty_path("Nat", 4, 7), sp(0, 7)),
+              ExprAnnot(ExprIntLit(1, sp(0, 1)), ty_path("Int", 4, 7), sp(0, 7)))
+}
+
+// ---------------------------------------------------------------------------
+// ADR 29.6.26f AC 7 at its literal wording, on `Expr`
+// ---------------------------------------------------------------------------
+
+/// Two `Expr` values differing ONLY in spans compare unequal…
+pub fn test_expr_spans_are_significant() -> Unit {
+    let l: Expr = ExprBinary(OpAdd, ExprIntLit(1, sp(0, 1)), ExprIntLit(2, sp(4, 5)), sp(0, 5));
+    let r: Expr = ExprBinary(OpAdd, ExprIntLit(1, sp(30, 31)), ExprIntLit(2, sp(34, 35)), sp(30, 35));
+    assert_ne(l, r)
+}
+
+/// …and `strip_spans_expr` is how a test opts out.
+pub fn test_strip_spans_makes_exprs_equal() -> Unit {
+    let l: Expr = ExprBinary(OpAdd, ExprIntLit(1, sp(0, 1)), ExprIntLit(2, sp(4, 5)), sp(0, 5));
+    let r: Expr = ExprBinary(OpAdd, ExprIntLit(1, sp(30, 31)), ExprIntLit(2, sp(34, 35)), sp(30, 35));
+    assert_ne(l, r);
+    assert_eq(strip_spans_expr(l), strip_spans_expr(r))
+}
+
+/// Normalization reaches through a `List<Stmt>` — the instantiation, not just
+/// the direct fields.
+pub fn test_strip_spans_reaches_into_a_statement_list() -> Unit {
+    let ls: List<Stmt> = Cons(StmtExpr(ExprIntLit(1, sp(2, 3)), sp(2, 4)), Nil);
+    let rs: List<Stmt> = Cons(StmtExpr(ExprIntLit(1, sp(52, 53)), sp(52, 54)), Nil);
+    let l: Expr = ExprBlock(ls, NoExpr, sp(0, 6));
+    let r: Expr = ExprBlock(rs, NoExpr, sp(50, 56));
+    assert_ne(l, r);
+    assert_eq(strip_spans_expr(l), strip_spans_expr(r))
+}
+
+/// The load-bearing negative: `strip_spans_expr` normalizes spans and NOTHING
+/// else, so every case above would be vacuous without it.
+pub fn test_strip_spans_expr_preserves_content() -> Unit {
+    assert_ne(strip_spans_expr(ExprIntLit(1, sp(0, 1))),
+              strip_spans_expr(ExprIntLit(2, sp(40, 41))))
+}
+
+/// Same guard applied to `TypeExpr`, whose normalizer is a different function.
+pub fn test_strip_spans_type_expr_preserves_content() -> Unit {
+    assert_ne(strip_spans_type_expr(ty_path("Nat", 0, 3)),
+              strip_spans_type_expr(ty_path("Bool", 40, 44)))
+}

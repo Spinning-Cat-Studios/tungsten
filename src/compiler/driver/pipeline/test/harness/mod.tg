@@ -1,0 +1,72 @@
+// src/compiler/driver/pipeline/test/harness/mod.tg
+// Harness source-text generation, dispatched on the mode (ADR 7.8.26b).
+//
+// The shape is: the user's source with its `main` renamed, then the mode's
+// prelude, then the shared `main` + runner chain. What the mode controls is
+// exactly two things — the prelude, and four call forms — so the two templates
+// cannot drift the way `_harness_nat_to_string` drifted from the real one.
+//
+// WHY `generate_harness_source` IS NOT UNIT-TESTED IN `.tg` (§2.5): it routes
+// through `rename_user_main` → `splice_range` → `string_slice` →
+// `tg_string_slice`, which is NOT among the externs the evaluator executes
+// (`tungsten info eval externs`). The conclusion is unchanged by ADR 19.8.26c,
+// which replaced the hand-rolled loop under `splice_range`; only the name of
+// the blocking extern moved, from `tg_string_append_char` to `tg_string_slice`
+// (D4 leaves both unregistered). Such a test would go Stuck, its
+// assertion would never run, and `tungsten test` would report `ok` having
+// asserted nothing — the exact failure this ADR family exists to close. So the
+// `++`-only template functions below the dispatch are what the tests cover,
+// and `generate_harness_source` is covered by real elaboration instead: §2.0's
+// probe, and the outcome-conformance AC.
+//
+// **Do not add an end-to-end test here** without first checking
+// `tungsten info eval reachable-externs generate_harness_source
+// src/compiler/main.tg`. A green suite is not evidence that anything ran.
+
+pub mod runner;
+pub mod tree;
+pub mod standalone;
+pub mod rewrite;
+
+use driver::util::{Option, Some, None};
+use driver::pipeline::test::mode::types::{
+    HarnessPlan, HarnessMode, TreeMode, StandaloneMode, UnsupportedLayout
+};
+use driver::pipeline::test::harness::runner::{
+    HarnessCalls, generate_harness_main, generate_runner_chain
+};
+use driver::pipeline::test::harness::tree::{tree_calls, tree_prelude};
+use driver::pipeline::test::harness::standalone::{standalone_calls, standalone_prelude};
+use driver::pipeline::test::harness::rewrite::{rename_user_main};
+
+/// The harness source for a plan, or `None` when no mode can serve the file.
+///
+/// `Option` rather than a third template: an `UnsupportedLayout` arm returning
+/// some placeholder string would be a silently-wrong answer, and the caller
+/// already has to print the reason. The caller never reaches this on an
+/// unsupported layout — it errors first — so `None` is a guard, not a path.
+pub fn generate_harness_source(plan: HarnessPlan, user_source: String) -> Option<String> {
+    match plan.mode {
+        UnsupportedLayout(_) => None,
+        TreeMode() =>
+            Some(assemble_harness_source(plan, user_source,
+                                         tree_prelude(), tree_calls())),
+        StandaloneMode() =>
+            Some(assemble_harness_source(plan, user_source,
+                                         standalone_prelude(plan.reused_externs),
+                                         standalone_calls()))
+    }
+}
+
+/// User source (renamed) ++ prelude ++ main ++ runner chain.
+///
+/// The rename happens HERE, before the concatenation, because `plan.user_main`
+/// is a byte offset into the original source — see `rewrite.tg`'s ordering
+/// note.
+fn assemble_harness_source(plan: HarnessPlan, user_source: String,
+                           prelude: String, calls: HarnessCalls) -> String {
+    rename_user_main(user_source, plan.user_main) ++ "\n\n" ++
+    prelude ++ "\n" ++
+    generate_harness_main(calls, plan.test_count) ++ "\n" ++
+    generate_runner_chain(calls, plan.test_names, 0)
+}

@@ -98,7 +98,7 @@ fn test_strip_at_prefixes_nested_compound() {
 }
 
 /// strip_at_prefixes should NOT strip α_-prefixed TyVars — those are
-/// Mu-bound variables, not Phase 1c artifacts.
+/// Mu-bound variables, not Type-Body Collection artifacts.
 #[test]
 fn test_strip_at_prefixes_preserves_alpha_prefix() {
     let ty = Type::Mu(
@@ -113,7 +113,7 @@ fn test_strip_at_prefixes_preserves_alpha_prefix() {
     assert_eq!(stripped, ty);
 }
 
-/// @-prefixed TyVars are Phase 1c refs to concrete named types.
+/// @-prefixed TyVars are Type-Body Collection refs to concrete named types.
 /// They should NOT be treated as abstract type variables.
 #[test]
 fn test_discover_at_prefixed_tyvar_is_concrete() {

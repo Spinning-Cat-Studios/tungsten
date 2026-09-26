@@ -1,0 +1,10 @@
+// One half of the value cycle: calls into `odd_side`, which calls back here.
+use chain::{Chain, Link, End};
+use odd_side::sum_at_odd;
+
+pub fn sum_at_even(xs: Chain) -> Nat {
+    match xs {
+        Link(head, tail) => head + sum_at_odd(tail),
+        End => 0
+    }
+}

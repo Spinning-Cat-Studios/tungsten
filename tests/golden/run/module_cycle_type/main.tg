@@ -1,0 +1,18 @@
+// Shape 1 of ADR 4.9.26f: a TYPE cycle between two sibling modules.
+//
+// `alpha` names a type defined in `beta`, and `beta` names a type defined in
+// `alpha`. Nothing here is mutually *recursive* at the value level — the
+// question this fixture asks is only whether Import Resolution tolerates two
+// modules that each appear in the other's import list.
+
+mod alpha;
+mod beta;
+
+use alpha::{Alpha, make_alpha};
+use beta::{Beta, make_beta};
+
+fn main() -> Nat {
+    let a: Alpha = make_alpha(3);
+    let b: Beta = make_beta(4);
+    alpha::alpha_reads_beta(b) + beta::beta_reads_alpha(a)
+}

@@ -1,0 +1,11 @@
+[E0010] Error: expected `Int`, found `Nat`
+   ╭─[tests/golden/error/int_mixed_operands.tg:2:28]
+   │
+ 2 │ fn f(x: Int) -> Int { x + (3 : Nat) }
+   │                 ─┬─        ───┬───  
+   │                  ╰────────────────── expected due to return type
+   │                               │     
+   │                               ╰───── expected `Int`, found `Nat`
+───╯
+
+error: aborting due to 1 error

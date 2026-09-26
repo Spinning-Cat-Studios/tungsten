@@ -155,7 +155,7 @@ fn collect_from_term(
 
 /// Strip `@` prefixes from all TyVars in a type tree.
 ///
-/// `@`-prefixed TyVars are Phase 1c artifacts that reference concrete named types.
+/// `@`-prefixed TyVars are Type-Body Collection artifacts that reference concrete named types.
 /// Stripping them normalizes the type so that `@Token` and `Token` produce
 /// identical canonical type args for mono key matching.
 ///

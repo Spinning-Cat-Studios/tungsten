@@ -1,0 +1,11 @@
+// == a theorem may not reach a #[partial] constant, even through a wrapper
+type Lst = Nil | Cons(Nat, Lst)
+
+#[partial]
+fn spin(l: Lst) -> Nat { spin(l) }
+
+fn wrapper(l: Lst) -> Nat { spin(l) }
+
+theorem wrapped(l: Lst): Nat { wrapper(l) }
+
+fn main() -> Nat { 0 }

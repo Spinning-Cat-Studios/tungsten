@@ -95,3 +95,18 @@ fn test_complex_list_type_equivalence() {
     );
     assert!(types_equal_alpha(&list1, &list2));
 }
+
+// 18.9.26f: the primitive arm is guarded on BOTH sides, so a primitive
+// against the poison type still reaches the poison arm, and primitive pairs
+// compare by identity.
+#[test]
+fn test_primitive_against_poison_is_equal_in_both_orders() {
+    assert!(types_equal_alpha(&Type::Nat, &Type::Error));
+    assert!(types_equal_alpha(&Type::Error, &Type::Int));
+}
+
+#[test]
+fn test_primitive_pairs_compare_by_identity() {
+    assert!(types_equal_alpha(&Type::Int, &Type::Int));
+    assert!(!types_equal_alpha(&Type::Nat, &Type::Int));
+}

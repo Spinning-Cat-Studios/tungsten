@@ -7,22 +7,45 @@
 //! For tail-position self-recursive direct calls, we emit `musttail` to
 //! guarantee stack frame reuse.
 
-mod decompose;
+pub(crate) mod decompose;
 mod helpers;
+mod musttail;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_classp;
+#[cfg(test)]
+mod tests_classp_abi;
+#[cfg(test)]
+mod tests_classp_edge;
+#[cfg(test)]
 mod tests_decompose;
 
-use helpers::{collect_arrow_params, unwrap_lambda_chain};
-pub(crate) use helpers::{collect_saturated_call, direct_name, type_arity};
+use helpers::{collect_arrow_params, collect_saturated_generic_call, unwrap_lambda_chain};
+pub(crate) use helpers::{direct_name, type_arity};
 
 use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValueEnum, LLVMTailCallKind};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType};
+use inkwell::values::BasicValueEnum;
 use inkwell::AddressSpace;
 use tungsten_core::types::Type;
+
+/// The resolved materials for one saturated direct call, threaded from
+/// `try_compile_direct_call` into its musttail-dispatch helper as a unit
+/// (avoids a 6-param helper — ADR 23.7.26c close-out).
+struct DirectCallSite<'a, 'ctx> {
+    /// The `$direct` entry-point symbol being called.
+    direct: &'a str,
+    /// The resolved `$direct` LLVM function.
+    direct_fn: inkwell::values::FunctionValue<'ctx>,
+    /// The base (extern/mono-instance) name behind `direct`.
+    lookup_name: &'a str,
+    /// Compiled args, slot 0 = null env ptr, 1.. = the call arguments.
+    arg_vals: &'a [BasicValueEnum<'ctx>],
+    /// `arg_vals` as call-site metadata values.
+    args_meta: &'a [inkwell::values::BasicMetadataValueEnum<'ctx>],
+}
 
 impl<'ctx> CodeGen<'ctx> {
     /// Declare the direct entry point for a top-level function with arity > 1.
@@ -51,7 +74,7 @@ impl<'ctx> CodeGen<'ctx> {
         let fn_type = ret_llvm.fn_type(&param_llvm, false);
         let direct = direct_name(name);
         self.module.add_function(&direct, fn_type, None);
-        self.direct_calls.arities.insert(name.to_string(), arity);
+        self.direct_calls.set_arity(name, arity);
 
         Ok(())
     }
@@ -67,8 +90,8 @@ impl<'ctx> CodeGen<'ctx> {
         ty: &Type,
         span_start: Option<u32>,
     ) -> Result<(), CodeGenError> {
-        let arity = match self.direct_calls.arities.get(name) {
-            Some(&a) => a,
+        let arity = match self.direct_calls.arity(name) {
+            Some(a) => a,
             None => return Ok(()), // no direct entry for this function
         };
 
@@ -126,21 +149,18 @@ impl<'ctx> CodeGen<'ctx> {
         term: &tungsten_core::terms::Term,
         is_tail: bool,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CodeGenError> {
-        let (callee_name, arg_terms) = match collect_saturated_call(term) {
-            Some(pair) => pair,
+        let (callee_name, ty_args, arg_terms) = match collect_saturated_generic_call(term) {
+            Some(triple) => triple,
             None => return Ok(None),
         };
 
-        // Check if callee was remapped (extern wrappers)
-        let lookup_name = self
-            .defs
-            .extern_name_map
-            .get(&callee_name)
-            .cloned()
-            .unwrap_or_else(|| callee_name.clone());
+        let lookup_name = match self.resolve_direct_call_target(&callee_name, &ty_args) {
+            Some(name) => name,
+            None => return Ok(None),
+        };
 
-        let arity = match self.direct_calls.arities.get(&lookup_name) {
-            Some(&a) => a,
+        let arity = match self.direct_calls.arity(&lookup_name) {
+            Some(a) => a,
             None => return Ok(None),
         };
 
@@ -154,10 +174,10 @@ impl<'ctx> CodeGen<'ctx> {
             None => return Ok(None),
         };
 
-        // Compile all arguments
+        // Compile all arguments (slot 0 = null env ptr).
         let mut arg_vals: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(arity + 1);
         let env_ptr_type = self.context.ptr_type(AddressSpace::default());
-        arg_vals.push(env_ptr_type.const_null().into()); // null env
+        arg_vals.push(env_ptr_type.const_null().into());
         for arg_term in &arg_terms {
             let val = self.compile_term(arg_term)?;
             arg_vals.push(val);
@@ -166,40 +186,19 @@ impl<'ctx> CodeGen<'ctx> {
         let args_meta: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
             arg_vals.iter().map(|v| (*v).into()).collect();
 
-        // musttail path: self-recursive direct call in tail position
-        if is_tail {
-            if let Some(ref current_direct) = self.direct_calls.current_entry.clone() {
-                if *current_direct == direct {
-                    if let Some(result) = self.try_emit_direct_musttail(direct_fn, &args_meta)? {
-                        return Ok(Some(result));
-                    }
-                } else if current_direct.ends_with(decompose::DIRECT_MT_SUFFIX) {
-                    // Inside $direct_mt: check if this is a self-recursive call
-                    // to the base function and route through decomposed path.
-                    let mt_base =
-                        &current_direct[..current_direct.len() - decompose::DIRECT_MT_SUFFIX.len()];
-                    let expected_direct = direct_name(mt_base);
-                    if expected_direct == direct {
-                        if let Some(result) = self.try_emit_decomposed_musttail(
-                            &lookup_name,
-                            &arg_vals[1..], // skip env ptr (added by decomposed path)
-                        )? {
-                            return Ok(Some(result));
-                        }
-                    } else {
-                        self.trace_musttail(&direct, "SKIP", "not self-recursive");
-                    }
-                } else {
-                    self.trace_musttail(&direct, "SKIP", "not self-recursive");
-                }
-            } else {
-                self.trace_musttail(&direct, "SKIP", "not in direct entry");
-            }
-        } else {
-            self.trace_musttail(&direct, "SKIP", "not in tail position");
+        let site = DirectCallSite {
+            direct: &direct,
+            direct_fn,
+            lookup_name: &lookup_name,
+            arg_vals: &arg_vals,
+            args_meta: &args_meta,
+        };
+
+        // Self-recursive tail call → musttail; otherwise fall through to a plain call.
+        if let Some(result) = self.try_emit_saturated_musttail(&site, is_tail)? {
+            return Ok(Some(result));
         }
 
-        // Normal direct call
         let call_site = self
             .builder
             .build_call(direct_fn, &args_meta, "direct_call")
@@ -214,154 +213,74 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(Some(result))
     }
 
-    /// Emit `musttail call` + `ret` for a self-recursive direct call.
+    /// Resolve the direct-call target symbol for a saturated call.
     ///
-    /// Returns `Some(dummy)` if musttail was emitted, `None` if not eligible.
-    ///
-    /// For self-recursive calls, the caller and callee are the same LLVM function,
-    /// so their signatures are guaranteed identical. However, LLVM's `AArch64`
-    /// backend does not support `musttail` with `sret` (indirect return via
-    /// pointer for structs > 16 bytes). We guard on return type size.
-    /// See ADR 8.5.26c for rationale.
-    ///
-    /// # LLVM verifier vs backend distinction
-    ///
-    /// The LLVM IR verifier accepts `musttail` as long as caller and callee
-    /// signatures match. However, the backend (`SelectionDAGISel` on `AArch64`)
-    /// can still reject the lowered `musttail` with a fatal `report_fatal_error`
-    /// abort — this is NOT a verifier diagnostic but an unrecoverable crash.
-    /// The ABI guards in `check_musttail_abi_safety` exist to prevent this
-    /// backend-level failure.
-    fn try_emit_direct_musttail(
-        &mut self,
-        direct_fn: inkwell::values::FunctionValue<'ctx>,
-        args: &[inkwell::values::BasicMetadataValueEnum<'ctx>],
-    ) -> Result<Option<BasicValueEnum<'ctx>>, CodeGenError> {
-        let fn_name = direct_fn.get_name().to_str().unwrap_or("<unknown>");
-
-        let current_fn = if let Some(f) = self.compilation.current_fn {
-            f
+    /// A monomorphic call (`ty_args` empty) uses the extern-remapped global.
+    /// A saturated *generic* call resolves its pre-registered mono-instance
+    /// symbol (ADR 23.7.26c) so it rides `$direct` instead of the per-step-
+    /// allocating curried wrapper chain; `None` (unregistered instance / a
+    /// mono-blocking TyVar) falls the call site back to the closure path.
+    fn resolve_direct_call_target(&self, callee_name: &str, ty_args: &[&Type]) -> Option<String> {
+        if ty_args.is_empty() {
+            Some(
+                self.defs
+                    .extern_name_map
+                    .get(callee_name)
+                    .cloned()
+                    .unwrap_or_else(|| callee_name.to_string()),
+            )
         } else {
-            self.trace_musttail(fn_name, "SKIP", "no current function");
+            self.resolve_saturated_mono_callee(callee_name, ty_args)
+        }
+    }
+
+    /// Emit a `musttail` self-recursive call when eligible, else `Ok(None)`.
+    ///
+    /// Handles the three tail-position cases: a direct self-call (`$direct` ==
+    /// current entry), a decomposed self-call (inside a `$direct_mt` body), or
+    /// a non-self-recursive/non-tail SKIP (traced). `Ok(None)` means the caller
+    /// should emit a plain direct call.
+    fn try_emit_saturated_musttail(
+        &mut self,
+        site: &DirectCallSite<'_, 'ctx>,
+        is_tail: bool,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CodeGenError> {
+        if !is_tail {
+            self.trace_musttail(site.direct, "SKIP", "not in tail position");
             return Ok(None);
+        }
+        let current_direct = match self.direct_calls.current_entry.clone() {
+            Some(entry) => entry,
+            None => {
+                self.trace_musttail(site.direct, "SKIP", "not in direct entry");
+                return Ok(None);
+            }
         };
 
-        // musttail requires identical function types
-        if direct_fn.get_type() != current_fn.get_type() {
-            self.trace_musttail(fn_name, "SKIP", "function type mismatch");
-            return Ok(None);
+        if current_direct == *site.direct {
+            return self.try_emit_direct_musttail(site.direct_fn, site.args_meta);
         }
 
-        // ABI safety: struct returns/params may be incompatible with
-        // musttail depending on target and call kind (ADR 12.5.26e/f).
-        // Direct self-recursive calls are safe on AArch64.
-        if let Err(reason) = self.check_musttail_abi_safety(
-            direct_fn.get_type(),
-            crate::codegen::abi::MusttailCallKind::DirectSelfRecursive,
-        ) {
-            self.trace_musttail(fn_name, "SKIP", reason);
-            return Ok(None);
+        // Inside a `$direct_mt` body: route a self-recursive call to the base
+        // function through the decomposed path.
+        if current_direct.ends_with(decompose::DIRECT_MT_SUFFIX) {
+            let mt_base =
+                &current_direct[..current_direct.len() - decompose::DIRECT_MT_SUFFIX.len()];
+            if direct_name(mt_base) == *site.direct {
+                // Skip slot 0 (env ptr): the decomposed path re-adds it.
+                return self.try_emit_decomposed_musttail(site.lookup_name, &site.arg_vals[1..]);
+            }
         }
 
-        self.trace_musttail(fn_name, "EMIT", "self-recursive, tail position");
-
-        let call_site = self
-            .builder
-            .build_call(direct_fn, args, "musttail_direct")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-
-        call_site.set_tail_call_kind(LLVMTailCallKind::LLVMTailCallKindMustTail);
-
-        let result = call_site.try_as_basic_value().left().ok_or_else(|| {
-            CodeGenError::TypeError("musttail direct call returned void".to_string())
-        })?;
-
-        // musttail must be immediately followed by ret
-        self.builder
-            .build_return(Some(&result))
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-
-        // Dead block for subsequent code
-        if let Some(function) = self.compilation.current_fn {
-            let dead_bb = self
-                .context
-                .append_basic_block(function, "musttail_direct_dead");
-            self.builder.position_at_end(dead_bb);
-        }
-
-        let dummy = direct_fn.get_type().get_return_type().map_or_else(
-            || self.context.bool_type().const_zero().into(),
-            inkwell::types::BasicTypeEnum::const_zero,
-        );
-        Ok(Some(dummy))
+        // A tail call to a different function. Recorded as its own decision
+        // kind rather than left trace-only (ADR 5.8.26a D4) — see
+        // `Decision::SkipNonSelf` for why it must not be folded into `Skip`.
+        self.trace_musttail(site.direct, "SKIP", "not self-recursive");
+        self.record_musttail_skip_non_self(site.direct, site.direct_fn.get_type());
+        Ok(None)
     }
 
-    /// Emit a trace message for musttail decisions (when --trace-musttail is active).
-    fn trace_musttail(&self, fn_name: &str, action: &str, reason: &str) {
-        if self.tracing.trace_musttail {
-            eprintln!("[musttail] {fn_name}: {action} ({reason})");
-        }
-    }
-
-    /// Emit trace messages for decomposition decisions.
-    pub(super) fn trace_musttail_decompose(
-        &self,
-        fn_name: &str,
-        original_params: &[BasicTypeEnum<'ctx>],
-        flattened: &[BasicTypeEnum<'ctx>],
-    ) {
-        if !self.tracing.trace_musttail {
-            return;
-        }
-        let descs: Vec<String> = original_params
-            .iter()
-            .filter(|p| p.is_struct_type())
-            .map(|p| {
-                let st = p.into_struct_type();
-                let fields: Vec<String> = (0..st.count_fields())
-                    .filter_map(|i| st.get_field_type_at_index(i))
-                    .map(|f| format!("{f:?}"))
-                    .collect();
-                format!("{{ {} }}", fields.join(", "))
-            })
-            .collect();
-        eprintln!(
-            "[musttail] {}$direct: DECOMPOSE ({} → {} scalar args)",
-            fn_name,
-            descs.join(", "),
-            flattened.len(),
-        );
-    }
-
-    /// Emit a musttail call + ret + dead block. Shared by direct and decomposed paths.
-    pub(super) fn emit_musttail_epilogue(
-        &mut self,
-        target_fn: inkwell::values::FunctionValue<'ctx>,
-        args: &[inkwell::values::BasicMetadataValueEnum<'ctx>],
-        label: &str,
-    ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
-        let call = self
-            .builder
-            .build_call(target_fn, args, label)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        call.set_tail_call_kind(LLVMTailCallKind::LLVMTailCallKindMustTail);
-        let result = call
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CodeGenError::TypeError(format!("{label} returned void")))?;
-        self.builder
-            .build_return(Some(&result))
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        if let Some(function) = self.compilation.current_fn {
-            let dead = self
-                .context
-                .append_basic_block(function, &format!("{label}_dead"));
-            self.builder.position_at_end(dead);
-        }
-        let dummy = target_fn.get_type().get_return_type().map_or_else(
-            || self.context.bool_type().const_zero().into(),
-            inkwell::types::BasicTypeEnum::const_zero,
-        );
-        Ok(dummy)
-    }
+    // Musttail recording (`trace_musttail`, `record_musttail_*`) and the
+    // `musttail call` emission primitives (`try_emit_direct_musttail`,
+    // `emit_musttail_epilogue`) live in `musttail.rs`.
 }

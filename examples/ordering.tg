@@ -2,7 +2,7 @@
 pub type Ordering = Less | Equal | Greater
 
 // Compare two natural numbers
-pub fn compare(a: Nat, b: Nat) -> Ordering {
+pub fn compare_nat(a: Nat, b: Nat) -> Ordering {
     if a < b {
         Less
     } else if a == b {
@@ -31,10 +31,10 @@ pub fn is_equal(ord: Ordering) -> Bool {
 }
 
 fn main() -> Bool {
-    let cmp1 = compare(3, 5);   // Less
-    let cmp2 = compare(5, 5);   // Equal
-    let cmp3 = compare(7, 5);   // Greater
+    let cmp1 = compare_nat(3, 5);   // Less
+    let cmp2 = compare_nat(5, 5);   // Equal
+    let cmp3 = compare_nat(7, 5);   // Greater
     
-    // is_less(compare(3, 5)) => true
+    // is_less(compare_nat(3, 5)) => true
     is_less(cmp1)
 }

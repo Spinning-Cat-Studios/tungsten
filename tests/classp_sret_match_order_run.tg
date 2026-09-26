@@ -1,0 +1,96 @@
+// Class-P sret match-arm-order regression (ADR 1.7.26e §6.5) — cost 5.
+//
+// Mirrors the tokenize/tokenize_loop shape that segfaulted the L3 tungsten1:
+// an sret `$direct_mt` whose match places the MUSTTAIL (self-recursive) arms at
+// lower constructor tags than the value arm. The match merge used to take its
+// phi type from the FIRST arm — the musttail epilogue's `i1` dummy — truncating
+// the real base-case result through a 1-byte `cast_to_type` memcpy (garbage
+// list pointer → segfault downstream). Fixed by excluding unreachable
+// (musttail-terminated) arms from result-type unification (`adt_match.rs`).
+//
+// Verify: `tungsten compile tests/classp_sret_match_order_run.tg -o /tmp/x && /tmp/x`
+// (expect exit 0; pre-fix: SIGSEGV). Wired into `make tg-test-classp`.
+
+pub type Span = { lo: Nat, hi: Nat, line: Nat, col: Nat }
+pub type Tok = TWord(String, Span) | TNum(Nat, Span) | TEof(Span)
+pub type TList = TNil() | TCons(Tok, TList)
+
+pub type Lex = { src: String, pos: Nat, file: String, errs: TList }
+pub type ScanRes = { tok: Tok, state: Lex }
+pub type LoopRes = { toks: TList, errs: TList }
+pub type LexRes = { toks: TList, errs: TList }
+
+fn t_rev_acc(xs: TList, acc: TList) -> TList {
+    match xs {
+        TNil() => acc,
+        TCons(t, rest) => t_rev_acc(rest, TCons(t, acc))
+    }
+}
+
+fn t_rev(xs: TList) -> TList {
+    t_rev_acc(xs, TNil())
+}
+
+fn scan_one(lex: Lex) -> ScanRes {
+    let sp: Span = { lo: lex.pos, hi: lex.pos + 1, line: 1, col: lex.pos };
+    let lex2: Lex = { src: lex.src, pos: lex.pos + 1, file: lex.file, errs: lex.errs };
+    if lex2.pos > 50 {
+        { tok: TEof(sp), state: lex2 }
+    } else {
+        { tok: TNum(lex2.pos, sp), state: lex2 }
+    }
+}
+
+fn tok_is_eof(t: Tok) -> Bool {
+    match t {
+        TEof(sp) => true,
+        TWord(s, sp) => false,
+        TNum(n, sp) => false
+    }
+}
+
+fn scan_loop(lex: Lex, toks: TList, iteration: Nat) -> LoopRes {
+    if iteration > 100000 {
+        let r: LoopRes = { toks: toks, errs: lex.errs };
+        r
+    } else {
+        let result = scan_one(lex);
+        let tok = result.tok;
+        let new_state = result.state;
+        let new_toks = TCons(tok, toks);
+        match tok {
+            TEof(sp) => {
+                let r: LoopRes = { toks: new_toks, errs: new_state.errs };
+                r
+            },
+            _ => scan_loop(new_state, new_toks, iteration + 1)
+        }
+    }
+}
+
+pub fn scan(source: String, file: String) -> LexRes {
+    let lex: Lex = { src: source, pos: 0, file: file, errs: TNil() };
+    let result = scan_loop(lex, TNil(), 0);
+    let raw = result.toks;
+    let toks = t_rev(raw);
+    { toks: toks, errs: result.errs }
+}
+
+fn sum_toks(xs: TList, acc: Nat) -> Nat {
+    match xs {
+        TNil() => acc,
+        TCons(t, rest) => {
+            match t {
+                TNum(n, sp) => sum_toks(rest, acc + n),
+                TWord(s, sp) => sum_toks(rest, acc),
+                TEof(sp) => sum_toks(rest, acc)
+            }
+        }
+    }
+}
+
+fn main() -> Nat {
+    let r = scan("hello", "world.tg");
+    // pos runs 1..50 as TNum, then TEof at 51. sum 1..50 = 1275.
+    if sum_toks(r.toks, 0) == 1275 { 0 } else { 1 }
+}

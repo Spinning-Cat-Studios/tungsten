@@ -77,14 +77,16 @@ fn test_nat_ge_false() {
 fn test_str_char_at() {
     let term = Term::str_char_at(Term::string_lit("hello"), Term::Zero);
     let result = eval(&term);
-    assert_eq!(result, Term::nat(104));
+    // Char codes exceed nat_smart's unary threshold (ADR 21.7.26e), so the
+    // result is the NatLit spelling; compare by value, not representation.
+    assert_eq!(crate::eval::term_to_nat(&result), Some(104));
 }
 
 #[test]
 fn test_str_char_at_middle() {
     let term = Term::str_char_at(Term::string_lit("hello"), Term::nat(2));
     let result = eval(&term);
-    assert_eq!(result, Term::nat(108));
+    assert_eq!(crate::eval::term_to_nat(&result), Some(108));
 }
 
 #[test]

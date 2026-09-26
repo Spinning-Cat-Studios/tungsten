@@ -1,0 +1,13 @@
+[E0062] Error: cannot prove termination of `spin`
+   ╭─[tests/golden/error/termination_no_descent.tg:4:60]
+   │
+ 4 │ fn spin(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => spin(l) } }
+   │                                                            ───┬───  
+   │                                                               ╰───── 
+   │ 
+   │ Help: rewrite the recursion structurally, or mark the definition `#[partial]` (partial definitions cannot be used in proofs)
+   │ 
+   │ Note: with `l` decreasing, the call to `spin` supplies `l`, which is not a known strict subterm of `l`
+───╯
+
+error: aborting due to 1 error

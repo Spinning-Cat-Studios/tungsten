@@ -1,4 +1,7 @@
 // src/compiler/codegen/ir_closures/application.tg
+// The driver never reaches this module: `run_compile` delegates codegen to the
+// bootstrap binary, so it is compiled and type-checked but executed only by
+// `test_codegen*.tg` / `test_cir_captures.tg`. See codegen/mod.tg (ADR 3.9.26a).
 // Closure application — extract fn_ptr + env_ptr, indirect call.
 //
 // Closure layout: { ptr, ptr } = { fn_ptr, env_ptr }

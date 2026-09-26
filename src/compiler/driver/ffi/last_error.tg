@@ -1,0 +1,41 @@
+// The driver's shared last-error channel.
+//
+// Every `tg_*` driver entry point — file I/O, directory, process — clears this
+// on the way in and sets it only on the paths that fail before doing their
+// work. That makes it the one discriminator the whole boundary shares, which is
+// why it sits at the root of `ffi/` beside `mod.tg` rather than inside any one
+// family directory: it is not I/O, and it is not process control, it is what
+// both of them report failure through (ADR 3.9.26t D2).
+
+use driver::ffi::types::{
+    CString, cstring_to_string, cstring_is_null, tg_free_string
+};
+
+// --- Raw FFI Declaration ---
+
+pub extern "C" fn tg_driver_get_last_error() -> CString
+
+// --- Safe Wrapper ---
+
+/// The driver's last recorded error, or `None` when the last driver call
+/// recorded nothing.
+///
+/// Every `tg_*` driver entry point clears this on the way in and sets it only
+/// on the paths that fail before doing their work, so a `Some` here means "the
+/// call never got as far as its subject" — which is what lets `exec_process`
+/// tell a process that would not spawn from one that ran and exited badly
+/// (ADR 3.9.26b D3). The two are indistinguishable by return value: both come
+/// back as `-1`, wrapped to `18446744073709551615`.
+///
+/// Read it AFTER the driver call whose failure you are diagnosing and BEFORE
+/// any other driver call, because every one of them clears it on entry.
+pub fn driver_last_error() -> Option<String> {
+    let err_c = tg_driver_get_last_error();
+    if cstring_is_null(err_c) {
+        None
+    } else {
+        let err = cstring_to_string(err_c);
+        tg_free_string(err_c);
+        Some(err)
+    }
+}

@@ -73,14 +73,14 @@ pub fn test_emit_lambda_body_in_deferred() -> Unit {
 // emit_lambda: capturing closure
 // ===========================================================================
 
-pub fn test_emit_lambda_capturing_malloc() -> Unit {
+pub fn test_emit_lambda_capturing_alloc() -> Unit {
     let st = ir_state_new();
     let body: CodegenIR = CIRVar("x", CTBool);
     let caps = cir_captures_add("y", CTNat, cir_captures_empty());
     let (_, st) = emit_lambda(st, "x", CTBool, body, caps, CTBool);
     let ir = ir_state_to_string(st);
-    // Must allocate env with malloc
-    assert_eq_bool(string_contains(ir, "call ptr @malloc"), true)
+    // Must allocate env through the runtime symbol (ADR 14.9.26b), class Env = 1
+    assert_eq_bool(string_contains(ir, "call ptr @__tungsten_alloc(i64 8, i32 1)"), true)
 }
 
 pub fn test_capture_stores_gep() -> Unit {
@@ -122,13 +122,13 @@ pub fn test_emit_fix_self_slot() -> Unit {
     assert_eq_bool(string_contains(deferred, "load { ptr, ptr }"), true)
 }
 
-pub fn test_emit_fix_malloc_16() -> Unit {
+pub fn test_emit_fix_alloc_16() -> Unit {
     let st = ir_state_new();
     let body: CodegenIR = CIRVar("self", CTArrow(CTNat, CTNat));
     let (_, st) = emit_fix(st, "self", CTArrow(CTNat, CTNat), body, CIRCaptureNil);
     let ir = ir_state_to_string(st);
     // Must allocate 16 bytes for self-closure env
-    assert_eq_bool(string_contains(ir, "call ptr @malloc(i64 16)"), true)
+    assert_eq_bool(string_contains(ir, "call ptr @__tungsten_alloc(i64 16, i32 1)"), true)
 }
 
 // ===========================================================================
@@ -270,8 +270,8 @@ pub fn test_emit_lambda_capturing_full_ir() -> Unit {
     // inner function with capture load from env
     assert_eq_bool(string_contains(full, "define i1 @lambda.0"), true);
     assert_eq_bool(string_contains(full, "getelementptr %env.0, ptr %__env"), true);
-    // call-site: malloc + store + closure pair
-    assert_eq_bool(string_contains(full, "call ptr @malloc"), true);
+    // call-site: runtime alloc + store + closure pair
+    assert_eq_bool(string_contains(full, "call ptr @__tungsten_alloc"), true);
     assert_eq_bool(string_contains(full, "insertvalue { ptr, ptr }"), true)
 }
 
@@ -314,7 +314,7 @@ pub fn test_emit_fix_with_external_captures() -> Unit {
     assert_eq_bool(string_contains(env_types, "{ ptr, ptr }, i64"), true);
     // Env allocation must be 16 (self) + 8 (Nat) = 24
     let ir = ir_state_to_string(st);
-    assert_eq_bool(string_contains(ir, "@malloc(i64 24)"), true)
+    assert_eq_bool(string_contains(ir, "@__tungsten_alloc(i64 24, i32 1)"), true)
 }
 
 /// Closure value is always { ptr, ptr } — verify insertvalue pattern.

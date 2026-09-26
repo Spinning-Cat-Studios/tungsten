@@ -1,0 +1,18 @@
+// Shape 2 of ADR 4.9.26f: a VALUE cycle between two sibling modules.
+//
+// `even_side::sum_at_even` calls `odd_side::sum_at_odd` and vice versa, so the
+// two modules are mutually recursive at the value level. Recursion Grouping and
+// Value Collection run in different phases from Import Resolution, so this is a
+// separate question from the type cycle next door.
+
+mod chain;
+mod even_side;
+mod odd_side;
+
+use chain::{Chain, Link, End};
+use even_side::sum_at_even;
+
+fn main() -> Nat {
+    let xs: Chain = Link(1, Link(2, Link(3, Link(4, End))));
+    sum_at_even(xs)
+}

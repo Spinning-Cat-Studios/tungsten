@@ -1,0 +1,182 @@
+// Unit tests for the one projection chain both builders fold (ADR 3.9.26g).
+//
+// `product_field_projection` is the compiler's only statement of the
+// right-nested product convention (ADR 1.8.26b D1). The Core-term builder
+// (`matches/patterns/projections.tg`), the CIR builder
+// (`matches/patterns/projections_cir.tg`) and the type walk
+// (`product_field_type`) all fold the list it returns, so this suite is where
+// the convention is pinned for all three at once.
+//
+// **One and two elements are not enough.** At arity 2 a builder that projects
+// every field as `fst(snd^i)` — the defect this ADR removed — still agrees at
+// field 0, so only field 1 gives it away, and at arity 1 the two conventions
+// coincide outright. Three is the smallest arity that distinguishes every case,
+// which is why each fact below is asserted at one, two AND three.
+
+// Full module tree (matches test_string_concat.tg): with only `mod driver`,
+// Signature Collection fails resolving `Option` in driver::util (ADR 2.7.26b T5b).
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_string, assert_eq_nat, assert_eq_bool};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_len;
+use driver::util::strings::string_concat;
+use elab::exprs::matches::patterns::projection_path::{
+    ProjectionStep, StepFst, StepSnd,
+    product_field_projection
+};
+
+// ---------------------------------------------------------------------------
+// Rendering helpers — the chain as text, in application order
+// ---------------------------------------------------------------------------
+
+/// Render a chain as dotted steps in application order: `[StepSnd, StepFst]`
+/// is `"snd.fst."`, which is the term `fst(snd(src))`.
+fn projection_chain_text(steps: List<ProjectionStep>) -> String {
+    match steps {
+        Nil() => "",
+        Cons(step, rest) => string_concat(projection_step_text(step), projection_chain_text(rest))
+    }
+}
+
+fn projection_step_text(step: ProjectionStep) -> String {
+    match step {
+        StepFst() => "fst.",
+        StepSnd() => "snd."
+    }
+}
+
+/// Does this chain end by taking the left component?
+///
+/// The defect this ADR removed was a `fst` on the LAST field, whose `snd` chain
+/// has already landed on the value. A chain that takes `fst` anywhere is a chain
+/// for a non-final field.
+fn projection_takes_fst(steps: List<ProjectionStep>) -> Bool {
+    match steps {
+        Nil() => false,
+        Cons(step, rest) => projection_step_is_fst(step) || projection_takes_fst(rest)
+    }
+}
+
+fn projection_step_is_fst(step: ProjectionStep) -> Bool {
+    match step {
+        StepFst() => true,
+        StepSnd() => false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC3: the projection sequence at one, two and three elements
+// ---------------------------------------------------------------------------
+
+/// Arity 1: the value IS the field, so no step at all.
+pub fn test_projection_chain_one_element() -> Unit {
+    assert_eq_string(projection_chain_text(product_field_projection(0, 1)), "")
+}
+
+/// Arity 2: `fst`, then the remaining value.
+pub fn test_projection_chain_two_elements() -> Unit {
+    assert_eq_string(projection_chain_text(product_field_projection(0, 2)), "fst.");
+    assert_eq_string(projection_chain_text(product_field_projection(1, 2)), "snd.")
+}
+
+/// Arity 3 — where left- and right-nesting stop coinciding. The middle field is
+/// the only one carrying both kinds of step, and the last carries `snd` twice
+/// with no `fst`: the wrong convention would say `snd.snd.fst.` here.
+pub fn test_projection_chain_three_elements() -> Unit {
+    assert_eq_string(projection_chain_text(product_field_projection(0, 3)), "fst.");
+    assert_eq_string(projection_chain_text(product_field_projection(1, 3)), "snd.fst.");
+    assert_eq_string(projection_chain_text(product_field_projection(2, 3)), "snd.snd.")
+}
+
+/// The `snd` prefix is the field index, at every arity.
+pub fn test_projection_snd_steps_count_the_index() -> Unit {
+    assert_eq_nat(list_len(product_field_projection(0, 1)), 0);
+    assert_eq_nat(list_len(product_field_projection(1, 2)), 1);
+    assert_eq_nat(list_len(product_field_projection(1, 3)), 2);
+    assert_eq_nat(list_len(product_field_projection(2, 3)), 2)
+}
+
+/// The last field of any arity is reached by `snd` steps alone.
+///
+/// This is the defect's own signature: `tuple_let` projected field `n-1` as
+/// `fst(snd^(n-1))`, asking for `fst` of a scalar, while the type walk three
+/// functions above typed it as `snd^(n-1)`.
+pub fn test_last_field_never_takes_fst() -> Unit {
+    assert_eq_bool(projection_takes_fst(product_field_projection(0, 1)), false);
+    assert_eq_bool(projection_takes_fst(product_field_projection(1, 2)), false);
+    assert_eq_bool(projection_takes_fst(product_field_projection(2, 3)), false)
+}
+
+/// Every field but the last takes exactly one `fst`, at the end.
+pub fn test_non_final_fields_take_fst() -> Unit {
+    assert_eq_bool(projection_takes_fst(product_field_projection(0, 2)), true);
+    assert_eq_bool(projection_takes_fst(product_field_projection(0, 3)), true);
+    assert_eq_bool(projection_takes_fst(product_field_projection(1, 3)), true)
+}
+
+// ---------------------------------------------------------------------------
+// AC4: the CIR builder and the term builder walk the same sequence
+// ---------------------------------------------------------------------------
+
+/// One producer feeds both builders, so they cannot disagree.
+///
+/// `wrap_product_projections` folds `product_field_projection(i, n)` into
+/// `fst`/`snd` term nodes; `wrap_product_projections_cir` folds the SAME call
+/// into `CIRFst`/`CIRSnd`; `product_field_type` folds it into the product
+/// accessors. That is D3's "derives from" branch rather than its "asserted
+/// equal" fallback — there is no second sequence left to compare against — so
+/// what remains to assert is the sequence they share, per field, at the arity
+/// where a divergence would first be visible.
+pub fn test_one_chain_feeds_both_builders() -> Unit {
+    let field0 = product_field_projection(0, 3);
+    let field1 = product_field_projection(1, 3);
+    let field2 = product_field_projection(2, 3);
+    assert_eq_string(projection_chain_text(field0), "fst.");
+    assert_eq_string(projection_chain_text(field1), "snd.fst.");
+    assert_eq_string(projection_chain_text(field2), "snd.snd.");
+    assert_eq_nat(list_len(field0) + list_len(field1) + list_len(field2), 5)
+}
+
+// ---------------------------------------------------------------------------
+// ADR 4.9.26b AC4: a product-valued LAST field, at every index
+// ---------------------------------------------------------------------------
+
+/// A three-field record whose last field is itself a pair encodes as
+/// `A × (B × (C × D))`: the field count is **3**, the type's product spine is
+/// **4**, and record field access used to read the spine — walking while the
+/// residual type still looked like a product instead of stopping at field 3.
+///
+/// The two readings agree at every index but the last, which is the whole
+/// reason the defect survived: `r.mid` was right, `r.tail` came back as the
+/// first half of `r.tail`, and the declared field type came back regardless.
+pub fn test_product_tail_chain_follows_the_field_count() -> Unit {
+    assert_eq_string(projection_chain_text(product_field_projection(0, 3)), "fst.");
+    assert_eq_string(projection_chain_text(product_field_projection(1, 3)), "snd.fst.");
+    assert_eq_string(projection_chain_text(product_field_projection(2, 3)), "snd.snd.");
+    assert_eq_string(projection_chain_text(product_field_projection(0, 4)), "fst.");
+    assert_eq_string(projection_chain_text(product_field_projection(1, 4)), "snd.fst.");
+    assert_eq_string(projection_chain_text(product_field_projection(2, 4)), "snd.snd.fst.")
+}
+
+/// Arity 2 is the smallest record the defect reaches: `{ a: Nat, b: (Nat, Nat) }`
+/// has two fields and a three-long spine, so field 1 is `snd` under the count
+/// and `snd.fst.` under the spine.
+pub fn test_product_tail_chain_at_the_smallest_reproducer() -> Unit {
+    assert_eq_string(projection_chain_text(product_field_projection(1, 2)), "snd.");
+    assert_eq_string(projection_chain_text(product_field_projection(1, 3)), "snd.fst.")
+}
+
+/// The last field is where the two readings part, and the extra step is a `fst`.
+///
+/// A chain one step longer that ends in `fst` is not a near miss: it descends
+/// INTO the field and returns its left half, at the field's own declared type.
+pub fn test_the_spine_reading_adds_one_fst_at_the_last_field() -> Unit {
+    assert_eq_bool(projection_takes_fst(product_field_projection(2, 3)), false);
+    assert_eq_bool(projection_takes_fst(product_field_projection(2, 4)), true);
+    assert_eq_nat(list_len(product_field_projection(2, 3)), 2);
+    assert_eq_nat(list_len(product_field_projection(2, 4)), 3)
+}

@@ -1,0 +1,4 @@
+// == a self-referential constant has nothing that could decrease
+fn diverge() -> Void { diverge() }
+
+fn main() -> Nat { 0 }

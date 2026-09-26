@@ -7,9 +7,10 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
-use crate::types::Type;
+use super::node_substitute::substitute_type_handle;
+use super::nodes::{materialize_type, TypeNode};
+use crate::ffi::{with_arena, with_arena_ref, TypeHandle, INVALID_HANDLE};
 
-use crate::ffi::{with_arena, TypeHandle, INVALID_HANDLE};
 // ============================================================================
 // Type Variable and Application Accessors
 // ============================================================================
@@ -21,9 +22,9 @@ use crate::ffi::{with_arena, TypeHandle, INVALID_HANDLE};
 pub extern "C" fn tg_type_get_mu_var(ty: TypeHandle) -> *const c_char {
     use std::ffi::CString;
 
-    with_arena!(|arena| {
-        match arena.get_type(ty) {
-            Some(Type::Mu(var, _)) => {
+    with_arena_ref!(|arena| {
+        match arena.get_type_node(ty) {
+            Some(TypeNode::Mu(var, _)) => {
                 // Create a CString and leak it (caller responsible for memory)
                 match CString::new(var.as_str()) {
                     Ok(cstr) => cstr.into_raw().cast_const(),
@@ -42,9 +43,9 @@ pub extern "C" fn tg_type_get_mu_var(ty: TypeHandle) -> *const c_char {
 pub extern "C" fn tg_type_get_forall_var(ty: TypeHandle) -> *const c_char {
     use std::ffi::CString;
 
-    with_arena!(|arena| {
-        match arena.get_type(ty) {
-            Some(Type::Forall(var, _)) => match CString::new(var.as_str()) {
+    with_arena_ref!(|arena| {
+        match arena.get_type_node(ty) {
+            Some(TypeNode::Forall(var, _)) => match CString::new(var.as_str()) {
                 Ok(cstr) => cstr.into_raw().cast_const(),
                 Err(_) => std::ptr::null(),
             },
@@ -59,9 +60,9 @@ pub extern "C" fn tg_type_get_forall_var(ty: TypeHandle) -> *const c_char {
 pub extern "C" fn tg_type_get_tyvar_name(ty: TypeHandle) -> *const c_char {
     use std::ffi::CString;
 
-    with_arena!(|arena| {
-        match arena.get_type(ty) {
-            Some(Type::TyVar(name)) => match CString::new(name.as_str()) {
+    with_arena_ref!(|arena| {
+        match arena.get_type_node(ty) {
+            Some(TypeNode::TyVar(name)) => match CString::new(name.as_str()) {
                 Ok(cstr) => cstr.into_raw().cast_const(),
                 Err(_) => std::ptr::null(),
             },
@@ -76,9 +77,9 @@ pub extern "C" fn tg_type_get_tyvar_name(ty: TypeHandle) -> *const c_char {
 pub extern "C" fn tg_type_get_app_name(ty: TypeHandle) -> *const c_char {
     use std::ffi::CString;
 
-    with_arena!(|arena| {
-        match arena.get_type(ty) {
-            Some(Type::App(name, _)) => match CString::new(name.as_str()) {
+    with_arena_ref!(|arena| {
+        match arena.get_type_node(ty) {
+            Some(TypeNode::App(name, _)) => match CString::new(name.as_str()) {
                 Ok(cstr) => cstr.into_raw().cast_const(),
                 Err(_) => std::ptr::null(),
             },
@@ -92,6 +93,9 @@ pub extern "C" fn tg_type_get_app_name(ty: TypeHandle) -> *const c_char {
 // ============================================================================
 
 /// Substitute a type variable in a type: τ[α := τ']
+///
+/// Sharing-aware on the node DAG (ADR 2.7.26a §4): only the spine of paths
+/// containing α allocates; an unchanged type returns its original handle.
 ///
 /// # Safety
 /// `var_name` must be a valid null-terminated UTF-8 string.
@@ -110,15 +114,7 @@ pub unsafe extern "C" fn tg_type_substitute(
     };
 
     with_arena!(|arena| {
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let replacement = match arena.get_type(replacement) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(ty.substitute(name_str, &replacement))
+        substitute_type_handle(arena, ty, name_str, replacement).unwrap_or(INVALID_HANDLE)
     })
 }
 
@@ -129,8 +125,8 @@ pub unsafe extern "C" fn tg_type_substitute(
 /// Debug function to print type info to stderr
 #[no_mangle]
 pub extern "C" fn tg_type_debug(ty: TypeHandle) {
-    with_arena!(|arena| {
-        match arena.get_type(ty) {
+    with_arena_ref!(|arena| {
+        match materialize_type(arena, ty) {
             Some(t) => eprintln!("[FFI DEBUG] handle {ty} = {t:?}"),
             None => eprintln!("[FFI DEBUG] handle {ty} = INVALID"),
         }
@@ -143,12 +139,12 @@ pub extern "C" fn tg_type_debug(ty: TypeHandle) {
 /// diagnostics without converting an error path into a success path.
 #[no_mangle]
 pub extern "C" fn tg_type_error() -> TypeHandle {
-    with_arena!(|arena| arena.alloc_type(Type::Error))
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::Error))
 }
 
 /// Check whether a type handle represents a TypeError (poison type).
 /// Returns true if the type is `Type::Error`, false otherwise.
 #[no_mangle]
 pub extern "C" fn tg_is_type_error(ty: TypeHandle) -> bool {
-    with_arena!(|arena| { matches!(arena.get_type(ty), Some(Type::Error)) })
+    with_arena_ref!(|arena| { matches!(arena.get_type_node(ty), Some(TypeNode::Error)) })
 }

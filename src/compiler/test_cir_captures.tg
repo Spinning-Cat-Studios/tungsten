@@ -217,11 +217,12 @@ pub fn test_emit_fix_with_captures_stores() -> Unit {
     assert_eq_bool(string_contains(ir, "store i64"), true)
 }
 
-/// emit_fix with external captures mallocs correct size (16 + 8 = 24)
-pub fn test_emit_fix_with_captures_malloc_size() -> Unit {
+/// emit_fix with external captures allocates the correct size (16 + 8 = 24)
+/// through the runtime symbol, class Env (ADR 14.9.26b)
+pub fn test_emit_fix_with_captures_alloc_size() -> Unit {
     let caps = cir_captures_add("x", CTNat, cir_captures_empty());
     let body = CIRVar("self", CTArrow(CTNat, CTNat));
     let (_, st) = emit_fix(ir_state_new(), "self", CTArrow(CTNat, CTNat), body, caps);
     let ir = ir_state_to_string(st);
-    assert_eq_bool(string_contains(ir, "call ptr @malloc(i64 24)"), true)
+    assert_eq_bool(string_contains(ir, "call ptr @__tungsten_alloc(i64 24, i32 1)"), true)
 }

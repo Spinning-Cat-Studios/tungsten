@@ -10,11 +10,18 @@
 //! - `visibility` — basic item visibility tests
 //! - `visibility_export` — export validation / public item leak detection
 //! - `cross_module_generics` — ADR 31: cross-module generic type resolution
+//! - `stored_generic_instantiations` — ADR 21.7.26e: wall-1 stored-position matrix
+//! - `poison` — ADR 14.8.26g / 15.8.26d: the collection deferral, its
+//!   producers, and the construction boundaries that consume their poison
 
 mod cross_module_generics;
+mod deferred_tyvar_resolution_order;
+mod encoding_finalization_order;
 mod errors;
 mod expressions;
 mod items;
+mod poison;
+mod stored_generic_instantiations;
 mod visibility;
 mod visibility_export;
 

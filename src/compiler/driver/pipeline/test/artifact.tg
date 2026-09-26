@@ -1,0 +1,57 @@
+// src/compiler/driver/pipeline/test/artifact.tg
+// Where the generated test harness is written, and why it is not written where
+// it used to be (ADR 7.8.26a D4/§2.3).
+//
+// `compile_and_run_tests` used to write `<base>.tungsten_test.tg` beside the
+// source and never remove it on any path. For `src/compiler/test_ctor_store.tg`
+// that artifact is `src/compiler/test_ctor_store.tungsten_test.tg`, which
+// **matches `make tg-test`'s glob `src/compiler/test_*.tg`** — one leftover file
+// silently becomes an extra gate input carrying a duplicate of the whole
+// compiler plus a `pub fn main`, and an extra gate input that *passes* looks
+// exactly like a healthy gate.
+//
+// The glob matches on the *leading* `test_`, which the artifact inherits from
+// the user's filename, so no change of suffix can defuse it. Only a prefix on
+// the **basename** can — and the path the caller has is a path, not a name,
+// so the dirname/basename split has to happen first: `"_tgtest_" ++ base` would
+// yield `_tgtest_src/compiler/…`, a directory that does not exist, surfacing
+// only as `error: could not write harness file`.
+//
+// Deleting the artifact after a run is NOT here: it needs a `tg_remove_file`
+// FFI that does not exist, and pairing the two would make this standalone
+// safety fix wait on ADR 7.8.26b's descope gate.
+
+use driver::ffi::{parent_directory, path_basename};
+use driver::util::{Option, Some, None};
+use driver::modules::build::strip_tg_extension;
+
+/// The prefix that defuses the glob. A leading underscore cannot match
+/// `test_*`, whatever the user named their file.
+pub fn harness_artifact_prefix() -> String {
+    "_tgtest_"
+}
+
+/// Path of the harness BINARY for a test file; the source adds `.tg`.
+///
+/// The FFI edge: resolves the directory and the name, then hands both to the
+/// pure `harness_artifact_path_from_parts` below. Nothing is decided here.
+pub fn harness_artifact_path(file: String) -> String {
+    let base = strip_tg_extension(file);
+    harness_artifact_path_from_parts(parent_directory(base), path_basename(base))
+}
+
+/// Pure. Place the prefix on `name`, then re-attach `dir` if there was one.
+///
+/// `None` is a real case, not a defensive arm: a file passed as a bare
+/// filename (`tungsten1 test foo.tg`) has no directory component, and joining
+/// against a nonexistent parent is exactly the failure this split exists to
+/// avoid.
+///
+/// Tested at cost 5 over literal strings — `++` is a native term, so no extern
+/// is reachable and the Stuck class (ADR 7.8.26a D2) cannot arise.
+pub fn harness_artifact_path_from_parts(dir: Option<String>, name: String) -> String {
+    match dir {
+        None() => harness_artifact_prefix() ++ name,
+        Some(d) => d ++ "/" ++ harness_artifact_prefix() ++ name
+    }
+}

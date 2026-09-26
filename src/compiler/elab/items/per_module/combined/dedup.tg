@@ -1,7 +1,7 @@
-// Phase A.5 deduplication helpers for type and constructor exports.
+// Signature Collection deduplication helpers for type and constructor exports.
 //
 // Removes duplicate type definitions and constructors that can appear
-// when Phase A stubs coexist with real definitions from Phase A.5
+// when Stub Registration stubs coexist with real definitions from Signature Collection
 // collection. Prefers non-stub entries over stubs.
 //
 // See ADR 6.5.26e §2.2, ADR 20.5.26e §2.3.
@@ -15,7 +15,7 @@ use elab::env::defs::{TypeDefInfo, ConstructorInfo, type_def_is_stub};
 // ===========================================================================
 
 /// Remove duplicate constructors, keeping the first occurrence per
-/// (name, parent_type). Phase A stubs are appended after real constructors,
+/// (name, parent_type). Stub Registration stubs are appended after real constructors,
 /// so the first match is always the fully elaborated version.
 pub fn dedup_constructors(ctors: List<ConstructorInfo>) -> List<ConstructorInfo> {
     dedup_constructors_acc(ctors, Nil)

@@ -1,8 +1,11 @@
 //! Nullary constructor elaboration.
 //!
-//! Handles constructors with no arguments like `Nil` or `None`.
+//! Handles constructors with no arguments like `Nil` or `None`. A
+//! constructor whose parent type failed elaborates to a hole at
+//! `Type::Error` (ADR 15.8.26d D2), exactly as the argument-taking forms do.
 
 use crate::elaborate::env;
+use crate::elaborate::exprs::constructors::context::ConstructorParent;
 use crate::elaborate::{ElabResult, Elaborator};
 use crate::span::Span;
 use tungsten_core::{Term, Type};
@@ -18,8 +21,10 @@ impl<'a> Elaborator<'a> {
         // Validate nullary
         self.validate_ctor_arity(name, info.arity, 0, span)?;
 
-        // Get type context
-        let ctx = self.get_constructor_context(info, span)?;
+        // Get type context; a poisoned parent is transit (ADR 15.8.26d D2)
+        let ConstructorParent::Adt(ctx) = self.get_constructor_context(info, span)? else {
+            return Ok((Term::Sorry, Type::Error));
+        };
 
         // Get the full ADT type (encoded as sum or μ-type)
         let adt_type = self.encode_adt_type(&info.type_name, &[])?;
@@ -48,8 +53,10 @@ impl<'a> Elaborator<'a> {
         // Validate nullary
         self.validate_ctor_arity(name, info.arity, 0, span)?;
 
-        // Get type context
-        let ctx = self.get_constructor_context(info, span)?;
+        // Get type context; a poisoned parent is transit (ADR 15.8.26d D2)
+        let ConstructorParent::Adt(ctx) = self.get_constructor_context(info, span)? else {
+            return Ok(Term::Sorry);
+        };
 
         // Use expected type directly as the ADT type
         let term = self.build_constructor_term(

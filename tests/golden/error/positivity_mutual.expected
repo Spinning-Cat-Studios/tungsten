@@ -1,0 +1,18 @@
+warning: Signature Collection global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0061]: `A` is not strictly positive: `B` reaches a forbidden position in constructor `MkA`, field 0 (at 131..153)
+  note: strict positivity is required for structural recursion to be well-founded
+  help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+  hint: run `tungsten doctor check module signature-collection <file>` for details
+[E0061] Error: `A` is not strictly positive: `B` reaches a forbidden position in constructor `MkA`, field 0
+   ╭─[tests/golden/error/positivity_mutual.tg:3:1]
+   │
+ 3 │ type A = MkA(B -> Nat)
+   │ ───────────┬──────────  
+   │            ╰──────────── 
+   │ 
+   │ Help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+   │ 
+   │ Note: strict positivity is required for structural recursion to be well-founded
+───╯
+
+error: aborting due to 1 error

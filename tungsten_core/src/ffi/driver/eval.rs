@@ -87,7 +87,8 @@ pub unsafe extern "C" fn tg_eval_env_add(
     };
 
     // Get the term from the arena
-    let term = with_arena_ref!(|arena| arena.get_term(term_handle).cloned());
+    let term =
+        with_arena_ref!(|arena| crate::ffi::terms::nodes::materialize_term(arena, term_handle));
 
     let term = if let Some(t) = term {
         t
@@ -156,7 +157,8 @@ pub extern "C" fn tg_eval_run_with_limit(
     limit: u64,
 ) -> TermHandle {
     // Get the term from the arena
-    let term = with_arena_ref!(|arena| arena.get_term(term_handle).cloned());
+    let term =
+        with_arena_ref!(|arena| crate::ffi::terms::nodes::materialize_term(arena, term_handle));
 
     let term = if let Some(t) = term {
         t
@@ -182,24 +184,33 @@ pub extern "C" fn tg_eval_run_with_limit(
     // Build EvalEnv and evaluate
     let env = EvalEnv::new(globals);
 
-    let result = if limit == 0 {
+    let evaluated = if limit == 0 {
         eval_with_env(&term, &env)
-    } else if let Some(t) = eval_with_env_and_limit(&term, &env, limit as usize) {
-        t
     } else {
-        set_driver_error(format!("tg_eval_run: evaluation exceeded {limit} steps"));
-        return INVALID_HANDLE;
+        eval_with_env_and_limit(&term, &env, limit as usize)
+    };
+    let result = match evaluated {
+        Ok(t) => t,
+        // StepLimit keeps the historical message; BlackHole names the cycle
+        // (ADR 22.7.26a / D3 — this entry's idiom is the driver error).
+        Err(stopped) => {
+            set_driver_error(format!("tg_eval_run: {stopped}"));
+            return INVALID_HANDLE;
+        }
     };
 
     // Store result in arena and return handle
-    crate::ffi::with_arena!(|arena| arena.alloc_term(result))
+    crate::ffi::with_arena!(|arena| crate::ffi::terms::nodes::import_term(arena, &result))
 }
 
 // ============================================================================
 // Result Display
 // ============================================================================
 
-/// Get a string representation of an evaluated term.
+/// Get a DEBUG-format (`{:?}`) representation of an evaluated term —
+/// developer-facing, shows constructors verbatim (e.g. `Succ(Succ(Zero))`).
+/// For the human-readable value rendering (`2`, `"hi"`, `(a, b)`), use
+/// `tg_eval_display_value`.
 ///
 /// # Arguments
 /// * `term_handle` - Handle to the term to display
@@ -208,7 +219,8 @@ pub extern "C" fn tg_eval_run_with_limit(
 /// * Null-terminated C string (must be freed with `tg_free_string`), or null on error
 #[no_mangle]
 pub extern "C" fn tg_eval_display(term_handle: TermHandle) -> *mut c_char {
-    let term = with_arena_ref!(|arena| arena.get_term(term_handle).cloned());
+    let term =
+        with_arena_ref!(|arena| crate::ffi::terms::nodes::materialize_term(arena, term_handle));
 
     let term = if let Some(t) = term {
         t
@@ -244,7 +256,8 @@ pub extern "C" fn tg_eval_display(term_handle: TermHandle) -> *mut c_char {
 /// * For other values: the debug representation
 #[no_mangle]
 pub extern "C" fn tg_eval_display_value(term_handle: TermHandle) -> *mut c_char {
-    let term = with_arena_ref!(|arena| arena.get_term(term_handle).cloned());
+    let term =
+        with_arena_ref!(|arena| crate::ffi::terms::nodes::materialize_term(arena, term_handle));
 
     let term = if let Some(t) = term {
         t

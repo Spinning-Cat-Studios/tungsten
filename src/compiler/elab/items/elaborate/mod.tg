@@ -25,6 +25,7 @@ use elab::items::result::{
     ElabItemResult, ElabItemOk, ElabItemErr, ElabItemSkip,
     ElabDef
 };
+use elab::items::termination::{termination_note_item};
 use elab::items::elaborate::functions::{elaborate_fn_body};
 use elab::items::elaborate::proofs::{
     elaborate_theorem_body, elaborate_axiom_body, elaborate_extern_body
@@ -61,6 +62,11 @@ fn elaborate_items_step(
     item: Item,
     acc: List<ElabDef>
 ) -> (ElabContext, List<ElabDef>) {
+    // Note the item's `#[partial]` / `#[decreasing(arg)]` and whether it is
+    // proof-relevant, BEFORE elaborating it (ADR 19.8.26d §2.3). Before rather
+    // than after because a note for a definition that never becomes an
+    // `ElabDef` is simply never declared, and so is never read.
+    let _ = termination_note_item(item);
     match elaborate_item_body(ctx, item) {
         ElabItemOk(ctx2, def) =>
             (ctx2, Cons(def, acc)),

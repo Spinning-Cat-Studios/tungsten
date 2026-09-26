@@ -270,17 +270,10 @@ impl<'ctx> CodeGen<'ctx> {
             false,
         );
 
-        // Allocate memory (uses profiling wrapper when --alloc-profile is enabled)
-        let malloc = self.get_malloc();
-
-        let env_ptr = self
-            .builder
-            .build_call(malloc, &[env_size.into()], "env_alloc")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?
-            .try_as_basic_value()
-            .left()
-            .ok_or_else(|| CodeGenError::LlvmError("malloc returned void".to_string()))?
-            .into_pointer_value();
+        // Allocate memory (uses class-tagged profiling wrapper when
+        // --alloc-profile is enabled)
+        let env_ptr =
+            self.build_malloc_call(env_size, crate::codegen::AllocClass::Env, "env_alloc")?;
 
         // Store captured variables
         self.store_captured_variables(env_ptr, capture_info)?;

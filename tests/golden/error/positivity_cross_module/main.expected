@@ -1,0 +1,30 @@
+warning: Signature Collection global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0061]: `Bad` is not strictly positive: `Bad` reaches a forbidden position in constructor `Mk`, field 0 (at 56..85)
+  note: strict positivity is required for structural recursion to be well-founded
+  help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+  hint: run `tungsten doctor check module signature-collection <file>` for details
+[E0061] Error: `Bad` is not strictly positive: `Bad` reaches a forbidden position in constructor `Mk`, field 0
+   ╭─[tests/golden/error/positivity_cross_module/types.tg:2:1]
+   │
+ 2 │ pub type Bad = Mk(Bad -> Bad)
+   │ ──────────────┬──────────────  
+   │               ╰──────────────── 
+   │ 
+   │ Help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+   │ 
+   │ Note: strict positivity is required for structural recursion to be well-founded
+───╯
+[E0061] Error: `Bad` is not strictly positive: `Bad` reaches a forbidden position in constructor `Mk`, field 0
+   ╭─[tests/golden/error/positivity_cross_module/main.tg:1:56]
+   │
+ 1 │ ╭─▶ // ADR 7.8.26e §2.3: a non-strictly-positive type reaching `env` by IMPORT is
+ 2 │ ├─▶ // rejected by the node-E check like any other, with no separate import arm --
+   │ │                                                                                    
+   │ ╰──────────────────────────────────────────────────────────────────────────────────── 
+   │     
+   │     Help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+   │     
+   │     Note: strict positivity is required for structural recursion to be well-founded
+───╯
+
+error: aborting due to 2 errors

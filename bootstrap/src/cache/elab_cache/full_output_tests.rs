@@ -26,6 +26,8 @@ fn sample_full_output() -> CachedModuleFullOutput {
         mutual_recursion_groups: std::collections::HashMap::new(),
         delta_exports: ModuleExports::default(),
         warnings: Vec::new(),
+        termination_meta: std::collections::HashMap::new(),
+        value_import_targets: crate::elaborate::ValueImportTargets::new(),
     }
 }
 
@@ -91,6 +93,9 @@ fn full_output_into_elab_output_preserves_defs() {
     assert!(output.record_types.is_empty());
 }
 
+// Value-import-target cache tests (ADR 12.7.26a D7) live in
+// `import_targets_tests.rs` (file-size convention).
+
 // --- Corrupt entry fallback tests ---
 
 #[test]
@@ -152,6 +157,7 @@ fn full_output_does_not_interfere_with_signature_cache() {
         delta_exports: ModuleExports::default(),
         warnings: Vec::new(),
         def_count: 3,
+        termination: Default::default(),
     };
     cache.put_module_elab(&sig_key, &sig).unwrap();
 
@@ -180,6 +186,7 @@ fn full_output_not_written_when_only_signature_written() {
         delta_exports: ModuleExports::default(),
         warnings: Vec::new(),
         def_count: 5,
+        termination: Default::default(),
     };
     cache.put_module_elab(&sig_key, &sig).unwrap();
 
@@ -208,15 +215,7 @@ fn full_output_from_output_captures_warnings() {
     use crate::ElabErrorKind;
     let mut output = ElabOutput {
         defs: vec![dummy_core_def("h")],
-        warnings: Vec::new(),
-        record_types: std::collections::HashMap::new(),
-        adt_types: std::collections::HashMap::new(),
-        type_aliases: std::collections::HashMap::new(),
-        type_provenance: TypeProvenance::default(),
-        encoded_types: std::collections::HashMap::new(),
-        mutual_recursion_groups: std::collections::HashMap::new(),
-        type_visibilities: std::collections::HashMap::new(),
-        record_field_visibilities: std::collections::HashMap::new(),
+        ..ElabOutput::default()
     };
     output.warnings.push(crate::elaborate::ElabError {
         message: "unused variable".to_string(),
@@ -275,6 +274,7 @@ fn elab_cache_stats_includes_full_output() {
         delta_exports: ModuleExports::default(),
         warnings: Vec::new(),
         def_count: 0,
+        termination: Default::default(),
     };
     cache.put_module_elab(&[0x01; 32], &sig).unwrap();
 

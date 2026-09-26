@@ -38,12 +38,51 @@ pub struct StoreExport {
 /// - `sessions`: UUID → JSON-serialized `Session`
 /// - `relevance`: "pattern\0command" → JSON-serialized `RelevanceEntry`
 pub struct ExperienceStore {
-    env: Env,
+    /// `Some` for the store's whole life; taken only by `Drop`, which closes
+    /// the environment. `heed`'s process-global registry holds a strong
+    /// reference to every environment ever opened, so without an explicit
+    /// `prepare_for_closing` the underlying `mdb_env_close` never runs — and
+    /// on macOS that strands one kernel-persistent SysV semaphore set per
+    /// environment until reboot (ADR 18.8.26d D1/D1a).
+    env: Option<Env>,
     sessions_db: Database<Str, Str>,
     relevance_db: Database<Str, Str>,
 }
 
+impl Drop for ExperienceStore {
+    fn drop(&mut self) {
+        if let Some(env) = self.env.take() {
+            let closing = env.prepare_for_closing();
+            // Bounded rather than `wait()`: waiting is only unbounded if some
+            // other handle to this environment is still alive, and wedging a
+            // teardown on that is worse than letting the handle's own drop
+            // close the environment later (ADR 18.8.26d §5).
+            let closed = closing.wait_timeout(std::time::Duration::from_secs(5));
+            if let Some(warning) = close_warning(closed) {
+                eprintln!("{warning}");
+            }
+        }
+    }
+}
+
+/// The teardown's one decision, pure so its polarity is testable: a warning
+/// when the environment did NOT close within the bounded wait, silence when
+/// it did.
+pub(super) fn close_warning(closed: bool) -> Option<String> {
+    (!closed).then(|| {
+        "warning: sidecar store environment still open after 5s; \
+         another handle holds it and will close it on drop"
+            .to_string()
+    })
+}
+
 impl ExperienceStore {
+    /// The open environment. Infallible outside `Drop`, which is the only
+    /// place the option is taken.
+    fn env(&self) -> &Env {
+        self.env.as_ref().expect("environment taken only in Drop")
+    }
+
     /// Open (or create) the default store based on the current working directory.
     pub fn open_default() -> Result<Self, Box<dyn std::error::Error>> {
         let path = default_store_dir()?;
@@ -68,7 +107,7 @@ impl ExperienceStore {
         wtxn.commit()?;
 
         Ok(Self {
-            env,
+            env: Some(env),
             sessions_db,
             relevance_db,
         })
@@ -88,7 +127,7 @@ impl ExperienceStore {
         };
 
         let value = serde_json::to_string(&session)?;
-        let mut wtxn = self.env.write_txn()?;
+        let mut wtxn = self.env().write_txn()?;
         self.sessions_db.put(&mut wtxn, &session_id, &value)?;
         wtxn.commit()?;
 
@@ -104,7 +143,7 @@ impl ExperienceStore {
         command: &str,
         helped: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut wtxn = self.env.write_txn()?;
+        let mut wtxn = self.env().write_txn()?;
 
         // Update session record
         let existing = self
@@ -112,16 +151,21 @@ impl ExperienceStore {
             .get(&wtxn, session_id)?
             .ok_or_else(|| format!("session not found: {session_id}"))?;
         let mut session: Session = serde_json::from_str(existing)?;
+        // Derive the normalized error-class key + cost tier once, through the
+        // shared helper every write path uses (ADR 23.7.26e D2).
+        let ctx =
+            crate::doctor::suggest_tools::relevance_context(&session.error_description, command);
         session.outcomes.push(CommandOutcome {
             command: command.to_string(),
             helped,
-            cost: 0,
+            cost: ctx.cost,
         });
         let updated = serde_json::to_string(&session)?;
         self.sessions_db.put(&mut wtxn, session_id, &updated)?;
 
-        // Update relevance counts using error_description as the pattern key
-        let rkey = relevance_key(&session.error_description, command);
+        // Update relevance counts under the normalized error *class*, so
+        // learning accumulates across differing verbatim descriptions.
+        let rkey = relevance_key(&ctx.category, command);
         let mut entry = self.get_relevance_entry(&wtxn, &rkey)?;
         entry.shown_count += 1;
         if helped {
@@ -142,7 +186,7 @@ impl ExperienceStore {
         pattern: &str,
         command: &str,
     ) -> Result<Option<RelevanceEntry>, Box<dyn std::error::Error>> {
-        let rtxn = self.env.read_txn()?;
+        let rtxn = self.env().read_txn()?;
         let rkey = relevance_key(pattern, command);
         match self.relevance_db.get(&rtxn, &rkey)? {
             Some(val) => Ok(Some(serde_json::from_str(val)?)),
@@ -155,7 +199,7 @@ impl ExperienceStore {
         &self,
         pattern: &str,
     ) -> Result<HashMap<String, RelevanceEntry>, Box<dyn std::error::Error>> {
-        let rtxn = self.env.read_txn()?;
+        let rtxn = self.env().read_txn()?;
         let prefix = format!("{pattern}\0");
         let mut result = HashMap::new();
 
@@ -173,7 +217,7 @@ impl ExperienceStore {
 
     /// Compute store statistics.
     pub fn stats(&self) -> Result<StoreStats, Box<dyn std::error::Error>> {
-        let rtxn = self.env.read_txn()?;
+        let rtxn = self.env().read_txn()?;
 
         let session_count = self.sessions_db.iter(&rtxn)?.count();
 
@@ -210,7 +254,7 @@ impl ExperienceStore {
 
     /// Clear all data in the store.
     pub fn reset(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut wtxn = self.env.write_txn()?;
+        let mut wtxn = self.env().write_txn()?;
         self.sessions_db.clear(&mut wtxn)?;
         self.relevance_db.clear(&mut wtxn)?;
         wtxn.commit()?;
@@ -219,7 +263,7 @@ impl ExperienceStore {
 
     /// Export all store contents.
     pub fn export_all(&self) -> Result<StoreExport, Box<dyn std::error::Error>> {
-        let rtxn = self.env.read_txn()?;
+        let rtxn = self.env().read_txn()?;
 
         let mut sessions = Vec::new();
         for entry in self.sessions_db.iter(&rtxn)? {
@@ -244,14 +288,21 @@ impl ExperienceStore {
     /// Used by the process layer to batch writes accumulated during a
     /// connection. Also updates relevance counts for each outcome.
     pub fn flush_session(&mut self, session: &Session) -> Result<(), Box<dyn std::error::Error>> {
-        let mut wtxn = self.env.write_txn()?;
+        let mut wtxn = self.env().write_txn()?;
 
         let value = serde_json::to_string(session)?;
         self.sessions_db
             .put(&mut wtxn, &session.session_id, &value)?;
 
         for outcome in &session.outcomes {
-            let rkey = relevance_key(&session.error_description, &outcome.command);
+            // Same normalized error-class key as the CLI + socket paths
+            // (ADR 23.7.26e D2). The outcome already carries its cost (set by
+            // the socket handler through the same helper).
+            let ctx = crate::doctor::suggest_tools::relevance_context(
+                &session.error_description,
+                &outcome.command,
+            );
+            let rkey = relevance_key(&ctx.category, &outcome.command);
             let mut entry = self.get_relevance_entry(&wtxn, &rkey)?;
             entry.shown_count += 1;
             if outcome.helped {

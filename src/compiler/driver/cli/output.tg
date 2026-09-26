@@ -37,14 +37,17 @@ pub fn print_help() -> Unit {
     println("");
     println("CHECK OPTIONS:");
     println("    --dump-core PATTERN   Dump Core IR for matching definitions (comma-separated)");
+    println("    --dump-core-terms PAT Same, machine-readable: one `<name><TAB><term>` line");
     println("    --check-tyvar-escape  Report free TyVar escapes after elaboration");
+    println("    --check-free-vars     Report bodies whose Core term is not closed");
     println("");
     println("COMPILE OPTIONS:");
     println("    -o, --output PATH   Output file path");
     println("    --emit-llvm         Emit LLVM IR instead of executable");
     println("");
     println("TEST OPTIONS:");
-    println("    --filter PATTERN    Only run tests matching PATTERN")
+    println("    --filter PATTERN    Only run tests matching PATTERN");
+    println("    --require-tests     Fail if zero runnable tests are discovered")
 }
 
 /// Print version.

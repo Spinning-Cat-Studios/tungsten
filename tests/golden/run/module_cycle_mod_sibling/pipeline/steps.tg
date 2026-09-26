@@ -1,0 +1,16 @@
+// The sibling half: it names both a TYPE and a FUNCTION that live in the
+// `mod.tg` beside it, closing the cycle in the direction the split creates.
+use pipeline::{Fuel, More, Empty, Step, Go, Stop, run_pipeline};
+
+pub fn classify(f: Fuel) -> Step {
+    match f {
+        More(_) => Go,
+        Empty => Stop
+    }
+}
+
+// The helper -> driver edge, spelled out: this is the call ADR 3.9.26h's
+// restructure existed to avoid.
+pub fn drain_from(f: Fuel) -> Nat {
+    run_pipeline(f)
+}

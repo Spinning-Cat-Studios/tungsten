@@ -1,0 +1,26 @@
+[W0001] Warning: unreachable pattern
+   ╭─[tests/golden/check/multibyte_before_span.tg:7:13]
+   │
+ 6 │         3 => 1,
+   │         ┬  
+   │         ╰── an earlier arm already matches this value
+ 7 │         1 | 3 => 2,
+   │             ┬  
+   │             ╰── 
+   │ 
+   │ Help: remove the duplicate literal
+───╯
+[W0001] Warning: unreachable pattern
+    ╭─[tests/golden/check/multibyte_before_span.tg:13:26]
+    │
+ 13 │     match n { 1 => "é—", 1 => "x", _ => "y" }
+    │               ┬          ┬  
+    │               ╰───────────── an earlier arm already matches this value
+    │                          │  
+    │                          ╰── 
+    │ 
+    │ Help: remove the duplicate literal
+────╯
+
+warning: 2 warnings emitted
+✓ tests/golden/check/multibyte_before_span.tg: 2 definition(s), all OK

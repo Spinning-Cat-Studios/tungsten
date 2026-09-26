@@ -1,0 +1,239 @@
+// src/compiler/driver/pipeline/check/diagnostic_passes.tg
+// The individual post-elaboration diagnostic passes.
+//
+// **Every one of these reports its DENOMINATOR.** A pass that prints only its
+// findings makes "nothing was wrong" and "nothing was examined" the same
+// output, and this file is where that mattered: ADR 19.8.26d's retrospective
+// could not tell a working `--dump-core` from a stubbed one, because both
+// printed nothing. Whether the build can answer at all is decided next door in
+// `diagnostics.tg`; each pass here states how many definitions it looked at.
+
+use driver::ffi::{
+    eprintln,
+    List, Nil, Cons,
+    diagnostic_dump_core, diagnostic_check_tyvar_escape, diagnostic_free_term_vars,
+    diagnostic_core_term, diagnostic_shape_mismatches
+};
+use driver::util::{
+    Option, Some, None,
+    nat_to_string,
+    string_eq
+};
+use elab::items::{ElabDef};
+
+// ===========================================================================
+// DUMPING CORE
+// ===========================================================================
+
+/// Dump Core IR for definitions matching `pattern` (`*` matches every one).
+///
+/// `plain` selects the machine-readable form: one `<name>\t<term>` line per
+/// definition, which is what `tungsten diff selfhost-core` consumes. The
+/// framed form is for humans and is not parseable — a long term makes its
+/// border ragged, so the two are different products rather than one format
+/// serving both.
+///
+/// The census line is printed even when nothing matched, because "the pattern
+/// named no definition" and "the dump did not run" are different faults and
+/// used to render identically.
+pub fn dump_core_defs(defs: List<ElabDef>, pattern: String, plain: Bool) -> Unit {
+    let dumped = dump_core_acc(defs, pattern, plain, 0, 0);
+    let (examined, matched) = dumped;
+    eprintln("[dump-core] " ++ nat_to_string(matched) ++ " of "
+             ++ nat_to_string(examined) ++ " definition(s) matched `" ++ pattern ++ "`")
+}
+
+// Partial (ADR 19.8.26d): the recursive call rebuilds its argument rather than
+// passing a strict subterm — a measure recursion. Executable compiler code no
+// proof reaches; E0063 guards that.
+#[partial]
+fn dump_core_acc(
+    defs: List<ElabDef>, pattern: String, plain: Bool, examined: Nat, matched: Nat
+) -> (Nat, Nat) {
+    match defs {
+        Nil() => (examined, matched),
+        Cons(def, rest) =>
+            if string_eq(pattern, "*") || string_eq(pattern, def.name) {
+                let _ = dump_one_core_def(def, plain);
+                dump_core_acc(rest, pattern, plain, examined + 1, matched + 1)
+            } else {
+                dump_core_acc(rest, pattern, plain, examined + 1, matched)
+            }
+    }
+}
+
+/// Render one definition, or say why it could not be rendered.
+///
+/// A silent skip here is what made this flag look broken: the renderer returns
+/// nothing on an unreadable handle, and dropping that left a matched
+/// definition producing no output at all.
+fn dump_one_core_def(def: ElabDef, plain: Bool) -> Unit {
+    if plain {
+        eprintln("[core] " ++ def.name ++ "\t" ++ core_term_text(def))
+    } else {
+        match diagnostic_dump_core(def.name, def.term, def.ty) {
+            Some(output) => eprintln(output),
+            None() => eprintln("[dump-core] " ++ def.name
+                               ++ ": could not render (unreadable term or type handle)")
+        }
+    }
+}
+
+/// The definition's Core term as text, or a marker when it cannot be read.
+///
+/// The marker is deliberately not empty: a differ that received a blank line
+/// would compare it against the other compiler's real term and report a
+/// divergence, which is a wrong answer rather than a missing one.
+fn core_term_text(def: ElabDef) -> String {
+    match diagnostic_core_term(def.term) {
+        Some(text) => text,
+        None() => "<unreadable>"
+    }
+}
+
+// ===========================================================================
+// FREE TYPE VARIABLES
+// ===========================================================================
+
+/// Check every definition for TyVar escapes and report, with the denominator.
+pub fn check_tyvar_escapes(defs: List<ElabDef>) -> Unit {
+    let counts = check_tyvar_escapes_acc(defs, 0, 0, 0);
+    let (examined, def_count, escape_count) = counts;
+    eprintln("[tyvar-escape] census: " ++ nat_to_string(examined)
+             ++ " definition(s) examined, " ++ nat_to_string(def_count)
+             ++ " with escapes (" ++ nat_to_string(escape_count)
+             ++ " total occurrence(s))")
+}
+
+fn check_tyvar_escapes_acc(
+    defs: List<ElabDef>, examined: Nat, def_count: Nat, escape_count: Nat
+) -> (Nat, Nat, Nat) {
+    match defs {
+        Nil() => (examined, def_count, escape_count),
+        Cons(def, rest) =>
+            check_tyvar_escape_one(def, rest, examined, def_count, escape_count)
+    }
+}
+
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn check_tyvar_escape_one(
+    def: ElabDef, rest: List<ElabDef>, examined: Nat, def_count: Nat, escape_count: Nat
+) -> (Nat, Nat, Nat) {
+    match diagnostic_check_tyvar_escape(def.term) {
+        Some(escaped_vars) => {
+            eprintln("[tyvar-escape] " ++ def.name ++ ": body contains free TyVar(s): " ++ escaped_vars);
+            check_tyvar_escapes_acc(rest, examined + 1, def_count + 1, escape_count + 1)
+        },
+        None() => check_tyvar_escapes_acc(rest, examined + 1, def_count, escape_count)
+    }
+}
+
+// ===========================================================================
+// FREE VALUE VARIABLES
+// ===========================================================================
+
+/// Report every definition whose elaborated body is NOT closed.
+///
+/// A free value variable in a Core term means the elaborator resolved a name
+/// through its own environment and never emitted the binding — the body
+/// type-checks, because that environment is still in scope when the check
+/// runs, and then nothing downstream can follow the value. ADR 19.8.26d found
+/// exactly that in this compiler's own match lowering, where it had gone
+/// unnoticed because the compiled path rebuilds the bindings from the pattern
+/// and never reads the Core term.
+///
+/// The census line always prints. It is the whole point: a corpus with no free
+/// variables and a check that never ran must not look the same.
+pub fn check_free_term_vars(defs: List<ElabDef>) -> Unit {
+    let counts = check_free_vars_acc(defs, 0, 0);
+    let (examined, open_count) = counts;
+    eprintln("[free-vars] census: " ++ nat_to_string(examined)
+             ++ " definition(s) examined, " ++ nat_to_string(open_count)
+             ++ " with free variable(s)")
+}
+
+// Partial (ADR 19.8.26d): a measure recursion over the definition list; the
+// recursive call rebuilds its arguments rather than descending. Executable
+// compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn check_free_vars_acc(defs: List<ElabDef>, examined: Nat, open_count: Nat) -> (Nat, Nat) {
+    match defs {
+        Nil() => (examined, open_count),
+        Cons(def, rest) => check_free_vars_one(def, rest, examined, open_count)
+    }
+}
+
+/// Report one definition and continue. Split from the walk above rather than
+/// nested inside it: pairing a `match` on the list with a `match` on the
+/// lookup's result is the nesting the code-health gate refuses, and it is the
+/// same split `check_tyvar_escape_one` makes next door.
+fn check_free_vars_one(
+    def: ElabDef, rest: List<ElabDef>, examined: Nat, open_count: Nat
+) -> (Nat, Nat) {
+    match diagnostic_free_term_vars(def.term) {
+        Some(free_vars) => {
+            eprintln("[free-vars] " ++ def.name ++ ": " ++ free_vars);
+            check_free_vars_acc(rest, examined + 1, open_count + 1)
+        },
+        None() => check_free_vars_acc(rest, examined + 1, open_count)
+    }
+}
+
+// ===========================================================================
+// ELIMINATOR SHAPES
+// ===========================================================================
+
+/// Report every definition in which an eliminator stands over an operand whose
+/// recorded type cannot support it.
+///
+/// The sibling of `check_free_term_vars`, and the reason ADR 3.9.26h exists:
+/// closedness answers "is every name bound", and both defects that surfaced
+/// while closing ADR 21.8.26a passed it. A saturated constructor application
+/// elaborated to a curried arrow paired with a UNARY lambda, so the second
+/// argument was applied to the lambda's *result*; a tuple projection emitted
+/// `fst` of a scalar. Both are closed, both type-check — the environment that
+/// resolved them is still in scope — and codegen never reads the Core term at
+/// all, so nothing else in the compiler can see either.
+///
+/// This is shape agreement, not a second type checker: it asks only whether an
+/// eliminator's operand has the right former, and says nothing where the
+/// elaborator recorded no type.
+///
+/// The census line always prints, for the same reason it does next door: a
+/// corpus with no mismatches and a check that never ran must not look alike.
+pub fn check_well_typed_terms(defs: List<ElabDef>) -> Unit {
+    let counts = check_well_typed_acc(defs, 0, 0);
+    let (examined, bad_count) = counts;
+    eprintln("[well-typed] census: " ++ nat_to_string(examined)
+             ++ " definition(s) examined, " ++ nat_to_string(bad_count)
+             ++ " with shape mismatch(es)")
+}
+
+// Partial (ADR 3.9.26h): a measure recursion over the definition list; the
+// recursive call rebuilds its arguments rather than descending. Executable
+// compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn check_well_typed_acc(defs: List<ElabDef>, examined: Nat, bad_count: Nat) -> (Nat, Nat) {
+    match defs {
+        Nil() => (examined, bad_count),
+        Cons(def, rest) => check_well_typed_one(def, rest, examined, bad_count)
+    }
+}
+
+/// Report one definition and continue. Split from the walk above for the same
+/// reason `check_free_vars_one` is: a `match` on the list wrapping a `match` on
+/// the lookup's result is the nesting the code-health gate refuses.
+fn check_well_typed_one(
+    def: ElabDef, rest: List<ElabDef>, examined: Nat, bad_count: Nat
+) -> (Nat, Nat) {
+    match diagnostic_shape_mismatches(def.term) {
+        Some(mismatches) => {
+            eprintln("[well-typed] " ++ def.name ++ ": " ++ mismatches);
+            check_well_typed_acc(rest, examined + 1, bad_count + 1)
+        },
+        None() => check_well_typed_acc(rest, examined + 1, bad_count)
+    }
+}

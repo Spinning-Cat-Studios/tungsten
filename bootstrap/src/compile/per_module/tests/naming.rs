@@ -1,4 +1,5 @@
 use crate::compile::per_module::*;
+use compilation::find_colliding_names;
 use tungsten_core::terms::Term;
 use tungsten_core::types::Type;
 

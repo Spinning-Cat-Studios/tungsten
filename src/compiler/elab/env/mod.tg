@@ -61,11 +61,11 @@
 // 1. Pre-elab stubs (populate_module_info / populate_type_stubs)
 //    - Fidelity: name + arity only, kind = STUB_KIND_UNSET
 //    - When: before collection, from ModuleInfo scan
-//    - Purpose: enable cross-module import resolution (Phase 1b)
+//    - Purpose: enable cross-module import resolution (Import Resolution)
 //
 // 2. Collection stubs (register_type_stub in collect/mod.tg)
 //    - Fidelity: name + arity + params, kind = INVALID_HANDLE
-//    - When: Phase 1a of each module's collection pass
+//    - When: Type-Name Registration of each module's collection pass
 //    - Purpose: forward references within a module
 //    - May overwrite pre-elab stubs (detected by type_def_is_stub)
 //
@@ -82,6 +82,7 @@ pub mod ops;
 pub mod context;
 pub mod resolve;
 pub mod resolve_path;
+pub mod strmap;
 
 // Re-export all public items from submodules
 pub use elab::env::types::*;
@@ -92,6 +93,7 @@ pub use elab::env::ops::*;
 pub use elab::env::context::*;
 pub use elab::env::resolve::*;
 pub use elab::env::resolve_path::*;
+pub use elab::env::strmap::*;
 
 use driver::ffi::{List, Nil, Cons};
 use driver::modules::info::{
@@ -134,7 +136,7 @@ pub fn populate_module_info(env: Env, info: ModuleInfo) -> Env {
 /// Walk the module registry entries and register each module path
 /// in the elaborator's ModuleMap with stub contents from ModuleItemNames.
 /// This populates types, values, and constructors so that import resolution
-/// (Phase 1b) can find items in their owning modules.
+/// (Import Resolution) can find items in their owning modules.
 fn register_modules_from_info(
     map: ModuleMap,
     entries: List<ModuleRegistryEntry>
@@ -153,6 +155,11 @@ fn register_modules_from_info(
 /// Build ModuleContents with stub entries from ModuleItemNames.
 /// Creates TypeDefInfo stubs (name-only) and ValueDefInfo stubs (name-only)
 /// so that lookup_in_module can confirm item existence.
+///
+/// These are LAYER 2 of the Phase-B module-map layering contract: a completed
+/// module's FULL defs (layer 1, spliced by `env_with_prior_map` in
+/// `per_module/inject.tg`) must shadow its stub here, else imports regress with
+/// E0202. See that contract before changing how these slots are populated.
 fn build_module_contents_from_names(
     path: ElabModulePath,
     names: ModuleItemNames

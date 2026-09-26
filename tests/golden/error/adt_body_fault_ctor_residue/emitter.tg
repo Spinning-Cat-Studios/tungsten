@@ -1,0 +1,8 @@
+use events::{Event, Tick, Tock};
+
+pub fn tick() -> Event { Tick(1) }
+pub fn tock() -> Event { Tock(2) }
+
+// ADR 15.8.26d: taking the poisoned value apart is transit too — the
+// pattern's variable binds at the poison and the arms still elaborate.
+pub fn is_tick(event: Event) -> Bool { match event { Tick(_) => true, Tock(_) => false } }

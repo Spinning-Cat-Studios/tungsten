@@ -24,7 +24,7 @@ mod type_building;
 
 use crate::ast::Item;
 
-use super::{CoreDef, ElabResult, Elaborator};
+use super::{CoreDef, DefTerminationMeta, ElabResult, Elaborator};
 
 impl<'a> Elaborator<'a> {
     // ─────────────────────────────────────────────────────────────────────────
@@ -66,6 +66,7 @@ impl<'a> Elaborator<'a> {
     /// Returns Some(CoreDef) for value items, None for type definitions.
     pub(crate) fn elaborate_item(&mut self, item: &Item) -> ElabResult<Option<CoreDef>> {
         self.setup_item_context(item);
+        self.record_termination_meta(item);
 
         match item {
             Item::Function(func) => Ok(Some(self.elaborate_function(func)?)),
@@ -78,6 +79,41 @@ impl<'a> Elaborator<'a> {
             Item::Use(_) => Ok(None), // Use declarations: Phase 4 will process imports
             Item::Error(_) => Ok(None),
         }
+    }
+
+    /// Record an item's termination annotations and proof-relevance
+    /// (ADR 29.6.26e).
+    ///
+    /// Only items with a **non-default** entry are stored: the gate treats an
+    /// absent entry as "executable, unannotated", so recording every function
+    /// would cost a map entry per definition to say nothing. Proof items are
+    /// always recorded, because "is a proof" is not the default.
+    fn record_termination_meta(&mut self, item: &Item) {
+        let (name, meta) = match item {
+            Item::Function(func) if !func.attrs.is_empty() => (
+                func.name.name.clone(),
+                DefTerminationMeta {
+                    attrs: func.attrs.clone(),
+                    is_proof: false,
+                },
+            ),
+            Item::Theorem(def) | Item::Lemma(def) => (
+                def.name.name.clone(),
+                DefTerminationMeta {
+                    attrs: crate::ast::TerminationAttrs::default(),
+                    is_proof: true,
+                },
+            ),
+            Item::Axiom(def) => (
+                def.name.name.clone(),
+                DefTerminationMeta {
+                    attrs: crate::ast::TerminationAttrs::default(),
+                    is_proof: true,
+                },
+            ),
+            _ => return,
+        };
+        self.termination_meta.insert(name, meta);
     }
 
     /// Set up tracing and module context for the current item.

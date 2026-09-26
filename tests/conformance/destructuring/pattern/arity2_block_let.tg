@@ -1,0 +1,10 @@
+// CONTROL for `arity2_expr_let.tg` — the identical destructuring as a block
+// STATEMENT, which becomes a `StmtLet` and takes the other elaborator path.
+// It answered `7` on both compilers in ADR 3.9.26g §1.4 while the subject did
+// not, and that contrast is what located the defect.
+
+pub fn main() -> Nat {
+    let p = (3, 4);
+    let (a, b) = p;
+    a * 10 + b
+}

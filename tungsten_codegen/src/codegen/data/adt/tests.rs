@@ -13,12 +13,8 @@ fn setup_codegen_with_function(context: &Context) -> CodeGen<'_> {
     codegen.builder.position_at_end(entry);
     codegen.compilation.current_fn = Some(function);
 
-    // Declare malloc for fold operations (recursive ADTs)
-    let i64_type = context.i64_type();
-    let ptr_type = context.ptr_type(inkwell::AddressSpace::default());
-    let malloc_type = ptr_type.fn_type(&[i64_type.into()], false);
-    codegen.module.add_function("malloc", malloc_type, None);
-
+    // `malloc` is declared by `CodeGen::new` (ADR 18.9.26c); declaring it
+    // again here would silently create a `malloc.1`.
     codegen
 }
 

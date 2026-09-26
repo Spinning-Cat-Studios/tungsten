@@ -1,0 +1,32 @@
+// `Int` is the signed integer. A literal is a `Nat` unless the context
+// asks for an `Int`, or it follows a minus sign.
+fn balance(deposits: Int, withdrawals: Int) -> Int {
+    deposits - withdrawals
+}
+
+// Integer `match`: literal, negative-literal and or-patterns, guards, and
+// exactly one unguarded catch-all.
+fn sign(x: Int) -> Int {
+    match x {
+        0 => 0,
+        n if n < 0 => -1,
+        _ => 1,
+    }
+}
+
+fn describe(n: Nat) -> String {
+    match n {
+        0 => "none",
+        1 | 2 => "a few",
+        _ => "many",
+    }
+}
+
+fn main() -> Nat {
+    let owed: Int = balance(to_int(3), to_int(5));   // -2
+    let halved: Int = -7 / 2;                         // -3: toward zero
+    let left: Int = -7 % 2;                           // -1: sign of the dividend
+    let n: Nat = 3;
+    let floor: Nat = n - 5;                           // 0: Nat subtraction saturates
+    from_int(sign(owed) + halved + left + to_int(floor) + 10)
+}

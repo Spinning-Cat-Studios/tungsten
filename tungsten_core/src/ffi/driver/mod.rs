@@ -29,10 +29,13 @@
 #![allow(unsafe_code)]
 
 mod console;
+pub mod console_capture;
 mod diagnostics;
 mod eval;
 mod io;
-mod test;
+// `pub(crate)` so the evaluator can execute the test-assertion FFIs directly
+// during `tungsten run`/`test` (ADR 29.6.26f / T13).
+pub(crate) mod test;
 
 #[cfg(test)]
 mod tests;

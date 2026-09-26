@@ -1,0 +1,22 @@
+// There is no built-in `Nat` to `String` conversion: write one. Peeling off
+// digits with `/ 10` is a measure, not a structural descent, so the helper is
+// `#[partial]` — ordinary for executable code.
+fn digit(d: Nat) -> String {
+    match d {
+        0 => "0", 1 => "1", 2 => "2", 3 => "3", 4 => "4",
+        5 => "5", 6 => "6", 7 => "7", 8 => "8", _ => "9",
+    }
+}
+
+#[partial]
+fn digits(n: Nat, acc: String) -> String {
+    if n == 0 { acc } else { digits(n / 10, digit(n % 10) ++ acc) }
+}
+
+fn nat_to_string(n: Nat) -> String {
+    if n == 0 { "0" } else { digits(n, "") }
+}
+
+fn main() -> String {
+    "Expected " ++ nat_to_string(42) ++ " arguments"
+}

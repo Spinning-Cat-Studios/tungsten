@@ -55,16 +55,11 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Map a builtin type name to its Type, if any.
-    fn builtin_type(name: &str) -> Option<Type> {
-        match name {
-            "Nat" => Some(Type::Nat),
-            "Bool" => Some(Type::Bool),
-            "Unit" => Some(Type::Unit),
-            "Void" => Some(Type::Void),
-            "Prop" => Some(Type::Prop),
-            "String" => Some(Type::String),
-            _ => None,
-        }
+    ///
+    /// Builtin lookup precedes user types, which is why `register_type_name`
+    /// refuses a `type` under one of these names (ADR 14.9.26c).
+    pub(in crate::elaborate) fn builtin_type(name: &str) -> Option<Type> {
+        Type::primitive_by_name(name)
     }
 
     /// Resolve a type path to its definition info, checking module visibility.
@@ -165,10 +160,10 @@ impl<'a> Elaborator<'a> {
         match kind {
             TypeDefKind::Alias(ty) => Ok(ty.clone()),
             TypeDefKind::ADT(_) => {
-                // During Phase 1c (collection), defer ADT encoding as TyVar("@Name")
+                // During Type-Body Collection (collection), defer ADT encoding as TyVar("@Name")
                 // so mutual recursion groups can be computed first (ADR 18.4.26i §5).
-                // Phase 1d will resolve these to proper encodings.
-                if self.collection_phase {
+                // Deferred-TyVar Resolution will resolve these to proper encodings.
+                if self.collecting_type_bodies {
                     Ok(Type::TyVar(format!("@{}", type_name)))
                 } else {
                     self.encode_adt_type(type_name, &[])
@@ -207,14 +202,8 @@ impl<'a> Elaborator<'a> {
         span: crate::span::Span,
     ) -> ElabResult<Type> {
         // Check for built-in types first
-        match name {
-            "Nat" => return Ok(Type::Nat),
-            "Bool" => return Ok(Type::Bool),
-            "Unit" => return Ok(Type::Unit),
-            "Void" => return Ok(Type::Void),
-            "Prop" => return Ok(Type::Prop),
-            "String" => return Ok(Type::String), // Phase 2A
-            _ => {}
+        if let Some(ty) = Self::builtin_type(name) {
+            return Ok(ty);
         }
 
         // Check if it's a defined type BEFORE checking type variables.
@@ -227,8 +216,8 @@ impl<'a> Elaborator<'a> {
                 return match &type_def.kind {
                     TypeDefKind::Alias(ty) => Ok(ty.clone()),
                     TypeDefKind::ADT(_) => {
-                        // During Phase 1c, defer ADT encoding (ADR 18.4.26i §5)
-                        if self.collection_phase {
+                        // During Type-Body Collection, defer ADT encoding (ADR 18.4.26i §5)
+                        if self.collecting_type_bodies {
                             Ok(Type::TyVar(format!("@{}", name)))
                         } else {
                             self.encode_adt_type(name, &[])
@@ -280,6 +269,9 @@ impl<'a> Elaborator<'a> {
         span: crate::span::Span,
     ) -> ElabResult<Type> {
         // Get the base type name
+        // Defensive: the grammar only parses `<…>` after a path, so a
+        // non-path base cannot reach elaboration — uncoded by design
+        // (ADR 15.8.26b).
         let TypeExpr::Path(base_path) = base else {
             return Err(ElabError::new(
                 base.span(),
@@ -346,8 +338,8 @@ impl<'a> Elaborator<'a> {
                 Ok(result)
             }
             TypeDefKind::ADT(_) => {
-                // During Phase 1c, defer ADT encoding (ADR 18.4.26i §5)
-                if self.collection_phase {
+                // During Type-Body Collection, defer ADT encoding (ADR 18.4.26i §5)
+                if self.collecting_type_bodies {
                     Ok(Type::app(name.to_string(), arg_types))
                 } else {
                     self.encode_adt_type(name, &arg_types)
@@ -362,7 +354,7 @@ impl<'a> Elaborator<'a> {
             }
             TypeDefKind::Stub => {
                 // Stub type with type arguments - create a deferred application
-                // This will be resolved in Phase 1d after all types are elaborated
+                // This will be resolved in Deferred-TyVar Resolution after all types are elaborated
                 Ok(Type::app(name.to_string(), arg_types))
             }
         }

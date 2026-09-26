@@ -1,0 +1,20 @@
+[E0010] Error: expected `Nat`, found `String`
+   ╭─[tests/golden/error/truncation_keeps_module_width/alpha.tg:1:29]
+   │
+ 1 │ pub fn alpha_one() -> Nat { "a" }
+   │                       ─┬─   ─┬─  
+   │                        ╰───────── expected due to return type
+   │                              │   
+   │                              ╰─── expected `Nat`, found `String`
+───╯
+[E0010] Error: expected `Bool`, found `Nat`
+   ╭─[tests/golden/error/truncation_keeps_module_width/beta.tg:1:29]
+   │
+ 1 │ pub fn beta_one() -> Bool { 7 }
+   │                      ──┬─   ┬  
+   │                        ╰─────── expected due to return type
+   │                             │  
+   │                             ╰── expected `Bool`, found `Nat`
+───╯
+
+error: aborting due to 3 errors (1 not shown; use --max-errors=0 to see all)

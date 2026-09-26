@@ -1,7 +1,13 @@
 //! CLI command handlers for run, eval, repl, clean, and cache operations.
 
 mod cache;
-pub use cache::{cmd_cache_clean_all, cmd_cache_prune, cmd_cache_stats, cmd_clean};
+mod cache_inspect;
+mod cache_outcome;
+mod cache_root;
+mod cache_stats;
+pub use cache::{cmd_cache_clean_all, cmd_cache_prune, cmd_clean};
+pub use cache_inspect::cmd_cache_inspect;
+pub use cache_stats::cmd_cache_stats;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -38,24 +44,18 @@ pub fn cmd_check(file: &PathBuf, opts: &CheckOptions) -> ExitCode {
         dump_types,
     };
     match driver::run_file_with_options(file, &pipeline_opts, no_cache, max_errors) {
-        Ok(PipelineResult::Checked {
-            num_defs,
-            has_sorry,
-        }) => {
+        Ok(PipelineResult::Checked { num_defs, sorry }) => {
             if json {
                 // Empty errors in JSON mode = success
                 let report = tungsten_bootstrap::driver::diagnostics::hints::JsonDiagnosticReport {
                     errors: vec![],
                 };
                 println!("{}", serde_json::to_string_pretty(&report).unwrap());
-            } else if has_sorry {
-                println!(
-                    "⚠ {}: {} definition(s), contains sorry",
-                    file.display(),
-                    num_defs
-                );
             } else {
-                println!("✓ {}: {} definition(s), all OK", file.display(), num_defs);
+                println!(
+                    "{}",
+                    driver::check_verdict_line(&file.display().to_string(), num_defs, &sorry)
+                );
             }
             ExitCode::SUCCESS
         }

@@ -1,8 +1,11 @@
 // Tuple pattern destructuring for let bindings.
 // Desugars `let (a, b) = expr` into fst/snd projection chains.
-
-pub mod project;
-pub use elab::exprs::bind::tuple_let::project::*;
+//
+// The chains themselves are NOT built here (ADR 3.9.26g). `project.tg` used to
+// build a second pair — one Core-term, one CIR — that projected every element
+// including the last as `fst(snd^i)`, disagreeing with `bind_tuple_pattern`
+// three functions below in this same file. Both now come from the one builder
+// under `matches/patterns/`.
 
 use lexer::span::Span;
 use parser::ast::{
@@ -14,9 +17,13 @@ use parser::ast::{
 use driver::ffi::{List, Nil, Cons};
 use elab::ffi::{
     TypeHandle,
+    tg_term_let, tg_term_var_named,
     tg_type_is_product, tg_type_get_product_left, tg_type_get_product_right,
     tg_type_unit,
     tg_string_to_cstr
+};
+use elab::exprs::matches::patterns::{
+    wrap_product_projections, wrap_product_projections_cir
 };
 use elab::env::{Env, env_bind_local};
 use elab::exprs::forms::result::{
@@ -85,11 +92,11 @@ fn synth_let_tuple_body(
         ElabExprOk(env3, body_term, body_ty, body_cir) =>
             let tup_name = "__tup";
             let tup_name_ptr = tg_string_to_cstr(tup_name);
-            let projected_body_term = build_tuple_projection_terms(
-                sub_pats, rhs.ty, tup_name, body_term
+            let projected_body_term = wrap_product_projections(
+                sub_pats, rhs.ty, tg_term_var_named(tup_name_ptr), body_term
             );
             let let_term = tg_term_let(tup_name_ptr, rhs.ty, rhs.term, projected_body_term);
-            let projected_body_cir = build_tuple_projection_cir_let(
+            let projected_body_cir = wrap_product_projections_cir(
                 sub_pats, rhs.ty, CIRVar(tup_name, type_handle_to_codegen_type(rhs.ty)), body_cir
             );
             let let_cir = CIRLet(tup_name, ct_unit(), rhs.cir, projected_body_cir);

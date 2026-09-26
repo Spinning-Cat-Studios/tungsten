@@ -34,9 +34,19 @@ impl Term {
     ///
     /// Uses unary encoding for small numbers (≤ threshold) for proof compatibility,
     /// and `NatLit` for large numbers to avoid stack overflow.
+    ///
+    /// The threshold is 64, not the original 1000 (ADR 21.7.26e wall 2): a
+    /// unary numeral is a `Succ` chain the term's full depth, and every
+    /// derived recursive traversal (`strip_spans`, `clone`, Debug) recurses
+    /// once per level — a debug-build `tungsten test` evaluating a `999`
+    /// sentinel blew its stack guard page thousands of frames into
+    /// `strip_spans`, which macOS wedges into an unkillable `UE` process
+    /// (the bug-report "47-minute hang at ~800 MB"). The evaluator handles
+    /// `NatLit` natively in `NatRec`/`NatInd`, so only small proof-term
+    /// numerals need the unary spelling.
     #[must_use]
     pub fn nat_smart(n: u64) -> Term {
-        const UNARY_THRESHOLD: u64 = 1000;
+        const UNARY_THRESHOLD: u64 = 64;
         if n <= UNARY_THRESHOLD {
             Term::nat(n)
         } else {

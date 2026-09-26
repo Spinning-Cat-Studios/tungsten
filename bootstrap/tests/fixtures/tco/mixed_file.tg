@@ -1,0 +1,34 @@
+// ADR 1.7.26b fixture — a file mixing an EMIT function and a SKIP function.
+//
+// `add_up` is tail-recursive with scalar params and a scalar `Nat` return →
+// musttail EMIT (LOW). `pair_up` returns a by-value tuple `(Nat, Nat)` →
+// struct return SKIP (HIGH, Nat-driven). Exercises table sorting (HIGH before
+// LOW), the totals line, and `--by-site` splitting.
+
+// Partial (ADR 11.8.26b): a measure recursion, out of Phase 1's scope.
+// This fixture exercises musttail classification, not termination.
+#[partial]
+fn add_up(n: Nat, acc: Nat) -> Nat {
+    if n == 0 {
+        acc
+    } else {
+        add_up(n - 1, acc + n)
+    }
+}
+
+// Partial (ADR 11.8.26b): a measure recursion, out of Phase 1's scope.
+// This fixture exercises musttail classification, not termination.
+#[partial]
+fn pair_up(n: Nat, acc: Nat) -> (Nat, Nat) {
+    if n == 0 {
+        (acc, n)
+    } else {
+        pair_up(n - 1, acc + n)
+    }
+}
+
+fn main() -> Nat {
+    let e = add_up(4, 0);
+    let (a, b) = pair_up(4, 0);
+    e + a + b
+}

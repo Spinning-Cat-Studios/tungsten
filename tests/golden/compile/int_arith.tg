@@ -1,0 +1,7 @@
+// Golden test (ADR 14.9.26c): signed arithmetic, compiled natively — the
+// twin of run/int_arith.tg, so `sdiv`/`srem` and the checked intrinsics print
+// the same signed value the evaluator does.
+// (-3 + 5) * (3 - 5) + (-7 / 2) - (-7 % 2) = 2 * -2 + -3 - -1 = -6.
+fn main() -> Int {
+    (-3 + 5) * (3 - 5) + (-7 / 2) - (-7 % 2)
+}

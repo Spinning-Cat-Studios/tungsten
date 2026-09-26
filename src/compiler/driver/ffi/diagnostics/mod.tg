@@ -1,0 +1,93 @@
+// Diagnostic bridge — PRODUCTION build (stubs).
+//
+// This file provides no-op stub implementations of diagnostic tools.
+// All functions return None/Nil — no FFI dependencies, no link-time cost.
+// The real implementations are in the sibling `dev.tg`, swapped over this file
+// by `make devcontainer-self-compile-dev`. See ADR 18.4.26f.
+//
+// **A stub returns None, and so does a clean answer.** That is the hazard this
+// file carries: `--dump-core` on a stubbed binary parses, runs, finds nothing
+// and prints nothing — indistinguishable from a working flag on a corpus with
+// nothing to report. ADR 19.8.26d's retrospective spent two invocations on
+// that before reading the Makefile. The remedy is NOT here — a stub cannot
+// know it is a stub at the call site — but in `diagnostic_capabilities`, which
+// returns `Nil` for exactly this build and non-empty for a dev one. Every
+// caller of a diagnostic MUST consult it and say so; see
+// `driver/pipeline/check/diagnostics.tg`.
+//
+// **Both files define the same names and must stay in step**, because the
+// swap is a whole-file copy: a wrapper added to one and not the other turns a
+// dev build into a compile error, or a production build into a missing name.
+// That is why the escape-count sentinel lives in the unswapped `escape_count`
+// submodule rather than in either half (ADR 5.9.26c).
+
+pub mod escape_count;
+
+use elab::ffi::{TermHandle, TypeHandle};
+use driver::ffi::types::{List, Cons, Nil};
+use driver::ffi::types::{CString, string_to_cstring, tg_free_string};
+
+// --- Stub Implementations (no FFI, no link-time dependency) ---
+
+/// Dump Core IR for a single definition. (stub — always returns None)
+pub fn diagnostic_dump_core(name: String, term: TermHandle, ty: TypeHandle) -> Option<String> {
+    None
+}
+
+/// Check whether a term has free TyVar escapes. (stub — always returns None)
+pub fn diagnostic_check_tyvar_escape(term: TermHandle) -> Option<String> {
+    None
+}
+
+/// Count free TyVar escapes in a term. (stub — always returns None)
+pub fn diagnostic_tyvar_escape_count(term: TermHandle) -> Option<Nat> {
+    None
+}
+
+/// The free VALUE variables of a term. (stub — always returns None)
+pub fn diagnostic_free_term_vars(term: TermHandle) -> Option<String> {
+    None
+}
+
+/// A term rendered on its own, unframed. (stub — always returns None)
+pub fn diagnostic_core_term(term: TermHandle) -> Option<String> {
+    None
+}
+
+/// Eliminators whose operand's recorded type refuses them. (stub — always None)
+pub fn diagnostic_shape_mismatches(term: TermHandle) -> Option<String> {
+    None
+}
+
+// --- Capability Discovery ---
+
+/// Diagnostic capability — one variant per diagnostic tool.
+pub type DiagnosticCapability =
+    | DumpCore
+    | DumpCoreTerms
+    | CheckTyvarEscape
+    | CheckFreeVars
+    | CheckWellTyped
+
+/// Query which diagnostic tools are compiled into this binary.
+/// Production stubs return Nil (no tools compiled).
+pub fn diagnostic_capabilities() -> List<DiagnosticCapability> {
+    Nil
+}
+
+// --- Allocation-profile markers (ADR 2.7.26a) ---
+//
+// Unlike the diagnostic tools above, the marker is NOT stubbed out in
+// production builds: tg_alloc_profile_marker lives in the always-linked
+// tungsten_core and is a no-op unless the binary was compiled with
+// --alloc-profile, so there is no extra link-time dependency.
+
+extern "C" fn tg_alloc_profile_marker(name: CString) -> Unit
+
+/// Emit an allocation-profile marker with cumulative totals.
+/// No-op unless this binary was built with --alloc-profile.
+pub fn alloc_profile_marker(name: String) -> Unit {
+    let name_c = string_to_cstring(name);
+    let _ = tg_alloc_profile_marker(name_c);
+    tg_free_string(name_c)
+}

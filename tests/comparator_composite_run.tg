@@ -1,0 +1,65 @@
+// Runtime smoke test for synthesized comparators on flat ADTs and recursive
+// types (ADR 29.6.26f §T11, C4). Run via `tungsten run` (evaluator). `main`
+// returns a bit-packed test vector (Equal = 0, NotEqual = 1); small weights keep
+// the result ≤ 63 (large Nat arithmetic builds Succ-chains in the evaluator).
+//
+// Expected: 154  (binary 10011010)
+//   bit 0 (×1)  : __compare(Red, Red)         = Equal    → 0  (flat ADT)
+//   bit 1 (×2)  : __compare(Red, Green)       = NotEqual → 1  (ADT tag)
+//   bit 2 (×4)  : __compare([1,2], [1,2])      = Equal    → 0  (List/μ)
+//   bit 3 (×8)  : __compare([1,2], [1,3])      = NotEqual → 1  (list element)
+//   bit 4 (×16) : __compare([1,2], [1])        = NotEqual → 1  (list length)
+//   bit 5 (×32) : __compare([], [])            = Equal    → 0  (Nil)
+//   bit 6 (×64) : __compare(line, line)        = Equal    → 0  (nested record)
+//   bit 7 (×128): __compare(line, line2)       = NotEqual → 1  (nested record field)
+
+type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+type PathSeg =
+    | Field(String)
+    | Pos(Nat)
+    | Index(Nat)
+    | Tag
+    | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult =
+    | Equal
+    | NotEqual(CompareDiff)
+
+type Color =
+    | Red
+    | Green
+    | Blue
+
+type Point = { x: Nat, y: Nat }
+type Line = { a: Point, b: Point }
+
+fn tag_of(r: CompareResult) -> Nat {
+    match r {
+        Equal() => 0,
+        NotEqual(_) => 1
+    }
+}
+
+fn main() -> Nat {
+    let xs: List<Nat> = Cons(1, Cons(2, Nil));
+    let ys: List<Nat> = Cons(1, Cons(2, Nil));
+    let zs: List<Nat> = Cons(1, Cons(3, Nil));
+    let short: List<Nat> = Cons(1, Nil);
+    let empty: List<Nat> = Nil;
+    let p: Point = { x: 1, y: 2 };
+    let pdiff: Point = { x: 1, y: 9 };
+    let line: Line = { a: p, b: p };
+    let line2: Line = { a: p, b: pdiff };
+    tag_of(__compare(Red, Red))
+        + tag_of(__compare(Red, Green)) * 2
+        + tag_of(__compare(xs, ys)) * 4
+        + tag_of(__compare(xs, zs)) * 8
+        + tag_of(__compare(xs, short)) * 16
+        + tag_of(__compare(empty, empty)) * 32
+        + tag_of(__compare(line, line)) * 64
+        + tag_of(__compare(line, line2)) * 128
+}

@@ -4,21 +4,29 @@ mod constructors;
 mod def;
 mod def_parsed;
 mod diagnostic;
+mod encode_order;
 mod error_enrichment;
 mod field_type;
 mod fold_check;
+mod mu_members;
 mod record_fields;
+mod spine;
 mod try_desugar;
+mod type_size;
 mod visibility;
 
 pub use constructors::cmd_info_constructors;
-pub use def::cmd_info_def;
+pub use def::{cmd_info_def, DefReports};
 pub use def_parsed::cmd_info_def_parsed;
 pub use diagnostic::{cmd_info_mutual_recursion_groups, cmd_info_type_encoding};
+pub use encode_order::cmd_info_encode_order;
 pub use error_enrichment::cmd_info_error_enrichment;
 pub use field_type::cmd_info_field_type;
+pub use mu_members::cmd_info_mu_members;
 pub use record_fields::cmd_info_record_fields;
+pub use spine::cmd_info_type_spine;
 pub use try_desugar::cmd_info_try_desugar;
+pub use type_size::cmd_info_type_size;
 pub use visibility::cmd_info_type_visibility;
 
 use std::path::PathBuf;
@@ -206,7 +214,7 @@ fn print_adt_properties(
 
 /// Print field type provenance for each constructor (--show-fields).
 ///
-/// Shows stored form (Phase 1c) vs resolved form (after encoding) for each field.
+/// Shows stored form (Type-Body Collection) vs resolved form (after encoding) for each field.
 fn print_adt_field_provenance(
     name: &str,
     constructors: &[Constructor],
@@ -230,7 +238,7 @@ fn print_adt_field_provenance(
 
             // Show resolved form from encoded_types if available
             if is_self_ref {
-                println!("        ↳ bare self-reference (type args discarded during Phase 1c)");
+                println!("        ↳ bare self-reference (type args discarded during Type-Body Collection)");
                 println!("          resolved via substitute_recursive_refs in Phase 2");
                 if let Some(encoded) = encoded_types.get(name) {
                     let display = format_semantic_type(encoded, type_provenance)
@@ -238,7 +246,7 @@ fn print_adt_field_provenance(
                     println!("        resolved: {display}");
                 }
             } else if is_at_ref {
-                println!("        ↳ deferred TyVar (resolved in Phase 1d)");
+                println!("        ↳ deferred TyVar (resolved in Deferred-TyVar Resolution)");
             } else if let Some(display) = format_semantic_type(field_ty, type_provenance) {
                 println!("        resolved: {display}");
             }

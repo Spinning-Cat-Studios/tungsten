@@ -24,9 +24,16 @@ pub struct TypeDef {
     pub visibility: Visibility,
     /// Source span
     pub span: Span,
-    /// The module where this type is canonically defined.
-    /// For stubs created from imports, this points to the original defining module.
-    /// None for types defined in the current compilation unit.
+    /// The module a type was *imported* from, or `None` when it is defined in
+    /// the current compilation unit.
+    ///
+    /// **Convention (ADR 5.5.26c):** `Some(path)` marks an *import stub* whose
+    /// real definition lives in `path`; a type collected from the current
+    /// unit's own source has `defining_module: None`. So `None` means
+    /// "locally defined" and `Some` means "placeholder for an import" — read it
+    /// as import-provenance, not "where it's defined" (which the name suggests).
+    /// [`Self::is_overwritable_by_collection`] relies on this so per-module
+    /// re-collection may replace a local placeholder, but never an import.
     #[serde(skip)]
     pub defining_module: Option<ModulePath>,
     /// Cached encoded type (for non-parameterized types).
@@ -39,6 +46,59 @@ pub struct TypeDef {
     /// `None` per-entry = inherit parent type visibility.
     #[serde(default)]
     pub field_visibilities: Vec<Option<Visibility>>,
+}
+
+impl TypeDef {
+    /// Whether a fresh collection may overwrite this existing definition
+    /// without a duplicate-definition error (ADR 5.5.26c).
+    ///
+    /// An existing entry is overwritable when it is a placeholder or a
+    /// re-collectible local, rather than a finalized *import* — any of:
+    /// - a `Stub` (registered by Type-Name Registration / a workspace sibling's import), or
+    /// - not yet encoded (`encoded_type.is_none()` — a Stub Registration placeholder ADT), or
+    /// - locally defined (`defining_module.is_none()` — see that field's note),
+    ///   which per-module re-collection (Signature Collection → Body Elaboration) must be able to
+    ///   replace with the module's own fully-elaborated definition.
+    ///
+    /// An imported type (`defining_module.is_some()`) is NOT overwritable by
+    /// this clause, so a module cannot redefine a name it merely imports.
+    /// Shared by the collection-pass duplicate checks (`register_type_name`,
+    /// `collect_type_def`, `collect_type_alias`) so the rule lives in one place.
+    pub fn is_overwritable_by_collection(&self) -> bool {
+        matches!(self.kind, TypeDefKind::Stub)
+            || self.encoded_type.is_none()
+            || self.defining_module.is_none()
+    }
+
+    /// Whether this definition is the residue of a failed type body (ADR
+    /// 14.8.26g D3, ADR 15.8.26d): the producer kept the Type-Name
+    /// Registration stub and set its encoding to `Type::Error`, so the fault
+    /// was already reported at the type's own span.
+    ///
+    /// Every consumer that takes the definition apart to *build* or *take
+    /// apart* a value (a record literal, a constructor call, a match) asks
+    /// this first and passes the poison through instead of re-diagnosing
+    /// the same fault at every use site. Deliberately exact — `Some(Error)`,
+    /// not "contains poison" — so a healthy type whose encoding merely
+    /// *mentions* a poisoned one keeps its own field checks.
+    #[must_use]
+    pub fn is_poison(&self) -> bool {
+        matches!(self.encoded_type, Some(Type::Error))
+    }
+
+    /// Whether the global Signature Collection pass exports this definition
+    /// to the per-module walk (ADR 5.5.26c, 15.8.26d).
+    ///
+    /// Types come from Stub Registration, so a plain stub is withheld — it
+    /// would clobber the placeholder that already carries the source-declared
+    /// shape. A POISONED stub is the one exception: it must replace that
+    /// placeholder, otherwise every dependent module keeps building against
+    /// the placeholder's unresolved field types and re-diagnoses the fault
+    /// the producer already reported (V5's 23 `E0010`s).
+    #[must_use]
+    pub fn is_signature_collection_export(&self) -> bool {
+        !matches!(self.kind, TypeDefKind::Stub) || self.is_poison()
+    }
 }
 
 #[cfg(test)]
@@ -68,7 +128,7 @@ pub enum TypeDefKind {
     ADT(Vec<Constructor>),
     /// Record type: `type Point = { x: Nat, y: Nat }`
     Record(Vec<(String, Type)>),
-    /// Placeholder stub (used during Phase 1a before body elaboration)
+    /// Placeholder stub (used during Type-Name Registration before body elaboration)
     Stub,
 }
 

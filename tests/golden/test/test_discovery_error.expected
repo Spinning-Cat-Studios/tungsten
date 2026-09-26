@@ -3,6 +3,6 @@ warning: skipping test_returns_nat: test function must return Unit, found Nat
 
 running 1 test
 
-test test_good ... ok
+test test_good ... skipped (check-only)
 
-result: ok. 1 passed; 0 failed; 0 skipped; finished in 0.00s
+result: ok. 0 passed; 0 failed; 1 skipped; finished in 0.00s

@@ -1,0 +1,19 @@
+// SUBJECT — arity 1, product tail (ADR 4.9.26c; the shape of ADR 4.9.26b).
+//
+// The smallest record where "stop at the field count" and "stop when the
+// residual type is no longer a product" disagree: the only field is also the
+// last, and it is itself an anonymous tuple, so the encoded spine `Nat × Nat`
+// is one longer than the field list. A walk that reads the spine takes one
+// `fst` too many and hands back `3` where the field is `(3, 4)`.
+//
+// The record is built with an ANNOTATED anonymous literal rather than
+// `OneProduct { … }`: the self-host's parser does not accept a named record
+// constructor, and a fixture that fails to parse distinguishes nothing.
+
+type OneProduct = { only: (Nat, Nat) }
+
+pub fn main() -> Nat {
+    let r: OneProduct = { only: (3, 4) };
+    let (a, b) = r.only;
+    a * 10 + b
+}

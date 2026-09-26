@@ -1,4 +1,5 @@
-//! `tungsten doctor check stubs` — detect residual type stubs after elaboration.
+//! `tungsten doctor check type integrity type-stubs` — detect residual type
+//! stubs after elaboration.
 //!
 //! After full elaboration (cost 3), checks whether any registered type names
 //! remain unresolved — i.e., they were registered as stubs but never overwritten
@@ -11,7 +12,7 @@ use std::process::ExitCode;
 
 use crate::driver::{self, build_module_info, parse_module_tree};
 
-/// Entry point for `tungsten doctor check stubs <file>`.
+/// Entry point for `tungsten doctor check type integrity type-stubs <file>`.
 pub fn cmd_check_stubs(file: &PathBuf, verbose: bool, max_errors: usize) -> ExitCode {
     // Phase 1: parse module tree and collect all registered type names
     let mut visited = std::collections::HashSet::new();

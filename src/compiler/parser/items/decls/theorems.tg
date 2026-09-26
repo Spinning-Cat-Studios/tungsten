@@ -72,7 +72,7 @@ fn parse_theorem_body(cur: Cursor, name: Ident, vis: Visibility, start_span: Spa
 }
 
 fn parse_theorem_body_colon(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
-    // Accept both `:` and `->` for the proposition type (L1/L2 parity)
+    // Accept both `:` and `->` for the proposition type (bootstrap/self-host parity)
     match cursor_eat(cur, TokColon()) {
         SomeCursor(cur2) => parse_theorem_body_type(ctx, cur2),
         NoCursor() => match cursor_eat(cur, TokArrow()) {
@@ -157,7 +157,7 @@ fn parse_lemma_body(cur: Cursor, name: Ident, vis: Visibility, start_span: Span)
 }
 
 fn parse_lemma_body_colon(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
-    // Accept both `:` and `->` for the proposition type (L1/L2 parity)
+    // Accept both `:` and `->` for the proposition type (bootstrap/self-host parity)
     match cursor_eat(cur, TokColon()) {
         SomeCursor(cur2) => parse_lemma_body_type(ctx, cur2),
         NoCursor() => match cursor_eat(cur, TokArrow()) {
@@ -244,7 +244,7 @@ fn parse_axiom_body(cur: Cursor, name: Ident, vis: Visibility, start_span: Span)
 }
 
 fn parse_axiom_body_colon(ctx: ProofDeclCtx, cur: Cursor) -> Result<(Item, Cursor), ParseError> {
-    // Accept both `:` and `->` for the proposition type (L1/L2 parity)
+    // Accept both `:` and `->` for the proposition type (bootstrap/self-host parity)
     match cursor_eat(cur, TokColon()) {
         SomeCursor(cur2) => parse_axiom_body_type(ctx, cur2),
         NoCursor() => match cursor_eat(cur, TokArrow()) {

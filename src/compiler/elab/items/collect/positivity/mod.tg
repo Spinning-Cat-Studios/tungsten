@@ -1,0 +1,151 @@
+// src/compiler/elab/items/collect/positivity/mod.tg
+// Registration half of the strict-positivity mirror (ADR 18.8.26b P2).
+//
+// The soundness RULE is not mirrored here. Both compilers call one
+// `check_strict_positivity` in `tungsten_core`; what crosses this seam is the
+// definition environment the rule runs over, marshalled from the per-field
+// TypeHandles `elaborate_adt_body` already holds. They are read at that point
+// rather than from `ConstructorInfo.field_types`, which is the folded product
+// and would have to be re-split against the encoder's nesting convention.
+//
+// ## The protocol, as a grammar
+//
+//   reset ( def_begin add_param* ( ctor_begin add_field* )* set_alias_body? )* check
+//
+// There is deliberately no `def_end`: a definition is closed by the next
+// `def_begin` or by `check`.
+//
+// What this file can get wrong is the ENVIRONMENT, not the verdict — and a
+// lost field is a definition that passes positivity only because its offending
+// occurrence never arrived. Every extern therefore returns Bool and every
+// helper threads that Bool, so a mid-stream failure is neither invisible nor
+// folded away by a later success. Threading it also forces the calls into
+// order, which a discarded result would not.
+
+pub mod report;
+
+pub use elab::items::collect::positivity::report::*;
+
+use parser::ast::{TypeParam, ident_name};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::list_reverse;
+use elab::ffi::{
+    TypeHandle,
+    tg_string_to_cstr,
+    tg_positivity_reset, tg_positivity_def_begin, tg_positivity_add_param,
+    tg_positivity_ctor_begin, tg_positivity_add_field, tg_positivity_set_alias_body,
+    positivity_positional_field,
+    POSITIVITY_KIND_ADT, POSITIVITY_KIND_RECORD, POSITIVITY_KIND_ALIAS
+};
+use elab::adt::AdtVariant;
+use elab::env::RecordFieldInfo;
+
+// ===========================================================================
+// PASS BOUNDARY
+// ===========================================================================
+
+/// Start a fresh definition environment for one collection pass.
+pub fn positivity_begin_pass() -> Unit {
+    tg_positivity_reset()
+}
+
+// ===========================================================================
+// REGISTRATION
+// ===========================================================================
+
+/// Register a sum type: its parameters, then one constructor per variant.
+pub fn positivity_register_adt(
+    type_name: String,
+    type_params: List<TypeParam>,
+    variants: List<AdtVariant>
+) -> Bool {
+    let opened = tg_positivity_def_begin(tg_string_to_cstr(type_name), POSITIVITY_KIND_ADT());
+    let with_params = positivity_add_params(type_params, opened);
+    positivity_add_variants(variants, with_params)
+}
+
+/// Register a record as a single implicit constructor named after the type,
+/// with its fields NAMED — the one rendering difference records need.
+///
+/// `fields` arrives in reverse declaration order (the elaborator conses it),
+/// so it is reversed here rather than at the far end of the seam.
+pub fn positivity_register_record(
+    type_name: String,
+    type_params: List<TypeParam>,
+    fields: List<RecordFieldInfo>
+) -> Bool {
+    let opened = tg_positivity_def_begin(tg_string_to_cstr(type_name), POSITIVITY_KIND_RECORD());
+    let with_params = positivity_add_params(type_params, opened);
+    let ctor_name = tg_string_to_cstr(type_name);
+    let ctor_open = positivity_both_ok(with_params, tg_positivity_ctor_begin(ctor_name));
+    positivity_add_record_fields(list_reverse(fields), ctor_open)
+}
+
+/// Register a type alias.
+///
+/// Aliases are not nodes in the checked graph — they are inlined into the
+/// constructor fields that reference them, so a violation is always attributed
+/// to an ADT or record rather than to an alias with no constructor to point at.
+pub fn positivity_register_alias(
+    type_name: String,
+    type_params: List<TypeParam>,
+    body: TypeHandle
+) -> Bool {
+    let opened = tg_positivity_def_begin(tg_string_to_cstr(type_name), POSITIVITY_KIND_ALIAS());
+    let with_params = positivity_add_params(type_params, opened);
+    positivity_both_ok(with_params, tg_positivity_set_alias_body(body))
+}
+
+/// Whether BOTH protocol calls succeeded — the failure-keeping fold every
+/// registration helper threads.
+///
+/// Named for what the answer means rather than for its place in a sequence: a
+/// caller reads `positivity_both_ok(opened, added)` and knows a `false` from
+/// either side survives, which is the property that makes a mid-stream failure
+/// neither invisible nor folded away by a later success.
+pub fn positivity_both_ok(ok_so_far: Bool, ok_now: Bool) -> Bool {
+    ok_so_far && ok_now
+}
+
+fn positivity_add_params(params: List<TypeParam>, ok: Bool) -> Bool {
+    match params {
+        Nil() => ok,
+        Cons(param, rest) => {
+            let added = tg_positivity_add_param(tg_string_to_cstr(ident_name(param.name)));
+            positivity_add_params(rest, positivity_both_ok(ok, added))
+        }
+    }
+}
+
+fn positivity_add_variants(variants: List<AdtVariant>, ok: Bool) -> Bool {
+    match variants {
+        Nil() => ok,
+        Cons(variant, rest) => {
+            let opened = tg_positivity_ctor_begin(tg_string_to_cstr(variant.name));
+            let filled = positivity_add_positional_fields(
+                variant.fields, positivity_both_ok(ok, opened)
+            );
+            positivity_add_variants(rest, filled)
+        }
+    }
+}
+
+fn positivity_add_positional_fields(fields: List<TypeHandle>, ok: Bool) -> Bool {
+    match fields {
+        Nil() => ok,
+        Cons(field, rest) => {
+            let added = tg_positivity_add_field(positivity_positional_field(), field);
+            positivity_add_positional_fields(rest, positivity_both_ok(ok, added))
+        }
+    }
+}
+
+fn positivity_add_record_fields(fields: List<RecordFieldInfo>, ok: Bool) -> Bool {
+    match fields {
+        Nil() => ok,
+        Cons(field, rest) => {
+            let added = tg_positivity_add_field(tg_string_to_cstr(field.name), field.ty);
+            positivity_add_record_fields(rest, positivity_both_ok(ok, added))
+        }
+    }
+}

@@ -3,5 +3,6 @@
 mod basic;
 mod cycle_detection;
 mod encoding_utils;
+mod ref_walk;
 mod resolve_refs;
 mod resolve_refs_advanced;

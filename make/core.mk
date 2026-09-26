@@ -6,35 +6,44 @@
 
 # Build the compiler
 build:
-	cargo build
+	$(CARGO) build
 
 # Build in release mode
 release:
-	cargo build --release
+	$(CARGO) build --release
 
-# Run all tests
+# Run all tests.
+## The `build -p tungsten_core` line first (ADR 18.9.26b): the spawned
+## `tungsten` links the UNHASHED `target/<profile>/libtungsten_core.a`, which
+## only a direct build of the crate uplifts — `cargo test --all` refreshes the
+## hashed `deps/` archive and leaves the unhashed one stale, so a new `tg_*`
+## symbol fails the diff-exec e2e test at the linker. A no-op when nothing
+## changed; the two invocations do not invalidate each other.
 test:
-	cargo test --all
+	$(CARGO) build -p tungsten_core
+	$(CARGO) test --all
 
 # Run compile module tests (requires codegen feature)
 test-codegen:
-	cargo test -p tungsten_bootstrap --features codegen --bin tungsten
+	$(CARGO) build -p tungsten_core
+	$(CARGO) test -p tungsten_bootstrap --features codegen --bin tungsten
 
 # Run tests with output
 test-verbose:
-	cargo test --all -- --nocapture
+	$(CARGO) build -p tungsten_core
+	$(CARGO) test --all -- --nocapture
 
 # Install the tungsten binary
 install:
-	cargo install --path bootstrap --no-default-features
+	$(CARGO) install --path bootstrap --no-default-features
 
 # Reinstall (force)
 reinstall:
-	cargo install --path bootstrap --no-default-features --force
+	$(CARGO) install --path bootstrap --no-default-features --force
 
 # Clean build artifacts
 clean: clean-artifacts
-	cargo clean
+	$(CARGO) clean
 
 # Remove generated artifacts (LLVM IR, objects, binaries, logs) without touching cargo cache
 clean-artifacts: clean-cache
@@ -60,6 +69,8 @@ clean-cache:
 # Full CI check
 ci: fmt lint test check-examples
 	@echo "✓ All CI checks passed"
+
+HELP_SECTIONS += core
 
 # Help section for core commands
 .PHONY: help-core

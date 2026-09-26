@@ -18,6 +18,7 @@ use elab::cir::types::{
     CIRFold, CIRUnfold,
     CIRNatAdd, CIRNatSub, CIRNatMul, CIRNatDiv, CIRNatMod,
     CIRNatEq, CIRNatLt, CIRNatLe, CIRNatGt, CIRNatGe,
+    CIRIntLit, CIRIntBin, CIRIntNeg, CIRNatToInt, CIRIntToNat,
     CIRBoolAnd, CIRBoolOr, CIRBoolNot,
     CIRStrConcat, CIRStrEq, CIRStrLen,
     CIRIf,
@@ -98,6 +99,12 @@ fn free_vars_raw(expr: CodegenIR, bound: List<String>) -> CIRCaptureList {
         CIRNatLe(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
         CIRNatGt(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
         CIRNatGe(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        // Signed integers (ADR 14.9.26c)
+        CIRIntLit(_) => cir_captures_empty(),
+        CIRIntBin(_, l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
+        CIRIntNeg(inner) => free_vars_raw(inner, bound),
+        CIRNatToInt(inner) => free_vars_raw(inner, bound),
+        CIRIntToNat(inner) => free_vars_raw(inner, bound),
         // Boolean ops
         CIRBoolAnd(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),
         CIRBoolOr(l, r) => union2(free_vars_raw(l, bound), free_vars_raw(r, bound)),

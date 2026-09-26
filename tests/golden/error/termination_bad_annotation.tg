@@ -1,0 +1,9 @@
+// == #[decreasing(b)] names a parameter that does not decrease
+type Lst = Nil | Cons(Nat, Lst)
+
+#[decreasing(b)]
+fn keep(a: Lst, b: Lst) -> Nat {
+    match a { Nil => 0, Cons(x, t) => keep(t, b) }
+}
+
+fn main() -> Nat { 0 }

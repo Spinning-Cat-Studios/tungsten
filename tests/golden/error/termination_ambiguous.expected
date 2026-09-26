@@ -1,0 +1,15 @@
+[E0062] Error: cannot prove termination of `both`
+   ╭─[tests/golden/error/termination_ambiguous.tg:4:1]
+   │
+ 4 │ ╭─▶ fn both(a: Lst, b: Lst) -> Nat {
+   ┆ ┆   
+ 9 │ ├─▶ }
+   │ │       
+   │ ╰─────── 
+   │     
+   │     Help: annotate the intended parameter, e.g. `#[decreasing(a)]`
+   │     
+   │     Note: more than one parameter decreases in every recursive call: `a`, `b`
+───╯
+
+error: aborting due to 1 error

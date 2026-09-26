@@ -69,7 +69,10 @@ fn print_capabilities(caps: List<DiagnosticCapability>) -> Unit {
 fn capability_to_flag(cap: DiagnosticCapability) -> String {
     match cap {
         DumpCore() => "  --dump-core PATTERN      Dump Core IR for matching defs",
-        CheckTyvarEscape() => "  --check-tyvar-escape     Report free TyVar escapes"
+        DumpCoreTerms() => "  --dump-core-terms PAT    Same, one `<name>\\t<term>` line per match",
+        CheckTyvarEscape() => "  --check-tyvar-escape     Report free TyVar escapes",
+        CheckFreeVars() => "  --check-free-vars        Report bodies with free VALUE variables",
+        CheckWellTyped() => "  --check-well-typed       Report eliminators over the wrong former"
     }
 }
 
@@ -119,6 +122,9 @@ fn print_capability_names(caps: List<DiagnosticCapability>) -> Unit {
 fn capability_name(cap: DiagnosticCapability) -> String {
     match cap {
         DumpCore() => "  - dump-core",
-        CheckTyvarEscape() => "  - check-tyvar-escape"
+        DumpCoreTerms() => "  - dump-core-terms",
+        CheckTyvarEscape() => "  - check-tyvar-escape",
+        CheckFreeVars() => "  - check-free-vars",
+        CheckWellTyped() => "  - check-well-typed"
     }
 }

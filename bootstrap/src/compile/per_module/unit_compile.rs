@@ -4,15 +4,14 @@
 //! These functions handle the inner loop of unit-level compilation:
 //! initializing codegen, declaring defs, compiling bodies, and writing output.
 
-use std::collections::HashSet;
 use std::path::Path;
 
-use tungsten_bootstrap::driver::ModuleCodegenUnit;
 use tungsten_codegen::inkwell::context::Context as LlvmContext;
 use tungsten_codegen::CodeGen;
 
 use super::compilation::{compile_unit_defs, declare_unit_defs};
-use super::{codegen_unit_name, UnitCompileCtx};
+use super::unit_selection::UnitWork;
+use super::UnitCompileCtx;
 
 /// Output location and format for a single codegen unit.
 pub(super) struct OutputConfig<'a> {
@@ -35,22 +34,18 @@ pub(super) struct OutputConfig<'a> {
 /// 5. Owner mono defines — emits `define` for owned instances
 pub(super) fn compile_single_unit<'ctx>(
     llvm_context: &'ctx LlvmContext,
-    unit: &ModuleCodegenUnit,
+    work: &UnitWork<'_>,
     ctx: &UnitCompileCtx<'_>,
     output: &OutputConfig<'_>,
-    unit_referenced_globals: &HashSet<String>,
 ) -> Result<(), String> {
-    let unit_name = codegen_unit_name(
-        &unit.source_file,
-        ctx.project.source_root,
-        &unit.defs[0].name,
-    );
+    let unit = work.unit;
+    let unit_name = work.unit_name.as_str();
     #[cfg(feature = "profile")]
     let _span = tracing::info_span!("compile_unit", unit = %unit_name).entered();
-    let mut codegen = init_codegen(llvm_context, &unit_name, ctx);
+    let mut codegen = init_codegen(llvm_context, unit_name, ctx);
 
     let extern_name_map =
-        declare_unit_defs(&mut codegen, unit, &unit_name, ctx, unit_referenced_globals)?;
+        declare_unit_defs(&mut codegen, unit, unit_name, ctx, work.referenced_globals)?;
 
     // WHY: compile_ty_app → extract_poly_body needs term bodies for on-demand
     // monomorphization. Only Forall-typed defs actually need registration, but
@@ -73,7 +68,7 @@ pub(super) fn compile_single_unit<'ctx>(
     // Activate the fallback guard: no ad-hoc mono generation past this point.
     codegen.activate_mono_map();
 
-    compile_unit_defs(&mut codegen, unit, &extern_name_map, &unit_name, ctx)?;
+    compile_unit_defs(&mut codegen, unit, &extern_name_map, unit_name, ctx)?;
 
     // Note: mono defines are emitted exclusively in the __mono depot unit
     // (ADR 9.5.26b §2.3). Per-function units never own mono instances.
@@ -89,10 +84,20 @@ pub(super) fn compile_single_unit<'ctx>(
     }
 
     codegen.finalize_debug_info();
+
+    // ADR 1.7.26b: drain this unit's structured musttail decisions into the
+    // shared sink when diagnostics requested them (no-op for normal compiles).
+    if let Some(sink) = ctx.musttail_sink {
+        let decisions = codegen.take_musttail_decisions();
+        if !decisions.is_empty() {
+            sink.lock().unwrap().extend(decisions);
+        }
+    }
+
     if output.emit_obj {
-        write_obj(&codegen, output.path, &unit_name, ctx.flags.verbose)
+        write_obj(&codegen, output.path, unit_name, ctx.flags.verbose)
     } else {
-        write_ll(&codegen, output.path, &unit_name, ctx.flags.verbose)
+        write_ll(&codegen, output.path, unit_name, ctx.flags.verbose)
     }
 }
 
@@ -112,8 +117,13 @@ pub(super) fn init_codegen<'ctx>(
         codegen.enable_debug_info(&source_path, &source_text);
     }
     apply_diagnostic_flags(&mut codegen, ctx);
-    codegen.register_record_types(ctx.project.record_types.clone());
+    codegen.register_record_types(ctx.project.comparator_types.records().clone());
     codegen.register_adt_types(ctx.project.adt_types.clone());
+    // Install the lazy comparator-synthesis callback so `TyApp(Global("__cmp"), T)`
+    // resolves to a synthesized `compare_T` at codegen time (ADR 29.6.26f P6′ step 2).
+    codegen.set_comparator_synth(tungsten_bootstrap::comparator::codegen_hook::codegen_synth(
+        ctx.project.comparator_types.clone(),
+    ));
     codegen
 }
 
@@ -130,6 +140,9 @@ fn apply_diagnostic_flags(codegen: &mut CodeGen<'_>, ctx: &UnitCompileCtx<'_>) {
     }
     if ctx.flags.diagnostics.tracing.trace_escape {
         codegen.set_trace_escape();
+    }
+    if let Some(ref filter) = ctx.flags.diagnostics.dump_synthesized {
+        codegen.set_dump_synthesized(filter.clone());
     }
     if ctx.flags.named_lambdas {
         codegen.set_named_lambdas(true);

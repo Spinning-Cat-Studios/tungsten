@@ -1,0 +1,34 @@
+// Negative control for test_string_builder.tg (ADR 14.9.26a AC 1).
+//
+// The positive suite compares what a StringBuilder hands out against the `++`
+// fold of the same pieces. A comparison the evaluator cannot execute goes
+// silently Stuck in EITHER polarity, and the runner then reports `ok` while
+// asserting nothing — the trap that made three earlier suites vacuous (ADR
+// 6.8.26b, 20.8.26d, 19.8.26c). So this file asserts something FALSE through
+// the same wrappers, and `check-mustfail-fixtures` (make/quality/tg-tests.mk) requires
+// it to FAIL and to fail for its OWN reason: the runner's failure line must
+// name `test_pushes_equal_concat_fold`, the one test below.
+//
+//   tungsten test src/compiler/mustfail_string_builder.tg --require-tests
+//     -> assertion failed: assert_eq_string … test_pushes_equal_concat_fold
+//        exit != 0
+//
+// Deliberately NOT named `test_*.tg`: `make tg-test` globs that pattern and a
+// file that must fail would fail the gate by design. Deliberately outside
+// `tg-test-tiers.toml`'s `must_declare` glob for the same reason.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_string};
+use driver::ffi::builder::{string_builder_new, push_str, to_string};
+
+/// Pushes "the quick brown fox"; asserts it equals something else. The name
+/// is the failure signature the gate greps for — rename it together with the
+/// `case` arm in make/quality/tg-tests.mk.
+pub fn test_pushes_equal_concat_fold() -> Unit {
+    let built = to_string(push_str(push_str(string_builder_new(), "the quick "), "brown fox"));
+    assert_eq_string(built, "the quick brown fox" ++ " — but not this")
+}

@@ -42,7 +42,7 @@ pub type MaybeResolvedType =
 // ===========================================================================
 
 /// Environment error for path resolution.
-/// The `code` field carries the L2 error code (e.g. "E0101") when available,
+/// The `code` field carries the self-host error code (e.g. "E0101") when available,
 /// or "" when no structured code applies. Propagated to ElabExprError
 /// for `expect_error` matching (ADR 12.5.26c).
 pub type EnvError = {

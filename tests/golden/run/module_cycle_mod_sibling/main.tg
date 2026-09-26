@@ -1,0 +1,15 @@
+// Shape 3 of ADR 4.9.26f: a `mod.tg` <-> sibling cycle inside one directory.
+//
+// This is the shape the file-split convention produces directly: a driver in
+// `pipeline/mod.tg`, its per-case helpers in `pipeline/steps.tg`, and every
+// helper tail-calling back into the driver. ADR 3.9.26h assumed this was
+// illegal and restructured `driver/cli/options.tg` to avoid it.
+
+mod pipeline;
+
+use pipeline::{Fuel, More, Empty};
+use pipeline::steps::drain_from;
+
+fn main() -> Nat {
+    drain_from(More(More(More(Empty))))
+}

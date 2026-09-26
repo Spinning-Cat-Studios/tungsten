@@ -1,0 +1,49 @@
+// src/compiler/codegen/ir_expr/control.tg
+// The driver never reaches this module: `run_compile` delegates codegen to the
+// bootstrap binary, so it is compiled and type-checked but executed only by
+// `test_codegen*.tg` / `test_cir_captures.tg`. See codegen/mod.tg (ADR 3.9.26a).
+// If/else emission and the unimplemented-variant placeholder — split from
+// `ir_expr/mod.tg` when ADR 14.9.26c's `Int` arms took it past the file cap.
+
+use elab::cir::types::{CodegenIR};
+use codegen::ir_builder::{
+    IRState, fresh_name, fresh_label, emit_line
+};
+use codegen::ir_expr::{emit_expr};
+
+/// Emit if/else as a conditional branch with phi node.
+pub fn emit_if(
+    st: IRState, cond: CodegenIR, then_br: CodegenIR, else_br: CodegenIR
+) -> (String, IRState) {
+    let (cond_val, st) = emit_expr(st, cond);
+    let (then_label, st) = fresh_label(st);
+    let (else_label, st) = fresh_label(st);
+    let (merge_label, st) = fresh_label(st);
+
+    let st = emit_line(st, "  br i1 " ++ cond_val ++ ", label %" ++ then_label ++ ", label %" ++ else_label);
+
+    // Then block
+    let st = emit_line(st, then_label ++ ":");
+    let (then_val, st) = emit_expr(st, then_br);
+    let st = emit_line(st, "  br label %" ++ merge_label);
+
+    // Else block
+    let st = emit_line(st, else_label ++ ":");
+    let (else_val, st) = emit_expr(st, else_br);
+    let st = emit_line(st, "  br label %" ++ merge_label);
+
+    // Merge block with phi
+    let st = emit_line(st, merge_label ++ ":");
+    let (result, st) = fresh_name(st);
+    // TODO: phi node needs the correct type; using i64 as default
+    let st = emit_line(st,
+        "  " ++ result ++ " = phi i64 [" ++ then_val ++ ", %" ++ then_label ++ "], [" ++ else_val ++ ", %" ++ else_label ++ "]");
+    (result, st)
+}
+
+/// Placeholder for unimplemented CIR variants.
+/// Emits a comment and returns zeroinitializer.
+pub fn emit_todo(st: IRState, variant: String) -> (String, IRState) {
+    let st = emit_line(st, "  ; TODO: " ++ variant ++ " not yet implemented");
+    ("zeroinitializer", st)
+}

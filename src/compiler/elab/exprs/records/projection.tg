@@ -1,0 +1,119 @@
+// src/compiler/elab/exprs/records/projection.tg
+// Reading one field out of a record's right-nested product (ADR 4.9.26b).
+//
+// A record of `n` fields encodes as `A × (B × (C × …))` (ADR 1.8.26b D1), so
+// field `i` is reached by `i` `snd` steps and then a `fst` — EXCEPT for the last
+// field, which those `snd` steps have already landed on.
+//
+// Until this module the walk asked "is what I have still a product?" in place of
+// "is this the last field?". The two answers coincide until the last field is
+// ITSELF a product, and then the walk takes one `fst` too many and hands back
+// that field's first half. The declared field type came back regardless, so for
+// `(A, B, (C, D))` the term said `C` while the type said `C × D`, and no check
+// in the compiler could see the disagreement: `fst` of a genuine product is
+// closed, and it is well-typed.
+//
+// The field COUNT is the authority here, exactly as it is on the pattern side
+// since ADR 3.9.26g. Both fold the chain `product_field_projection` returns, so
+// a record READ and a record DESTRUCTURE cannot disagree about where a field is.
+
+use lexer::span::Span;
+use driver::ffi::List;
+use elab::ffi::{
+    TypeHandle,
+    tg_type_is_product, tg_type_get_product_right
+};
+use elab::env::Env;
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, elab_expr_error, TermInfo
+};
+use elab::exprs::matches::patterns::projection_path::{
+    ProjectionStep, product_field_projection, product_field_type
+};
+use elab::exprs::matches::patterns::projections::project_term_along_steps;
+use elab::exprs::matches::patterns::projections_cir::project_cir_along_steps;
+
+/// Which field, of how many — the pair that decides a projection chain.
+///
+/// `arity` is the whole of what distinguishes the last field from a mid-field
+/// whose residual type happens to be a product, so the two always travel
+/// together rather than the index arriving alone.
+pub type FieldSlot = { index: Nat, arity: Nat }
+
+/// Project field `slot.index` out of an `slot.arity`-element right-nested
+/// product, giving the result the field's DECLARED type.
+///
+/// The declared type is the authority for the type because it is the named one
+/// (`Inner`, not `Nat × Nat`); the chain is the authority for the term. They now
+/// answer to the same field count, which is what stops them contradicting.
+pub fn project_record_field(
+    env: Env,
+    base: TermInfo,
+    slot: FieldSlot,
+    result_ty: TypeHandle,
+    span: Span
+) -> ElabExprResult {
+    if slot.index >= slot.arity {
+        ElabExprErr(elab_expr_error("index out of bounds for record/tuple", span))
+    } else {
+        fold_field_projection(
+            env, base,
+            product_field_projection(slot.index, slot.arity),
+            result_ty
+        )
+    }
+}
+
+/// Project element `index` of a tuple, whose arity is its type's product spine.
+///
+/// A tuple index has no field list to count, so the spine IS the field count.
+/// That is not a weaker answer than the record side's: `(A, B, C)` and
+/// `(A, (B, C))` encode identically, so `x.1` denotes the same value under
+/// either reading and the spine length is the only reading available. The result
+/// type comes from the same chain that builds the term, so the two cannot drift.
+pub fn project_tuple_index(
+    env: Env,
+    base: TermInfo,
+    index: Nat,
+    span: Span
+) -> ElabExprResult {
+    let arity = product_spine_arity(base.ty);
+    if index >= arity {
+        ElabExprErr(elab_expr_error("index out of bounds for record/tuple", span))
+    } else {
+        let steps = product_field_projection(index, arity);
+        fold_field_projection(env, base, steps, product_field_type(base.ty, steps))
+    }
+}
+
+/// Fold one chain into the term and the CIR at once, so a projection cannot be
+/// built for one IR and not the other.
+fn fold_field_projection(
+    env: Env,
+    base: TermInfo,
+    steps: List<ProjectionStep>,
+    result_ty: TypeHandle
+) -> ElabExprResult {
+    ElabExprOk(
+        env,
+        project_term_along_steps(base.term, steps),
+        result_ty,
+        project_cir_along_steps(base.cir, steps)
+    )
+}
+
+/// How many fields a right-nested product spine holds.
+///
+/// A non-product is a one-element "product": the value IS the field, which is
+/// why an arity-one chain is empty rather than a `fst`.
+// Partial (ADR 4.9.26b): the recursion descends on a TypeHandle, an arena index
+// rather than a structural subterm. Executable compiler code that no proof
+// reaches; E0063 fires if that ever changes.
+#[partial]
+pub fn product_spine_arity(ty: TypeHandle) -> Nat {
+    if tg_type_is_product(ty) {
+        1 + product_spine_arity(tg_type_get_product_right(ty))
+    } else {
+        1
+    }
+}

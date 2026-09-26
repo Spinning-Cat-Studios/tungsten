@@ -11,6 +11,7 @@ use super::per_module::CompiledModule;
 use super::CompileFlags;
 
 mod sanitize;
+mod staticlib_check;
 
 /// Shared linker configuration, extracted from `link_executable`, `link_object_files`,
 /// and `emit_sanitized` to eliminate duplication (ADR 10.5.26a §2.2).
@@ -94,7 +95,10 @@ impl LinkerCommand {
         }
         #[cfg(target_os = "macos")]
         {
-            cmd.args(["-lSystem", "-lc", "-lm"]);
+            // cc (Apple Clang) implicitly links libSystem, which provides libc
+            // and libm. No explicit system libs needed — adding them causes
+            // "ld: warning: ignoring duplicate libraries: '-lSystem'".
+            //
             // Set stack size to 128 MB — elaboration of large programs (e.g., the
             // compiler checking itself) can exceed the default 8 MB.
             // See ADR 20.5.26e (tail-recursive list operations).
@@ -111,6 +115,17 @@ impl LinkerCommand {
     pub(super) fn run_link(&self, mut cmd: Command) -> ExitCode {
         if self.verbose {
             eprintln!("Library directory: {}", self.lib_dir.display());
+        }
+        // A devcontainer build can clobber the shared static library with the
+        // other platform's archive format (ADR 2.7.26b) — diagnose that here
+        // instead of surfacing a cryptic `ld` error. Fail-open on any doubt.
+        // A missing archive is likewise diagnosed by name (guaranteed failure).
+        let static_lib = self.lib_dir.join("libtungsten_core.a");
+        if let Some(diagnosis) = staticlib_check::missing_staticlib_diagnosis(&static_lib)
+            .or_else(|| staticlib_check::foreign_platform_diagnosis(&static_lib))
+        {
+            eprintln!("{diagnosis}");
+            return ExitCode::FAILURE;
         }
         match cmd.status() {
             Ok(s) if s.success() => ExitCode::SUCCESS,

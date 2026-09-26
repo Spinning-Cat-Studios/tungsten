@@ -7,10 +7,14 @@
 use super::TokenKind;
 use std::fmt;
 
-/// Generates `TokenKind::as_str()` and the free function `keyword_from_str()`.
+/// Generates `TokenKind::as_str()`, `keyword_from_str()` and `ALL_KEYWORDS`.
 ///
-/// Keyword entries (`keyword: Variant => "str"`) participate in both
-/// `as_str()` (variant→string) and `keyword_from_str()` (string→variant).
+/// Keyword entries (`keyword: Variant => "str"`) participate in `as_str()`
+/// (variant→string), `keyword_from_str()` (string→variant) **and**
+/// `ALL_KEYWORDS` (the set). Deriving the set here rather than transcribing it
+/// is ADR 13.8.26a's rule applied to a second table: a keyword added below is
+/// automatically reserved, automatically looked up, and automatically listed by
+/// `tungsten explain keywords`, with no third place to forget.
 ///
 /// Display-only entries (`display: Variant => "str"`) participate in
 /// `as_str()` only.
@@ -39,6 +43,15 @@ macro_rules! token_strings {
                 _ => None,
             }
         }
+
+        /// Every reserved word, in declaration order.
+        ///
+        /// The set the lexer actually enforces — not a copy of it. An
+        /// identifier equal to any of these fails to parse, and the parse
+        /// error is reported at the token *after* the offending word, which
+        /// is why `tungsten explain keywords` exists to answer "is this name
+        /// available?" without a compile.
+        pub const ALL_KEYWORDS: &[&str] = &[$($kw_str,)*];
 
         impl fmt::Display for TokenKind {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

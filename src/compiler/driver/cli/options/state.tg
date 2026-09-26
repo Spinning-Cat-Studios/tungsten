@@ -1,0 +1,266 @@
+// src/compiler/driver/cli/options/state.tg
+// The parse state, and one transition per flag.
+//
+// **Every function here consumes its own arguments and returns; none of them
+// recurses.** The loop lives next door in `mod.tg`, and that split is what
+// makes this file a file: the language has no functional record update, so an
+// arm that changes one field still writes out all eleven, and a chain of them
+// in `parse_options` blew the function-size gate the moment ADR 3.9.26h added
+// a fourth diagnostic flag. Splitting it while the helpers still tail-called
+// `parse_options` would have made the two modules mutually recursive.
+//
+// `opt_` and not `with_`, which is what `driver/cli/test.tg` already calls its
+// half: both compilers key values on the BARE name, so a second `with_verbose`
+// anywhere in the tree is E0016 at every call site of whichever one loses the
+// module walk.
+
+use driver::ffi::{List, Nil, Cons};
+use parser::option::{Option, Some, None};
+use driver::util::{parse_nat, option_unwrap_or};
+
+/// Accumulator for parsing global options.
+pub type ParseState = {
+    verbose: Bool,
+    max_errors: Nat,
+    file: Option<String>,
+    output: String,
+    emit_llvm: Bool,
+    dump_core: Option<String>,
+    dump_core_terms: Option<String>,
+    check_tyvar_escape: Bool,
+    check_free_vars: Bool,
+    check_well_typed: Bool,
+    remaining: List<String>
+}
+
+/// Create initial parse state.
+pub fn initial_state(args: List<String>) -> ParseState {
+    {
+        verbose: false,
+        max_errors: 20,
+        file: None,
+        output: "",
+        emit_llvm: false,
+        dump_core: None,
+        dump_core_terms: None,
+        check_tyvar_escape: false,
+        check_free_vars: false,
+        check_well_typed: false,
+        remaining: args
+    }
+}
+
+/// Stop the loop: nothing left to read.
+///
+/// The value-consuming flags below use this when their argument is missing,
+/// and it is load-bearing. Returning the state UNCHANGED would leave the flag
+/// itself at the head of `remaining`, and the driver next door would dispatch
+/// it again forever.
+pub fn opt_exhausted(state: ParseState) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: Nil
+    }
+}
+
+/// -v / --verbose
+pub fn opt_verbose(state: ParseState, rest: List<String>) -> ParseState {
+    {
+        verbose: true,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// --emit-llvm
+pub fn opt_emit_llvm(state: ParseState, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: true,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// --check-free-vars — is every elaborated body closed? (ADR 19.8.26d)
+pub fn opt_check_free_vars(state: ParseState, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: true,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// --check-well-typed — does every eliminator stand over a former that admits
+/// it? (ADR 3.9.26h). The sibling of `--check-free-vars`: a term can fail
+/// either alone, so the two are separate flags and separate censuses.
+pub fn opt_check_well_typed(state: ParseState, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: true,
+        remaining: rest
+    }
+}
+
+/// --check-tyvar-escape
+pub fn opt_check_tyvar_escape(state: ParseState, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: true,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// An unrecognised `-…` argument: dropped, and parsing continues.
+pub fn opt_skipped(state: ParseState, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// A positional argument: the file. A later one wins.
+pub fn opt_file(state: ParseState, arg: String, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: Some(arg),
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// --dump-core PATTERN
+pub fn opt_dump_core(state: ParseState, pattern: String, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: Some(pattern),
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// --dump-core-terms PATTERN
+///
+/// The machine-readable sibling of `--dump-core`: one `<name>\t<term>` line
+/// per match, with no frame, which is what `tungsten diff selfhost-core`
+/// consumes.
+pub fn opt_dump_core_terms(state: ParseState, pattern: String, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: Some(pattern),
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// --max-errors N (a value this parser cannot read falls back to 20)
+pub fn opt_max_errors(state: ParseState, value: String, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: option_unwrap_or(parse_nat(value), 20),
+        file: state.file,
+        output: state.output,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}
+
+/// -o / --output PATH
+pub fn opt_output(state: ParseState, path: String, rest: List<String>) -> ParseState {
+    {
+        verbose: state.verbose,
+        max_errors: state.max_errors,
+        file: state.file,
+        output: path,
+        emit_llvm: state.emit_llvm,
+        dump_core: state.dump_core,
+        dump_core_terms: state.dump_core_terms,
+        check_tyvar_escape: state.check_tyvar_escape,
+        check_free_vars: state.check_free_vars,
+        check_well_typed: state.check_well_typed,
+        remaining: rest
+    }
+}

@@ -5,17 +5,13 @@
 
 use super::CaseBranch;
 use crate::codegen::backend::CodeGenError;
+use crate::codegen::data::mu_types::unwrap_mu_type;
+use crate::codegen::exec::merge::{plan_merge, MergeArm};
 use crate::codegen::CodeGen;
 use inkwell::values::{BasicValue, BasicValueEnum};
 use inkwell::IntPredicate;
 use tungsten_core::terms::Term;
 use tungsten_core::types::Type;
-
-/// Result of compiling a single case branch: the LLVM value and ending basic block.
-struct BranchResult<'ctx> {
-    bb_end: inkwell::basic_block::BasicBlock<'ctx>,
-    result: BasicValueEnum<'ctx>,
-}
 
 impl<'ctx> CodeGen<'ctx> {
     /// Compile case analysis on sum type.
@@ -23,6 +19,11 @@ impl<'ctx> CodeGen<'ctx> {
     /// Sum type layout: { i32 tag, `largest_variant_type` }
     /// - Extract tag (index 0)
     /// - Load payload from data field with appropriate type cast
+    ///
+    /// The branch merge routes through the shared planner (ADR 2.7.26b T2):
+    /// a musttail-terminated branch is excluded from the phi entirely, and
+    /// both reachable branches must agree on the result type (the previous
+    /// size-max pick could silently mask a lowering divergence).
     pub(crate) fn compile_case(
         &mut self,
         scrut: &Term,
@@ -53,42 +54,24 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Compile left branch
         self.compilation.in_tail_position = is_tail;
-        let (left_result, left_bb_end) =
-            self.compile_case_arm(left_bb, data_ptr, &left_ty, left.var, left.body)?;
+        let left_arm = self.compile_case_arm(left_bb, data_ptr, &left_ty, left.var, left.body)?;
 
         // Compile right branch
         self.compilation.in_tail_position = is_tail;
-        let (right_result, right_bb_end) =
+        let right_arm =
             self.compile_case_arm(right_bb, data_ptr, &right_ty, right.var, right.body)?;
 
-        // Use the LARGER type as the merge type to avoid truncation.
-        let left_size = self.type_size_bytes(left_result.get_type());
-        let right_size = self.type_size_bytes(right_result.get_type());
-        let result_type = if right_size > left_size {
-            right_result.get_type()
-        } else {
-            left_result.get_type()
-        };
+        // Plan + build the merge via the shared planner (ADR 2.7.26b T2).
+        let merge_arms = [left_arm, right_arm];
+        let site = format!("sum case in `{}`", self.current_fn_name());
+        let plan = plan_merge(&merge_arms, None, &site, Some(&mut self.types))?;
 
-        // Cast both results to the merge type (no-op for the one that's already correct).
-        self.builder.position_at_end(left_bb_end);
-        let left_result = self.cast_branch_result(left_result, result_type)?;
-        let left_bb_end = self.builder.get_insert_block().unwrap();
+        for arm in &merge_arms {
+            self.terminate_merge_arm(arm, merge_bb)?;
+        }
 
-        self.builder.position_at_end(right_bb_end);
-        let right_result = self.cast_branch_result(right_result, result_type)?;
-        let right_bb_end = self.builder.get_insert_block().unwrap();
-
-        // Add branch terminators and build merge phi
-        let left_br = BranchResult {
-            bb_end: left_bb_end,
-            result: left_result,
-        };
-        let right_br = BranchResult {
-            bb_end: right_bb_end,
-            result: right_result,
-        };
-        self.finalize_case_branches(&left_br, &right_br, merge_bb, result_type)
+        let placeholder_ty = merge_arms[0].value.get_type();
+        self.build_planned_merge(merge_bb, &plan, placeholder_ty, "case_result")
     }
 
     /// Prepare the case scrutinee: compile, infer type, unwrap μ-type if needed.
@@ -108,7 +91,7 @@ impl<'ctx> CodeGen<'ctx> {
 
         // Unwrap ALL μ-type layers if present to get the actual sum type.
         // unwrap_mu_type handles nested Mu binders for mutual recursion.
-        let unwrapped_scrut_ty = self.unwrap_mu_type(&scrut_ty);
+        let unwrapped_scrut_ty = unwrap_mu_type(&scrut_ty);
         let is_mu = matches!(scrut_ty, Type::Mu(_, _));
         let actual_scrut_ty = self
             .types
@@ -217,7 +200,11 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    /// Compile a single case arm: load payload, bind variable, compile body, restore env.
+    /// Compile a single case arm: load payload, bind variable, compile body,
+    /// restore env. Reachability follows the ADT-match convention: a musttail
+    /// self-tail arm ends in the epilogue's fresh dead block (no predecessors)
+    /// and its value is only a typed dummy (ADR 2.7.26b T2). The arm's block
+    /// is NOT terminated here — `terminate_merge_arm` does that after planning.
     fn compile_case_arm(
         &mut self,
         bb: inkwell::basic_block::BasicBlock<'ctx>,
@@ -225,7 +212,7 @@ impl<'ctx> CodeGen<'ctx> {
         payload_ty: &Type,
         var_name: &str,
         body: &Term,
-    ) -> Result<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>), CodeGenError> {
+    ) -> Result<MergeArm<'ctx>, CodeGenError> {
         self.builder.position_at_end(bb);
 
         // Load payload with 4-byte alignment (data is at offset 4 from struct base)
@@ -244,6 +231,9 @@ impl<'ctx> CodeGen<'ctx> {
             .env
             .insert(var_name.to_string(), (payload, payload_ty.clone()));
         let result = self.compile_term(body)?;
+        // Best-effort arm result type for merge-error self-decoding (ADR
+        // 12.7.26c P2) — inferred while the arm binding is still in scope.
+        let source_ty = self.infer_term_type(body).ok();
         if let Some(v) = old_binding {
             self.compilation.env.insert(var_name.to_string(), v);
         } else {
@@ -251,49 +241,12 @@ impl<'ctx> CodeGen<'ctx> {
         }
 
         let end_bb = self.builder.get_insert_block().unwrap();
-        Ok((result, end_bb))
-    }
-
-    /// Cast branch result to expected type if they don't match.
-    fn cast_branch_result(
-        &mut self,
-        result: BasicValueEnum<'ctx>,
-        expected_type: inkwell::types::BasicTypeEnum<'ctx>,
-    ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
-        if result.get_type() == expected_type {
-            Ok(result)
-        } else {
-            self.cast_to_type(result, expected_type)
-        }
-    }
-
-    /// Finalize case branches: add terminators and build merge phi.
-    fn finalize_case_branches(
-        &mut self,
-        left: &BranchResult<'ctx>,
-        right: &BranchResult<'ctx>,
-        merge_bb: inkwell::basic_block::BasicBlock<'ctx>,
-        result_type: inkwell::types::BasicTypeEnum<'ctx>,
-    ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
-        // Add terminator for right branch (we're positioned there after cast)
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-
-        // Add terminator for left branch
-        self.builder.position_at_end(left.bb_end);
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-
-        // Build merge phi
-        self.builder.position_at_end(merge_bb);
-        let phi = self
-            .builder
-            .build_phi(result_type, "case_result")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        phi.add_incoming(&[(&left.result, left.bb_end), (&right.result, right.bb_end)]);
-
-        Ok(phi.as_basic_value())
+        let reachable = end_bb.get_first_use().is_some();
+        Ok(MergeArm {
+            value: result,
+            end_bb,
+            reachable,
+            source_ty,
+        })
     }
 }

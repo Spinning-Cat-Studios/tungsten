@@ -1,0 +1,88 @@
+// Codegen (LLVM) end-to-end test for the structural-comparator intrinsic
+// (ADR 29.6.26f P6′ step 2). This program is **compiled** — it exercises
+// `CodeGen::compile_comparator_intrinsic`: codegen-time resolution of
+// `TyApp(Global("__cmp"), ConcreteT)` to a synthesized, LLVM-emitted `compare_T`.
+//
+// Verify (host-side, LLVM present):
+//   cargo run -p tungsten_bootstrap --features codegen -- \
+//       compile tests/comparator_codegen_run.tg -o /tmp/cmp && /tmp/cmp; echo $?
+//   (or: make devcontainer-compile-run FILE=tests/comparator_codegen_run.tg)
+// Expected exit code: 0 (all checks pass; a comparison/codegen bug → 1).
+//
+// NOTE: `compare(...)` is called directly in the non-generic `main`, and results
+// are handed to the non-generic `expect_*` helpers. This deliberately avoids
+// wrapping `compare` in a *generic* helper (`assert_eq<T>`) — a monomorphized
+// generic body cannot yet call another top-level global on the codegen path
+// (a pre-existing, unrelated limitation, orthogonal to this ADR). The comparator
+// intercept itself fires from `main`, so this still fully covers P6′ step 2.
+
+type List<T> =
+    | Nil
+    | Cons(T, List<T>)
+
+type PathSeg =
+    | Field(String)
+    | Pos(Nat)
+    | Index(Nat)
+    | Tag
+    | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult =
+    | Equal
+    | NotEqual(CompareDiff)
+
+type Option<T> =
+    | None
+    | Some(T)
+
+type Point = { x: Nat, y: Nat }
+type Line = { from: Point, to: Point }
+
+extern "C" fn tg_assert_eq_bool(left: Nat, right: Nat) -> Unit
+extern "C" fn tg_test_check_failure() -> Nat
+
+fn b2n(b: Bool) -> Nat { if b { 1 } else { 0 } }
+fn is_eq(r: CompareResult) -> Bool {
+    match r { Equal() => true, NotEqual(_) => false }
+}
+// Non-generic: take an already-computed CompareResult, so these never wrap the
+// `compare` intrinsic in a generic body.
+fn expect_eq(r: CompareResult) -> Unit { tg_assert_eq_bool(b2n(is_eq(r)), 1) }
+fn expect_ne(r: CompareResult) -> Unit { tg_assert_eq_bool(b2n(is_eq(r)), 0) }
+
+fn main() -> Nat {
+    // Leaves.
+    expect_eq(compare(3, 3));
+    expect_eq(compare(true, true));
+    expect_eq(compare("hello", "hello"));
+    expect_ne(compare(3, 4));
+    expect_ne(compare("a", "b"));
+
+    // Tuples (Product), Option (Sum).
+    expect_eq(compare((1, false), (1, false)));
+    expect_ne(compare((1, false), (1, true)));
+    expect_eq(compare(Some(7), Some(7)));
+    expect_ne(compare(Some(1), Some(2)));
+
+    // Recursive List (μ) — equal, element diff, length diff.
+    let xs: List<Nat> = Cons(1, Cons(2, Nil));
+    expect_eq(compare(xs, Cons(1, Cons(2, Nil))));
+    expect_ne(compare(xs, Cons(1, Cons(9, Nil))));
+    expect_ne(compare(xs, Cons(1, Nil)));
+
+    // Records (Point) + nested records (Line) — record→product delegation.
+    let p: Point = Point { x: 3, y: 4 };
+    expect_eq(compare(p, Point { x: 3, y: 4 }));
+    expect_ne(compare(p, Point { x: 3, y: 5 }));
+    let l: Line = Line { from: Point { x: 0, y: 0 }, to: p };
+    expect_eq(compare(l, Line { from: Point { x: 0, y: 0 }, to: Point { x: 3, y: 4 } }));
+    expect_ne(compare(l, Line { from: Point { x: 0, y: 1 }, to: p }));
+
+    // Nested generic: Option<List<Nat>> — transitive-closure emission.
+    let ol: Option<List<Nat>> = Some(Cons(42, Nil));
+    expect_eq(compare(ol, Some(Cons(42, Nil))));
+    expect_ne(compare(ol, Some(Cons(43, Nil))));
+
+    tg_test_check_failure()
+}

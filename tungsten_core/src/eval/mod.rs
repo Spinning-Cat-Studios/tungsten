@@ -47,9 +47,22 @@ mod helpers;
 mod step;
 
 // Re-export main types and functions
-pub use env::{eval_with_env, eval_with_env_and_limit, EvalEnv};
+pub use env::{
+    eval_with_env, eval_with_env_and_limit, eval_with_env_until, extern_registry, step_with_env,
+    ComparatorFailure, ComparatorFailureKind, ComparatorSynth, EvalEnv, EvalStopped, GlobalLookup,
+    IntTrapKind,
+};
 pub use helpers::{nat_to_term, term_to_nat};
 pub use step::step;
+
+/// The polymorphic structural-comparator intrinsic symbol (ADR 29.6.26f §T11.2a).
+///
+/// `compare(a, b)` lowers to `App(App(TyApp(Global(COMPARE_INTRINSIC), T), …), …)`.
+/// At runtime, `step_tyapp_env` resolves `TyApp(Global(COMPARE_INTRINSIC), T)` for a
+/// concrete `T` by invoking the [`EvalEnv`]'s [`ComparatorSynth`] callback (an
+/// Bootstrap-era seam: synthesis is Rust in `bootstrap`, which `tungsten_core` cannot
+/// depend on). Kept in sync with `bootstrap::comparator::COMPARE_INTRINSIC`.
+pub const COMPARE_INTRINSIC: &str = "__cmp";
 
 use crate::terms::Term;
 

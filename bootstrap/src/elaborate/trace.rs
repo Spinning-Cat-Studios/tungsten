@@ -7,6 +7,77 @@ use tungsten_core::Type;
 
 use super::Elaborator;
 
+/// Seed `trace_encoding` from the `TUNGSTEN_TRACE_ENCODING` env var (ADR
+/// 22.7.26d). This is the "reach every entry path" backstop for encoding
+/// tracing: unlike the `--trace-encoding` CLI flag (compile/check only), the
+/// env var is read in [`Elaborator::new`], so it also fires on the doctor
+/// oracle's per-module re-collection and any other path that builds an
+/// `Elaborator` without threading trace flags.
+///
+/// Semantics mirror the flag: `*` or `all` (case-insensitive) traces every
+/// type (`Some("")`, which [`Elaborator::should_trace_encoding`] treats as
+/// trace-all); any other non-empty value traces that one type; unset or empty
+/// is off. When the var is unset this returns `None`, so behaviour is
+/// byte-identical to before for every non-debugging run.
+pub(super) fn trace_encoding_from_env() -> Option<String> {
+    map_trace_encoding_value(std::env::var("TUNGSTEN_TRACE_ENCODING").ok().as_deref())
+}
+
+/// Pure mapping from a raw `TUNGSTEN_TRACE_ENCODING` value to a trace target.
+/// Split out from the env read so the branch logic is unit-testable without
+/// mutating process-global env state.
+fn map_trace_encoding_value(raw: Option<&str>) -> Option<String> {
+    match raw {
+        None | Some("") => None,
+        Some(value) if value.eq_ignore_ascii_case("*") || value.eq_ignore_ascii_case("all") => {
+            Some(String::new())
+        }
+        Some(value) => Some(value.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod trace_encoding_env_tests {
+    use super::map_trace_encoding_value;
+
+    #[test]
+    fn unset_and_empty_are_off() {
+        assert_eq!(map_trace_encoding_value(None), None);
+        assert_eq!(map_trace_encoding_value(Some("")), None);
+    }
+
+    #[test]
+    fn wildcard_and_all_trace_everything() {
+        // Empty target = "trace all" per `should_trace_encoding`.
+        assert_eq!(map_trace_encoding_value(Some("*")), Some(String::new()));
+        assert_eq!(map_trace_encoding_value(Some("all")), Some(String::new()));
+        assert_eq!(map_trace_encoding_value(Some("ALL")), Some(String::new()));
+    }
+
+    #[test]
+    fn a_name_traces_that_type() {
+        assert_eq!(
+            map_trace_encoding_value(Some("TypeDef")),
+            Some("TypeDef".to_string())
+        );
+    }
+
+    /// Assert the env-reading wrapper actually consults the var and maps it.
+    /// Set → read → remove → read within one test: no other test asserts on
+    /// this var, so the transient global set only adds (harmless) tracing
+    /// noise to any concurrent elaboration, never a failure.
+    #[test]
+    fn from_env_reads_and_maps_the_var() {
+        std::env::set_var("TUNGSTEN_TRACE_ENCODING", "TypeExpr");
+        assert_eq!(
+            super::trace_encoding_from_env(),
+            Some("TypeExpr".to_string())
+        );
+        std::env::remove_var("TUNGSTEN_TRACE_ENCODING");
+        assert_eq!(super::trace_encoding_from_env(), None);
+    }
+}
+
 impl<'a> Elaborator<'a> {
     /// Set the trace target for --trace-types (ADR 13.4.26c §5).
     pub fn set_trace_target(&mut self, target: Option<String>) {
@@ -58,6 +129,13 @@ impl<'a> Elaborator<'a> {
     // ─── Encoding trace (--trace-encoding) ──────────────────────────
 
     /// Set the trace target for --trace-encoding (ADR 18.4.26h §3).
+    ///
+    /// Passing `None` clears any target, INCLUDING one seeded from
+    /// `TUNGSTEN_TRACE_ENCODING` by [`Elaborator::new`]. Callers that only want
+    /// to apply a CLI flag when it is present must guard on `Some` so the env
+    /// default survives (see `apply_trace_options`); the env var is the "reach
+    /// every entry path" backstop (ADR 22.7.26d), including the doctor oracle,
+    /// which threads no CLI flag.
     pub fn set_trace_encoding(&mut self, target: Option<String>) {
         self.trace_encoding = target;
     }

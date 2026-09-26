@@ -1,0 +1,65 @@
+// src/compiler/elab/env/module/path.tg
+// Module paths for the elaborator environment.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_append_string, list_eq_string};
+
+// ===========================================================================
+// MODULE PATH (ELABORATOR VERSION)
+// ===========================================================================
+
+/// A module path (list of path segments) - elaborator internal version.
+/// Note: driver/modules/path.tg has a different ModulePath type for driver use.
+pub type ElabModulePath = | MkElabModulePath(List<String>)
+
+/// Create an empty module path (root).
+pub fn elab_module_path_root() -> ElabModulePath {
+    MkElabModulePath(Nil)
+}
+
+/// Create a module path from segments.
+pub fn elab_module_path_new(segments: List<String>) -> ElabModulePath {
+    MkElabModulePath(segments)
+}
+
+/// Append a segment to a module path.
+/// WARNING: This function is O(n) and should NOT be used in loops or recursion.
+/// For building paths iteratively, use cons-then-reverse pattern:
+///   1. Reverse existing segments
+///   2. Cons new segments to front
+///   3. Reverse result
+pub fn elab_module_path_append(path: ElabModulePath, segment: String) -> ElabModulePath {
+    match path {
+        MkElabModulePath(segments) => MkElabModulePath(list_append_string(segments, segment))
+    }
+}
+
+/// Check if two module paths are equal.
+pub fn elab_module_path_eq(a: ElabModulePath, b: ElabModulePath) -> Bool {
+    match a {
+        MkElabModulePath(segs_a) => match b {
+            MkElabModulePath(segs_b) => list_eq_string(segs_a, segs_b)
+        }
+    }
+}
+
+/// Convert a module path to a string (e.g., "foo::bar::baz").
+pub fn elab_module_path_to_string(path: ElabModulePath) -> String {
+    match path {
+        MkElabModulePath(segments) => join_strings_with_sep(segments, "::")
+    }
+}
+
+/// Join a string list with a separator (local helper).
+fn join_strings_with_sep(list: List<String>, sep: String) -> String {
+    join_strings_with_sep_acc(list, sep, "")
+}
+
+fn join_strings_with_sep_acc(list: List<String>, sep: String, acc: String) -> String {
+    match list {
+        Nil() => acc,
+        Cons(s, rest) =>
+            let new_acc = if acc == "" { s } else { acc ++ sep ++ s };
+            join_strings_with_sep_acc(rest, sep, new_acc)
+    }
+}

@@ -8,11 +8,28 @@
 // 3. **Lockstep Construction:** Built alongside Core terms in elaboration
 // 4. **Proof Terms Kept:** CIRRefl, CIRSorry retained for now (erasure in Phase 3.5)
 //
+// ## What the CIR half is for, and what it is not (ADR 3.9.26a)
+//
+// "Lockstep Construction" above is accurate and easy to over-read. The
+// elaborator does build a CodegenIR beside every Core term — and the driver
+// DISCARDS it. `driver/pipeline/compile.tg`'s `run_compile` type-checks with
+// the self-hosted elaborator for diagnostics only, then `exec_process`es the
+// bootstrap binary, which re-elaborates from source and emits the machine code.
+// Nothing constructed here reaches a produced binary.
+//
+// So the consumers of these constructors are `src/compiler/codegen/` — which
+// no driver path imports either, see its mod.tg — and the `test_cir_captures.tg`
+// suite. `CIRStrLen` below is declared here, matched in `free_vars.tg` and in
+// `codegen/ir_expr.tg`, and CONSTRUCTED NOWHERE. That is what unexercised code
+// looks like, not a defect to chase.
+//
 // ## Constructor Naming Conventions
 //
 // All constructors are prefixed with `CIR`. Domain-specific groups:
 //   Nat:     CIRZero, CIRSucc, CIRNatLit, CIRNatAdd/Sub/Mul/Div/Mod,
 //            CIRNatEq/Lt/Le/Gt/Ge
+//   Int:     CIRIntLit, CIRIntBin (op code + two operands), CIRIntNeg,
+//            CIRNatToInt/CIRIntToNat (ADR 14.9.26c)
 //   Bool:    CIRTrue, CIRFalse (NOT CIRBoolLit), CIRBoolAnd/Or/Not
 //   String:  CIRString, CIRStrConcat/Eq/Len (NOT CIRStringLen)
 //   Sums:    CIRInl, CIRInr, CIRCase (7 fields)
@@ -108,7 +125,18 @@ pub type CodegenIR =
     | CIRNatLe(CodegenIR, CodegenIR)            // Less or equal: a <= b
     | CIRNatGt(CodegenIR, CodegenIR)            // Greater than: a > b
     | CIRNatGe(CodegenIR, CodegenIR)            // Greater or equal: a >= b
-    
+
+    // -------------------------------------------------------------------------
+    // Signed Integers (ADR 14.9.26c) — the op is a code, `IntBinOp::code`:
+    // 0 + 1 - 2 * 3 / 4 % 5 == 6 < 7 <= 8 > 9 >=; kept in one constructor so
+    // every dispatcher gains one arm, as the bootstrap's `IntBin` does.
+    // -------------------------------------------------------------------------
+    | CIRIntLit(Nat)                            // Signed literal, two's-complement bits in a Nat
+    | CIRIntBin(Nat, CodegenIR, CodegenIR)      // Checked/trapping a op b
+    | CIRIntNeg(CodegenIR)                      // Negation (traps on MIN)
+    | CIRNatToInt(CodegenIR)                    // to_int: traps above the signed max
+    | CIRIntToNat(CodegenIR)                    // from_int: clamps negatives to 0
+
     // -------------------------------------------------------------------------
     // Boolean Operations
     // -------------------------------------------------------------------------
@@ -180,6 +208,7 @@ pub type CodegenType =
     // Base Types
     // -------------------------------------------------------------------------
     | CTNat                                     // Natural numbers
+    | CTInt                                     // Signed integers (ADR 14.9.26c); i64 like Nat
     | CTBool                                    // Booleans
     | CTString                                  // Strings
     | CTUnit                                    // Unit type

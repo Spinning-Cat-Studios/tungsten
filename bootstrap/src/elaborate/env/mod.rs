@@ -35,8 +35,11 @@ mod tests;
 pub use definitions::{
     Constructor, ConstructorInfo, LocalBinding, ResolvedValue, TypeDef, TypeDefKind, ValueDef,
 };
-pub use imports::{ImportInfo, ImportRequest};
-pub use modules::{ConstructorStubDetail, ModuleContents, ModulePath, PathResolutionError};
+pub use imports::{ImportInfo, ImportRequest, ImportTarget, ValueImportTargets};
+pub use modules::{
+    canonicalize_module_path, ConstructorStubDetail, ModuleContents, ModulePath,
+    PathResolutionError,
+};
 pub use resolution::CanonicalResolutionError;
 
 /// Environment for name resolution during elaboration.
@@ -66,7 +69,19 @@ pub struct Env {
     /// Module registry: maps module paths to their contents
     pub(crate) modules: HashMap<ModulePath, ModuleContents>,
 
-    /// Item to module mapping: which module each item belongs to
+    /// Item to module mapping: which module each item belongs to.
+    ///
+    /// **Keyed on the BARE name, so it is a collision surface.** Two items of
+    /// the same name in different modules are one entry; the module-tree copy
+    /// wins, and if it is private, E0016 fires at every call site — *in the
+    /// other module's file*, which is what makes the class expensive to
+    /// diagnose (ADR 7.8.26b D1). `resolve.rs` prefers other routes for
+    /// exactly this reason.
+    ///
+    /// The recorded path is where the name is REACHABLE, not where it is
+    /// defined: a glob `pub use` records the re-exporting parent. The
+    /// self-host mirrors both properties
+    /// (`src/compiler/driver/modules/info.tg`, `ItemModuleEntry`).
     item_modules: HashMap<String, ModulePath>,
 
     /// Imported types: local name → import info

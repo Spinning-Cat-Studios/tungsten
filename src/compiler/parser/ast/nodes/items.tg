@@ -10,6 +10,7 @@ use parser::ast::common::{
 };
 use parser::ast::nodes::types::{TypeExpr, MaybeTypeExpr};
 use parser::ast::nodes::exprs::{Expr};
+use parser::ast::nodes::attributes::{Attribute};
 use parser::ast::pattern::{Pattern};
 use parser::option::{Option, Some, None};
 use driver::ffi::{List, Nil, Cons};
@@ -100,6 +101,12 @@ pub type UseTree =
 // ===========================================================================
 
 /// A function definition.
+///
+/// `attrs` carries the `#[…]` annotations that preceded the `fn` (ADR
+/// 12.8.26b P1). Functions are the only item kind that accepts them — the
+/// soundness attributes `#[partial]` / `#[decreasing(arg)]` are both
+/// function-level — so `item_attach_attributes` rejects an annotated item of
+/// any other kind rather than dropping the list.
 pub type FunctionDef = {
     vis: Visibility,
     name: Ident,
@@ -107,6 +114,7 @@ pub type FunctionDef = {
     params: List<Param>,
     return_type: MaybeTypeExpr,
     body: Expr,
+    attrs: List<Attribute>,
     span: Span
 }
 
@@ -220,6 +228,18 @@ pub fn item_visibility(item: Item) -> Visibility {
         ItemMod(m) => m.vis,
         ItemUse(u) => u.vis,
         ItemError(_) => VisPrivate
+    }
+}
+
+/// Get the attributes attached to an item.
+///
+/// Only `ItemFn` can carry attributes; every other kind returns the empty
+/// list, and reaching one with a non-empty list is a parse error raised by
+/// `item_attach_attributes` rather than a silent drop here.
+pub fn item_attributes(item: Item) -> List<Attribute> {
+    match item {
+        ItemFn(f) => f.attrs,
+        _ => Nil
     }
 }
 

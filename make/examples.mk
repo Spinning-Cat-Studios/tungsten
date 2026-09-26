@@ -2,7 +2,7 @@
 #
 # Commands for running examples and verifying golden test output.
 
-.PHONY: run-examples check-examples check-golden update-golden
+.PHONY: run-examples check-examples
 
 # Run all examples
 run-examples:
@@ -12,21 +12,18 @@ run-examples:
 	@echo "=== logic.tg ===" && cargo run -p tungsten_bootstrap -- examples/logic.tg
 	@echo "=== proof.tg ===" && cargo run -p tungsten_bootstrap -- examples/proof.tg
 
-# Check all examples type-check
+# Check every shipped example type-checks. It named five of them until ADR
+# 18.9.26i, and `examples/proofs_natural.tg` — shipped in every release archive
+# and quoted by the website — sat refused by the termination gate unnoticed.
 check-examples:
-	@cargo run -p tungsten_bootstrap -- check examples/hello.tg
-	@cargo run -p tungsten_bootstrap -- check examples/answer.tg
-	@cargo run -p tungsten_bootstrap -- check examples/arithmetic.tg
-	@cargo run -p tungsten_bootstrap -- check examples/logic.tg
-	@cargo run -p tungsten_bootstrap -- check examples/proof.tg
+	@$(CARGO) build -q -p tungsten_bootstrap --no-default-features --bin tungsten
+	@rc=0; for f in examples/*.tg examples/*/mod.tg; do ./target/debug/tungsten check "$$f" >/dev/null 2>&1 && echo "✓ $$f" || { echo "✗ $$f"; rc=1; }; done; exit $$rc
 
-# Run golden tests (compare output with expected)
-check-golden:
-	@./tests/golden/run_golden.sh
-
-# Update golden test expected files from bootstrap output
-update-golden:
-	@./tests/golden/run_golden.sh --update
+# Golden tests live in make/quality/tg-tests.mk as `golden` / `golden-update`, which run
+# the `tools/golden` Rust crate. The `check-golden` / `update-golden` aliases
+# that used to sit here ran a second, shell implementation; two names for one
+# job is the drift that let the shell runner exit 0 on a failing suite for an
+# unknown period (ADR 31.7.26b D1).
 
 # Help section for examples
 .PHONY: help-examples

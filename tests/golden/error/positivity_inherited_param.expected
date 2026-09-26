@@ -1,0 +1,20 @@
+warning: Signature Collection global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0061]: `Bad2` is not strictly positive: `Bad2` reaches a forbidden position in constructor `B`, field 0 through `Fn1`'s parameter `T` (at 325..349)
+  note: `Fn1` does not use its parameter `T` strictly positively
+  note: strict positivity is required for structural recursion to be well-founded
+  help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+  hint: run `tungsten doctor check module signature-collection <file>` for details
+[E0061] Error: `Bad2` is not strictly positive: `Bad2` reaches a forbidden position in constructor `B`, field 0 through `Fn1`'s parameter `T`
+   ╭─[tests/golden/error/positivity_inherited_param.tg:6:1]
+   │
+ 6 │ type Bad2 = B(Fn1<Bad2>)
+   │ ────────────┬───────────  
+   │             ╰───────────── 
+   │ 
+   │ Help: move the occurrence out of the argument position — store the result of the function rather than the function itself
+   │ 
+   │ Note: `Fn1` does not use its parameter `T` strictly positively
+strict positivity is required for structural recursion to be well-founded
+───╯
+
+error: aborting due to 1 error

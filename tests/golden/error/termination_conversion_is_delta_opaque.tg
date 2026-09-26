@@ -1,0 +1,20 @@
+// == conversion never unfolds a global, partial or total (ADR 11.8.26b §1.2)
+#[partial]
+fn spin(n: Nat) -> Nat { if n == 0 { 2 } else { spin(n - 1) } }
+
+fn two() -> Nat { 2 }
+
+// Both rejections below are the invariant, and the SYMMETRY is the point: the
+// `#[partial]` constant is no more opaque to `refl` than the certified one,
+// because `terms_definitionally_equal` normalizes with the environment-free
+// evaluator, where `Term::Global` is Stuck. Consulting `is_delta_reducible` at
+// the delta step would therefore guard a step that never happens — and wiring it
+// into the *execution* evaluator instead would break every `run`/`test` that
+// calls a partial function, which after 11.8.26b is most of the compiler.
+// If either line below ever starts to typecheck, delta-reduction has arrived and
+// the admission check needs to arrive with it.
+fn total_is_opaque() -> two() == 2 { refl }
+
+fn partial_is_opaque() -> spin(1) == 2 { refl }
+
+fn main() -> Nat { 0 }

@@ -1,0 +1,6 @@
+// == at `--termination proofs` an executable rejection is a warning (11.8.26b)
+type Lst = Nil | Cons(Nat, Lst)
+
+fn spin(l: Lst) -> Nat { spin(l) }
+
+fn main() -> Nat { 0 }

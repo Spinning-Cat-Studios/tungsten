@@ -1,0 +1,13 @@
+[E0062] Error: cannot prove termination of `keep`
+   ╭─[tests/golden/error/termination_bad_annotation.tg:6:39]
+   │
+ 6 │     match a { Nil => 0, Cons(x, t) => keep(t, b) }
+   │                                       ─────┬────  
+   │                                            ╰────── 
+   │ 
+   │ Help: rewrite the recursion structurally, or mark the definition `#[partial]` (partial definitions cannot be used in proofs)
+   │ 
+   │ Note: with `b` decreasing, the call to `keep` supplies `b`, which is not a known strict subterm of `b`
+───╯
+
+error: aborting due to 1 error

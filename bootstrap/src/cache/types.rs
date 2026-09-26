@@ -16,7 +16,8 @@ use std::time::Duration;
 pub const CACHE_FORMAT_VERSION: u32 = 2;
 
 /// Current IR schema version - bump when CoreDef/Type/Term format changes.
-pub const IR_SCHEMA_VERSION: u32 = 1;
+/// v2: `Type::Int` + the `Int` `Term` variants (ADR 14.9.26c).
+pub const IR_SCHEMA_VERSION: u32 = 2;
 
 /// Computed hash of AST struct definitions.
 /// Auto-invalidates cache when AST types change (fields added/removed/reordered, type changes).
@@ -34,7 +35,8 @@ pub const AST_SCHEMA_SIGNATURE: &str = concat!(
     "TheoremDef{visibility:Visibility,kind:TheoremKind,name:Ident,type_params:Vec<TypeParam>,params:Vec<Param>,prop:TypeExpr,body:Option<Expr>,span:Span};",
     "AxiomDef{visibility:Visibility,name:Ident,type_params:Vec<TypeParam>,params:Vec<Param>,prop:TypeExpr,span:Span};",
     "ExternFnDef{visibility:Visibility,name:Ident,type_params:Vec<TypeParam>,params:Vec<Param>,return_type:TypeExpr,span:Span};",
-    "v3"  // Bump this suffix when changing schema but not struct layouts
+    // v4: `LiteralPattern::NegInt` appended (ADR 18.9.26e).
+    "v4"  // Bump this suffix when changing schema but not struct layouts
 );
 
 /// Compute hash of the schema signature at compile time.

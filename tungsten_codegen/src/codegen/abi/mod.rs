@@ -13,9 +13,17 @@
 //! future LLVM versions that may relax these constraints.
 
 use super::backend::CodeGenError;
+use super::musttail_report::{Blocker, BlockerPosition, ReasonCode};
 use super::CodeGen;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValue, BasicValueEnum};
+
+mod lowered;
+// R6 single-source-of-truth descriptor + exact musttail check (ADR 1.7.26e).
+// Constructed at `declare_decomposed_entry`, consumed by every internal-entry
+// declaration, call site, and musttail gate; re-exported here as the abi-level
+// public surface.
+pub(crate) use lowered::{LoweredSignature, LoweredSlot, MusttailIncompat, SlotAttrs, SlotRole};
 
 /// Target classification for musttail ABI safety decisions.
 ///
@@ -68,9 +76,14 @@ impl<'ctx> CodeGen<'ctx> {
     /// This helper is ABI-only: tail position, self-recursion, callee identity,
     /// and function-type equality are the caller's responsibility.
     ///
-    /// The guard rejects struct returns/params uniformly — LLVM 18 crashes
-    /// for musttail + struct on all validated targets (`x86_64`, `AArch64`).
-    /// The `target/call_kind` parameters are retained for future LLVM versions.
+    /// Reframed (ADR 1.7.26e P2): delegates to the exact lowered-signature gate
+    /// [`LoweredSignature::musttail_compatible`] over the flat (by-value)
+    /// descriptor of `fn_type` — the guard rejects struct returns/params
+    /// uniformly, since LLVM 18 crashes for musttail + by-value struct on all
+    /// validated targets (`x86_64`, `AArch64`). Entries with an indirect
+    /// lowering carry a stored per-function [`LoweredSignature`] and are gated
+    /// on that instead (see `decompose/recurse.rs`). The `target/call_kind`
+    /// parameters are retained for future LLVM versions.
     pub(crate) fn check_musttail_abi_safety(
         &self,
         fn_type: inkwell::types::FunctionType<'ctx>,
@@ -86,18 +99,74 @@ impl<'ctx> CodeGen<'ctx> {
         let _target = classify_musttail_target(&triple_str);
         _ = call_kind;
 
-        // All targets: LLVM 18 rejects musttail with struct returns/params.
-        if let Some(ret) = fn_type.get_return_type() {
-            if ret.is_struct_type() {
-                return Err("struct return (musttail incompatible in LLVM 18)");
+        let sig = LoweredSignature::from_flat_fn_type(fn_type);
+        match sig.musttail_compatible(&sig) {
+            Ok(()) => Ok(()),
+            Err(MusttailIncompat::ByValueAggregate {
+                at_return: true, ..
+            }) => Err("struct return (musttail incompatible in LLVM 18)"),
+            Err(MusttailIncompat::ByValueAggregate { .. }) => {
+                Err("struct parameter (musttail incompatible in LLVM 18)")
             }
+            Err(MusttailIncompat::VarArgs) => Err("varargs (musttail incompatible)"),
+            Err(_) => Err("lowered-signature mismatch (musttail incompatible)"),
         }
-        for param in fn_type.get_param_types() {
-            if param.is_struct_type() {
-                return Err("struct parameter (musttail incompatible in LLVM 18)");
+    }
+
+    /// Whether a function with this *lowered* return type should return via an
+    /// explicit result-out pointer (`sret`-style) instead of by value (ADR 1.7.26a).
+    ///
+    /// ABI-level predicate, NOT a source-category check: it is true exactly when
+    /// the lowered LLVM return type is an aggregate that `check_musttail_abi_safety`
+    /// would reject — i.e. a by-value struct (non-recursive sum-with-payload,
+    /// record, or tuple). Recursive ADTs already lower to `ptr` (not a struct),
+    /// so they are excluded and keep their existing pointer return.
+    ///
+    /// Stage 1 (localized): only the internal `$direct_mt` decomposed entry honours
+    /// this — see `decompose.rs`. The full cross-surface sret ABI (closures,
+    /// indirect calls, extern adapters) is deferred.
+    pub(crate) fn should_return_by_sret(ret: inkwell::types::BasicTypeEnum<'ctx>) -> bool {
+        ret.is_struct_type()
+    }
+
+    /// Whether a *by-value* aggregate parameter is `musttail`-illegal under the
+    /// current LLVM (18) ABI. This is the R6 primitive that **decouples** the
+    /// indirect-param predicate from the *final* lowered signature — classifying
+    /// the by-value aggregate directly avoids the circularity of re-checking a
+    /// signature that already carries the indirect `ptr` slots (ADR 1.7.26e §R6).
+    ///
+    /// LLVM 18 rejects `musttail` for any by-value struct return/param uniformly
+    /// across validated targets (see [`Self::check_musttail_abi_safety`]), so this
+    /// is currently target-independent: a lowered `struct` param is illegal.
+    pub(crate) fn by_value_aggregate_is_musttail_illegal(
+        param: inkwell::types::BasicTypeEnum<'ctx>,
+    ) -> bool {
+        param.is_struct_type()
+    }
+
+    /// Whether a function with this *lowered* parameter type should be passed via
+    /// a caller-owned buffer pointer (indirect / `sret`-style for parameters)
+    /// instead of by value (ADR 1.7.26e §2.2). Parallel to
+    /// [`Self::should_return_by_sret`].
+    ///
+    /// ABI-level, NOT a source category. Decoupled form (R6):
+    ///   `struct ∧ musttail-illegal-by-value ∧ ¬flattenable`.
+    /// - A *flattenable* struct param (≤8 all-scalar fields) keeps the 18.5.26a
+    ///   scalar-decomposition path — it is **not** passed indirect (strict, §2.2).
+    /// - A recursive-ADT param already lowers to `ptr` (not a struct) → false.
+    ///
+    /// Decided **per specialization**: flattenability is only known once type
+    /// params resolve to concrete types (§2.2), so a generic function may go
+    /// indirect in one specialization and stay by-value in another.
+    pub(crate) fn should_pass_param_by_indirect(
+        param: inkwell::types::BasicTypeEnum<'ctx>,
+    ) -> bool {
+        match param {
+            BasicTypeEnum::StructType(st) => {
+                Self::by_value_aggregate_is_musttail_illegal(param) && !struct_is_flattenable(st)
             }
+            _ => false,
         }
-        Ok(())
     }
 
     /// Check if a function type's struct parameters can be decomposed into
@@ -182,11 +251,75 @@ impl<'ctx> CodeGen<'ctx> {
         }
         Ok(value)
     }
+
+    /// Compute the structured musttail ABI blockers for a lowered function type
+    /// (ADR 1.7.26b §2.4). Mirrors the gate in [`Self::check_musttail_abi_safety`]
+    /// but returns *all* blockers with structured [`ReasonCode`]s and per-position
+    /// detail, rather than the first-blocker `&str` the gate uses.
+    ///
+    /// Return is checked before params (matching the gate's ordering). A struct
+    /// parameter is classified `StructParam` if field-flattenable (the decompose
+    /// path may still achieve musttail) or `NonFlattenableParam` otherwise.
+    pub(crate) fn compute_musttail_blockers(
+        fn_type: inkwell::types::FunctionType<'ctx>,
+    ) -> Vec<Blocker> {
+        let mut blockers = Vec::new();
+        if let Some(ret) = fn_type.get_return_type() {
+            if ret.is_struct_type() {
+                blockers.push(Blocker {
+                    position: BlockerPosition::Return,
+                    reason: ReasonCode::StructReturn,
+                    lowered_type: ret.print_to_string().to_string(),
+                });
+            }
+        }
+        // Param 0 is always the env ptr (a scalar); skip it, matching
+        // check_decomposition_eligible.
+        for (i, param) in fn_type.get_param_types().iter().enumerate().skip(1) {
+            if param.is_struct_type() {
+                let reason = if struct_is_flattenable(param.into_struct_type()) {
+                    ReasonCode::StructParam
+                } else {
+                    ReasonCode::NonFlattenableParam
+                };
+                blockers.push(Blocker {
+                    position: BlockerPosition::Param(i),
+                    reason,
+                    lowered_type: param.print_to_string().to_string(),
+                });
+            }
+        }
+        blockers
+    }
+}
+
+/// Whether a struct parameter type is field-flattenable (decomposable) under the
+/// same rules as [`CodeGen::check_decomposition_eligible`]: all fields scalar
+/// (no nested struct/array) and at most 8 fields.
+fn struct_is_flattenable(st: inkwell::types::StructType<'_>) -> bool {
+    let field_count = st.count_fields();
+    if field_count > 8 {
+        return false;
+    }
+    for i in 0..field_count {
+        match st.get_field_type_at_index(i) {
+            Some(f) if f.is_struct_type() || f.is_array_type() => return false,
+            Some(_) => {}
+            None => return false,
+        }
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_blockers;
+#[cfg(test)]
 mod tests_decompose;
+#[cfg(test)]
+mod tests_indirect;
+#[cfg(test)]
+mod tests_lowered_sig;
 #[cfg(test)]
 mod tests_musttail;

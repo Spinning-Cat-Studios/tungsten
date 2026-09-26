@@ -2,7 +2,7 @@
 
 **A dependently-typed language where proofs and programs are one.**
 
-Tungsten is a self-hosted, dependently-typed functional language that combines the theorem proving power of Lean with the ergonomics of Rust. Write code, prove it correct, and compile it to native binaries — all in one language.
+Tungsten is a self-hosted research language with dependent types, proofs, Rust-inspired syntax, and native compilation. Its 2.0-alpha is a pre-release: the language is usable for experiments and compiler work, but breaking changes are expected before 2.0.
 
 ## Highlights
 
@@ -15,7 +15,7 @@ Tungsten is a self-hosted, dependently-typed functional language that combines t
 
 ## Quick Start
 
-Pre-built binaries are available for macOS (ARM64) and Linux (x86_64) on the [Releases](../../releases) page.
+The 2.0-alpha pre-release has pre-built binaries for macOS (ARM64) and Linux (x86_64) on the [Releases](../../releases) page. The [language manual](https://spinningcatstudios.com/tungsten) covers the language and its limitations.
 
 **macOS note:** The binaries are not code-signed. macOS will show a "cannot be verified" dialog on first run. To fix this:
 
@@ -153,17 +153,22 @@ See the `examples/` directory for more, including proofs (`proof.tg`, `proofs_bo
 
 Tungsten provides rich, contextual error messages designed for both humans and AI assistants:
 
-```
-Error: type mismatch
-   ┌─ src/main.tg:5:12
+```text
+[E0010] Error: expected `Nat`, found `String`
+   ╭─[tests/golden/error/type_mismatch_hints.tg:3:10]
    │
- 5 │     let x: String = 42;
-   │            ^^^^^^   ^^ found Nat
-   │            │
-   │            expected String
-   │
-   = help: consider using `nat_to_string(42)` to convert
+ 2 │ fn main() -> Nat {
+   │              ─┬─
+   │               ╰─── expected due to return type
+ 3 │     42 + "hello"
+   │          ───┬───
+   │             ╰───── expected `Nat`, found `String`
+───╯
+  hint: run `tungsten info type-encoding <Type> tests/golden/error/type_mismatch_hints.tg`
+  hint: run `tungsten doctor suggest-tools "type mismatch"`
 ```
+
+The full output is pinned by [a golden diagnostic test](tests/golden/error/type_mismatch_hints.expected).
 
 - **Contextual hints**: "expected because of return type annotation at line 3"
 - **Did-you-mean suggestions**: Levenshtein-based typo detection for identifiers
@@ -185,6 +190,16 @@ Error: type mismatch
 - **Pattern matching** — nested destructuring, `if let`, `let`-`else`, `try` blocks
 - **Parallel codegen** — per-function LLVM IR emission with parallel compilation
 - **Static linking** — single binary output, no `LD_LIBRARY_PATH` required
+- **Termination checking** *(2.0-alpha)* — every recursive function must be seen to stop; `#[decreasing(arg)]` names the shrinking parameter, `#[partial]` opts executable code out, and a proof may not depend on a partial definition
+- **Strict positivity** *(2.0-alpha)* — a type may refer to itself only to the right of an arrow
+- **Signed integers** *(2.0-alpha)* — `Int` beside `Nat`, overflow traps, `to_int`/`from_int`, and `match` on numbers with guards
+- **`StringBuilder`** *(2.0-alpha)* — linear-time string building through the runtime, via `extern "C"`
+- **Arena allocation** *(2.0-alpha)* — `TUNGSTEN_ARENA=bump` runs a compiled program on a bump-pointer arena
+- **One error per mistake** *(2.0-alpha)* — a broken definition is reported once, not at every use
+
+The rules the compiler now enforces — each with a rejected program, its
+diagnostic and the rewrite — are documented at
+[spinningcatstudios.com/tungsten](https://spinningcatstudios.com/tungsten/reference/limitations#rules-the-compiler-enforces).
 
 ### ❗ Known Limitations
 
@@ -192,19 +207,22 @@ Error: type mismatch
 
 ### ❌ Not Yet (v2.0 / v2.1 / v2.2)
 
+For the full, checked list see
+[Current limitations](https://spinningcatstudios.com/tungsten/reference/limitations).
+
 **v2.0** — production-readiness:
-- Termination checking (structural recursion verification)
 - Universe hierarchy (`Type 0 : Type 1 : ...`)
 - Tactic language (simp, induction, rewrite)
 - LSP (minimal: go-to-definition, hover)
 - `let mut` syntax
+- Or-patterns on constructors (on numbers they work since 2.0-alpha)
 - Package manifest (`tungsten.toml`)
 - DWARF source-level debugging
 
 **v2.1** — ecosystem & adoption:
 - Borrow checker
 - Type classes / traits
-- Inductive families (indexed types)
+- Indexed families (length-indexed vectors and the like)
 - Proof irrelevance (Prop universe, compile-time proof erasure)
 - Crypto & networking primitives (type-safe sockets, TLS)
 - Provable network models (session types, failure reasoning)
@@ -283,7 +301,7 @@ LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18) cargo build --release
 make test
 
 # Run golden tests
-make check-golden
+make golden
 ```
 
 ### Profiling & Benchmarking
@@ -339,7 +357,7 @@ If building without LLVM, use `--no-default-features` to disable the codegen fea
 
 ## Stability
 
-Tungsten 1.5 means the compiler pipeline is self-hosted, performant, and feature-complete for its core use cases. The language is still evolving; breaking changes may occur until 2.0. Semver applies to tooling releases, not language surface stability.
+Tungsten 2.0-alpha adds stricter checks for recursive code and types, signed integers, a string builder, and an opt-in arena allocator. It is a research pre-release, not a stability promise: programs may need changes before 2.0. Semver applies to tooling releases, not language surface stability. See the [current limitations](https://spinningcatstudios.com/tungsten/reference/limitations) before relying on a feature.
 
 ## Support
 
@@ -347,7 +365,7 @@ Tungsten is a personal research project; support is best-effort. Bug reports wit
 
 ## Contributing
 
-Bug reports, questions, and documentation fixes are welcome. Pull requests are not being accepted at this time — see [CONTRIBUTING.md](CONTRIBUTING.md) for details and the plan for v2.0.
+Bug reports, questions, and documentation feedback are welcome. Pull requests are not being accepted at this time — see [CONTRIBUTING.md](CONTRIBUTING.md) for details and the plan for v2.1.
 
 ## License
 

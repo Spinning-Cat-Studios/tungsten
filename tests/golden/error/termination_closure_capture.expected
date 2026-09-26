@@ -1,0 +1,13 @@
+[E0062] Error: cannot prove termination of `capt`
+   ╭─[tests/golden/error/termination_closure_capture.tg:5:22]
+   │
+ 5 │     let f = |x: Lst| capt(x);
+   │                      ───┬───  
+   │                         ╰───── 
+   │ 
+   │ Help: rewrite the recursion structurally, or mark the definition `#[partial]` (partial definitions cannot be used in proofs)
+   │ 
+   │ Note: with `l` decreasing, the call to `capt` supplies `x`, which is not a known strict subterm of `l`
+───╯
+
+error: aborting due to 1 error

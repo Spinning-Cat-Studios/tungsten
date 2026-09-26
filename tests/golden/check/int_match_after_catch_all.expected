@@ -1,0 +1,15 @@
+[W0001] Warning: unreachable pattern
+   ╭─[tests/golden/check/int_match_after_catch_all.tg:6:9]
+   │
+ 5 │         _ => 1,
+   │         ┬  
+   │         ╰── this catch-all pattern matches all values
+ 6 │         4 => 2
+   │         ┬  
+   │         ╰── 
+   │ 
+   │ Help: remove this arm or move the catch-all pattern to the end
+───╯
+
+warning: 1 warning emitted
+✓ tests/golden/check/int_match_after_catch_all.tg: 1 definition(s), all OK

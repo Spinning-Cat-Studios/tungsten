@@ -106,11 +106,21 @@ impl CodeGen<'_> {
         self.tracing.trace_escape = true;
     }
 
+    /// Enable synthesized-comparator Core-term dumping (ADR 12.7.26c P6).
+    ///
+    /// `filter == None` dumps every synthesized def; `Some(sym)` dumps only
+    /// those whose symbol contains `sym`.
+    pub fn set_dump_synthesized(&mut self, filter: Option<String>) {
+        self.tracing.dump_synthesized = Some(filter);
+    }
+
     /// Enable allocation profiling (ADR 7.5.26b).
     ///
-    /// Declares the profiler runtime functions and switches malloc calls
-    /// to use the profiling wrapper. If `filter` is `Some(name)`, only
-    /// that function will appear in the report.
+    /// Declares the profiler's hook, filter and report functions. The
+    /// allocation callee does not change: every site already calls
+    /// `__tungsten_alloc(size, class)` (ADR 14.9.26b), and recording is a
+    /// mode inside the runtime that the per-function entry hook activates.
+    /// If `filter` is `Some(name)`, only that function appears in the report.
     pub fn set_alloc_profile(&mut self, filter: Option<String>) {
         self.tracing.alloc_profile = true;
         self.tracing.alloc_profile_filter = filter;
@@ -150,17 +160,6 @@ impl CodeGen<'_> {
             self.module
                 .add_function("__tungsten_alloc_profile_report", report_ty, None);
         }
-
-        // __tungsten_alloc_profile_malloc(size: i64) -> *mut void
-        let malloc_ty = i8_ptr.fn_type(&[self.context.i64_type().into()], false);
-        if self
-            .module
-            .get_function("__tungsten_alloc_profile_malloc")
-            .is_none()
-        {
-            self.module
-                .add_function("__tungsten_alloc_profile_malloc", malloc_ty, None);
-        }
     }
 
     /// Register a term definition for potential monomorphization.
@@ -198,13 +197,12 @@ impl CodeGen<'_> {
     /// `type_args` is the concrete type argument(s).
     /// `symbol` is the mangled symbol from the mono ownership map.
     pub fn register_mono_instance(&mut self, global_name: &str, type_args: &[Type], symbol: &str) {
-        let ty_key = if type_args.len() == 1 {
-            format!("{:?}", type_args[0])
-        } else {
-            let parts: Vec<String> = type_args.iter().map(|t| format!("{t:?}")).collect();
-            parts.join(", ")
-        };
-        let mono_key = (global_name.to_string(), ty_key);
+        // Shared renderer so the pre-seeded key matches the one call-site
+        // resolution builds — see format_type_args_key (ADR 23.7.26c).
+        let mono_key = (
+            global_name.to_string(),
+            Self::format_type_args_key(type_args),
+        );
         self.monomorph
             .instances
             .insert(mono_key, symbol.to_string());
@@ -218,5 +216,14 @@ impl CodeGen<'_> {
     /// `register_mono_instance` calls are complete.
     pub fn activate_mono_map(&mut self) {
         self.monomorph.mono_map_active = true;
+    }
+
+    /// Install the lazy comparator-synthesis callback (ADR 29.6.26f P6′ step 2).
+    ///
+    /// Resolves `TyApp(Global("__cmp"), ConcreteT)` at codegen time by
+    /// synthesizing and emitting `compare_T`. Supplied by `bootstrap` because
+    /// `tungsten_codegen` cannot depend on the synthesis crate.
+    pub fn set_comparator_synth(&mut self, synth: crate::codegen::ComparatorSynth) {
+        self.monomorph.comparator_synth = Some(synth);
     }
 }

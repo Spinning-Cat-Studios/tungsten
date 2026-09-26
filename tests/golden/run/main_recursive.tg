@@ -1,6 +1,9 @@
 // Test run pipeline with recursive function
 // Verifies evaluation handles recursion correctly
 
+// Partial (ADR 11.8.26b): a `Nat` countdown, not a structural subterm — this
+// fixture tests the run pipeline's handling of recursion, not termination.
+#[partial]
 pub fn factorial(n: Nat) -> Nat {
     if n == 0 {
         1

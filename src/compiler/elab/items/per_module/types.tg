@@ -8,7 +8,9 @@ use driver::util::{list_reverse};
 use driver::modules::path::{ModulePath};
 use elab::ffi::{TypeHandle};
 use elab::env::defs::{TypeDefInfo, ValueDefInfo, ConstructorInfo};
-use elab::items::result::{ElabDef};
+use elab::items::result::{ElabDef, ElabResult};
+use elab::env::{Env};
+use elab::env::types::{env_current_module_contents};
 use elab::error::{ElabError};
 
 // ===========================================================================
@@ -119,4 +121,39 @@ fn wrap_ctor_exports_acc(
             wrap_ctor_exports_acc(rest, module,
                  Cons(constructor_export_new(info, module), acc))
     }
+}
+
+// ===========================================================================
+// MODULE RESULT BUILDER
+// ===========================================================================
+
+/// Build a ModuleElabResult from elaboration result and final env.
+///
+/// **`root_contents` is the shared base env's root slot, so `value_exports`
+/// carries all ~2,107 seeded globals rather than this module's own defs** —
+/// 526,998 value insertions per check, and 97.6% of what remains after ADR
+/// 5.8.26f hoisted the inbound half. Narrowing it was gated and DESCOPED
+/// there: extrapolated at 0.41 s / 0.51 GiB it clears neither gate arm
+/// (1.0 s / 0.8 GiB), and unlike the hoist it changes what a module exports.
+/// Re-measure before reviving it — a share alone is not grounds (ADR 5.8.26c).
+pub fn build_module_result(
+    current_path: ModulePath,
+    elab_result: ElabResult,
+    final_env: Env
+) -> ModuleElabResult {
+    let root_contents = env_current_module_contents(final_env);
+    let type_exports = wrap_type_exports(root_contents.types, current_path);
+    let value_exports = wrap_value_exports(root_contents.values, current_path);
+    let ctor_exports = wrap_ctor_exports(
+        root_contents.constructors.all, current_path
+    );
+    let result: ModuleElabResult = {
+        path: current_path,
+        defs: elab_result.defs,
+        type_defs: type_exports,
+        value_sigs: value_exports,
+        constructor_info: ctor_exports,
+        errors: elab_result.errors
+    };
+    result
 }

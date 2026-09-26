@@ -191,7 +191,10 @@ pub(super) fn type_of_refl(ctx: &Context, ty: &Type, t: &Term) -> TypeResult<Typ
 /// Type check annotation: `(t : τ) : τ`. Special-cases `sorry`.
 pub(super) fn type_of_annot(ctx: &Context, t: &Term, ty: &Type) -> TypeResult<Type> {
     check_type_wf(ctx, ty)?;
-    if matches!(t, Term::Sorry) {
+    // An authored hole is `Spanned(Sorry)` (ADR 18.9.26g); see through it.
+    if matches!(t, Term::Sorry)
+        || matches!(t, Term::Spanned(inner, _) if matches!(**inner, Term::Sorry))
+    {
         return Ok(ty.clone());
     }
     let t_ty = type_of(ctx, t)?;

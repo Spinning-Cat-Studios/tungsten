@@ -4,6 +4,7 @@ use super::{CollectedElaborator, ElabOutput};
 use crate::ast::SourceFile;
 use crate::elaborate::env::{ConstructorInfo, TypeDef, ValueDef};
 use crate::elaborate::error::ElabError;
+use crate::elaborate::termination::CachedTermination;
 use crate::elaborate::Elaborator;
 use serde::{Deserialize, Serialize};
 use tungsten_core::{Context, Type};
@@ -33,7 +34,34 @@ pub fn collect_definitions_with_exports<'a>(
     module_info: crate::driver::modules::ModuleInfo,
     prior_exports: &ModuleExports,
 ) -> Result<CollectedElaborator<'a>, Vec<ElabError>> {
+    collect_with_exports_inner(file, core_ctx, module_info, prior_exports, false)
+}
+
+/// [`collect_definitions_with_exports`] with the collection-pass
+/// short-circuit deferred unconditionally (ADR 14.8.26g D2) — the global
+/// Signature Collection entry point. That pass never runs Pass 2, so
+/// deferring costs nothing, while short-circuiting on an unpoisoned error
+/// (an unresolved `use`, say) would throw away every signature it DID
+/// collect and let the accumulating walk amplify the missing environment
+/// across every module (measured: 1 → 894 reported errors).
+pub fn collect_definitions_for_signature_collection<'a>(
+    file: &SourceFile,
+    core_ctx: &'a mut Context,
+    module_info: crate::driver::modules::ModuleInfo,
+    prior_exports: &ModuleExports,
+) -> Result<CollectedElaborator<'a>, Vec<ElabError>> {
+    collect_with_exports_inner(file, core_ctx, module_info, prior_exports, true)
+}
+
+fn collect_with_exports_inner<'a>(
+    file: &SourceFile,
+    core_ctx: &'a mut Context,
+    module_info: crate::driver::modules::ModuleInfo,
+    prior_exports: &ModuleExports,
+    defer_all_collection_errors: bool,
+) -> Result<CollectedElaborator<'a>, Vec<ElabError>> {
     let mut elaborator = Elaborator::new(core_ctx);
+    elaborator.defer_all_collection_errors = defer_all_collection_errors;
 
     // Populate module registry (creates stubs for all known types)
     elaborator.env.populate_module_info(module_info);
@@ -58,7 +86,7 @@ pub fn collect_definitions_with_exports<'a>(
             .insert(name.clone(), info.clone());
     }
 
-    // Allow value overwrites since Phase A stubs may be pre-registered (ADR 5.5.26c)
+    // Allow value overwrites since Stub Registration stubs may be pre-registered (ADR 5.5.26c)
     elaborator.allow_value_overwrite = true;
 
     elaborator.run_collection_pass(file)?;
@@ -86,7 +114,7 @@ pub fn elaborate_with_phase_checks(
     file: &SourceFile,
     core_ctx: &mut Context,
 ) -> (
-    Vec<super::super::phase_checks::PhaseCheckResult>,
+    Vec<super::super::collection_checks::PhaseCheckResult>,
     Result<ElabOutput, Vec<ElabError>>,
 ) {
     let mut elaborator = Elaborator::new(core_ctx);
@@ -104,6 +132,9 @@ pub fn elaborate_with_phase_checks(
             mutual_recursion_groups: elaborator.get_mutual_recursion_groups(),
             type_visibilities: elaborator.get_type_visibilities(),
             record_field_visibilities: elaborator.get_record_field_visibilities(),
+            termination_meta: std::mem::take(&mut elaborator.termination_meta),
+            carried_termination: CachedTermination::default(),
+            value_import_targets: crate::elaborate::ValueImportTargets::new(),
         }),
         Err(errors) => Err(errors),
     };

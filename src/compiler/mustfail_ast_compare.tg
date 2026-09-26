@@ -1,0 +1,274 @@
+// Negative control for `test_ast_compare.tg` (ADR 29.6.26f §4.1).
+//
+// EVERY test in this file asserts something FALSE and MUST be reported FAILED.
+// `make check-ast-compare-nonvacuous` runs it and requires exactly that; a case
+// reported `ok` fails the gate.
+//
+// This exists because a passing `assert_eq` is not evidence that anything was
+// compared. `compare` at a type whose comparator cannot be synthesized leaves
+// the call Stuck in the evaluator — the enclosing body's asserts never execute,
+// the failure flag is never set, and the runner reports `ok`. That is
+// indistinguishable, from a suite of only-passing assertions, from success.
+// Measured: `assert_eq(TyPath(…), TyUnit(…))` on the real `TypeExpr` reports
+// `ok`, as does `assert_ne(x, x)` at the same type.
+//
+// So every type `test_ast_compare.tg` asserts on is mirrored here the wrong way
+// round. If a future change makes one of those types un-synthesizable, its
+// sibling here flips to `ok` and this gate goes red — instead of the positive
+// suite quietly asserting nothing.
+//
+// Constructors of every arity are fair game since ADR 1.8.26b: D1 made the
+// payload encoding right-nested throughout, so a ≥3-field constructor compares,
+// and D2 made mutually recursive clusters (`TypeExpr`/`Stmt`/`Expr`) compare.
+// Before that they went silently Stuck and would have reported `ok` here,
+// failing this gate for the wrong reason.
+//
+// Deliberately NOT named `test_*.tg`: `make tg-test` globs that pattern and
+// requires every file to pass.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::compare::{assert_eq, assert_ne};
+use driver::ffi::types::{List, Nil, Cons};
+use lexer::span::{Span, span_new};
+use parser::ast::common::{Ident, ident_new, Path, path_simple, BinOp, OpAdd};
+use parser::ast::pattern::{Pattern, PatVar, PatWildcard, PatTuple, PatConstructor, PatOr};
+use parser::ast::nodes::types::{TypeExpr, TyPath, TyApp, TyUnit};
+use parser::ast::nodes::exprs::{
+    Expr, ExprIntLit, ExprBinary, ExprTuple, ExprBlock,
+    Stmt, StmtExpr, MaybeExpr, NoExpr
+};
+use parser::ast::normalize::{
+    strip_spans_pattern, strip_spans_ident, canonical_span, strip_spans_expr
+};
+
+fn sp(a: Nat, b: Nat) -> Span {
+    span_new(a, b, "t.tg")
+}
+
+fn id_at(name: String, a: Nat, b: Nat) -> Ident {
+    ident_new(name, sp(a, b))
+}
+
+fn path_at(name: String, a: Nat, b: Nat) -> Path {
+    path_simple(id_at(name, a, b))
+}
+
+// --- Span ------------------------------------------------------------------
+
+pub fn test_mustfail_span_eq_on_different() -> Unit {
+    assert_eq(sp(0, 3), sp(40, 43))
+}
+
+pub fn test_mustfail_span_ne_on_equal() -> Unit {
+    assert_ne(sp(0, 3), sp(0, 3))
+}
+
+// --- Ident (record nested in record) ---------------------------------------
+
+pub fn test_mustfail_ident_eq_on_different_name() -> Unit {
+    assert_eq(id_at("x", 0, 1), id_at("y", 0, 1))
+}
+
+pub fn test_mustfail_ident_eq_on_different_span() -> Unit {
+    assert_eq(id_at("x", 0, 1), id_at("x", 40, 41))
+}
+
+pub fn test_mustfail_ident_ne_on_equal() -> Unit {
+    assert_ne(id_at("x", 0, 1), id_at("x", 0, 1))
+}
+
+// --- Pattern (recursive AST type) ------------------------------------------
+
+pub fn test_mustfail_pattern_eq_on_different_tag() -> Unit {
+    assert_eq(PatVar(id_at("x", 0, 1)), PatWildcard(sp(0, 1)))
+}
+
+pub fn test_mustfail_pattern_ne_on_equal() -> Unit {
+    assert_ne(PatVar(id_at("x", 0, 1)), PatVar(id_at("x", 0, 1)))
+}
+
+/// The recursive spine must be walked: equal prefix, difference in element two.
+pub fn test_mustfail_pattern_eq_on_different_element() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("a", 1, 2)), Cons(PatVar(id_at("b", 4, 5)), Nil));
+    let rs: List<Pattern> = Cons(PatVar(id_at("a", 1, 2)), Cons(PatWildcard(sp(4, 5)), Nil));
+    assert_eq(PatTuple(ls, sp(0, 6)), PatTuple(rs, sp(0, 6)))
+}
+
+/// Length differences must be caught, not truncated to the common prefix.
+pub fn test_mustfail_pattern_eq_on_different_arity() -> Unit {
+    let one: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let two: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Cons(PatVar(id_at("w", 8, 9)), Nil));
+    assert_eq(PatTuple(one, sp(0, 7)), PatTuple(two, sp(0, 10)))
+}
+
+pub fn test_mustfail_pattern_eq_on_deep_difference() -> Unit {
+    let inner_l: List<Pattern> = Cons(PatVar(id_at("b", 4, 5)), Cons(PatWildcard(sp(8, 9)), Nil));
+    let inner_r: List<Pattern> = Cons(PatVar(id_at("c", 4, 5)), Cons(PatWildcard(sp(8, 9)), Nil));
+    let l: Pattern = PatTuple(Cons(PatVar(id_at("a", 0, 1)), Cons(PatTuple(inner_l, sp(4, 9)), Nil)), sp(0, 9));
+    let r: Pattern = PatTuple(Cons(PatVar(id_at("a", 0, 1)), Cons(PatTuple(inner_r, sp(4, 9)), Nil)), sp(0, 9));
+    assert_eq(l, r)
+}
+
+// --- Span significance (the AC 7 policy, asserted the wrong way) ------------
+
+/// If this ever reports `ok`, spans have stopped being compared and every
+/// "spans are significant" test in the positive suite is vacuous.
+pub fn test_mustfail_spans_treated_as_insignificant() -> Unit {
+    assert_eq(PatVar(id_at("x", 0, 1)), PatVar(id_at("x", 40, 41)))
+}
+
+// --- The normalizer itself --------------------------------------------------
+
+/// `strip_spans` must not collapse distinct names.
+pub fn test_mustfail_strip_spans_collapses_names() -> Unit {
+    assert_eq(strip_spans_pattern(PatVar(id_at("x", 0, 1))),
+              strip_spans_pattern(PatVar(id_at("y", 40, 41))))
+}
+
+/// Normalized output must genuinely carry `canonical_span()`, not the original.
+pub fn test_mustfail_normalized_keeps_original_span() -> Unit {
+    assert_eq(strip_spans_ident(id_at("x", 40, 41)), ident_new("x", sp(40, 41)))
+}
+
+/// …and `canonical_span()` must not coincide with a real one.
+pub fn test_mustfail_canonical_span_equals_real_span() -> Unit {
+    assert_eq(canonical_span(), sp(40, 41))
+}
+
+// --- >=3-field constructors (ADR 1.8.26b D1) -------------------------------
+//
+// One case per field POSITION. The pre-fix accessor read the last field
+// correctly and the earlier ones not at all, so a twin that only ever varied
+// the last field would have gone green over a broken projection.
+
+pub fn test_mustfail_constructor_eq_on_different_path() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let rs: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    assert_eq(PatConstructor(path_at("Some", 0, 4), ls, sp(0, 7)),
+              PatConstructor(path_at("None", 0, 4), rs, sp(0, 7)))
+}
+
+pub fn test_mustfail_constructor_eq_on_different_args() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let rs: List<Pattern> = Cons(PatWildcard(sp(5, 6)), Nil);
+    assert_eq(PatConstructor(path_at("Some", 0, 4), ls, sp(0, 7)),
+              PatConstructor(path_at("Some", 0, 4), rs, sp(0, 7)))
+}
+
+pub fn test_mustfail_constructor_eq_on_different_span() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let rs: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    assert_eq(PatConstructor(path_at("Some", 0, 4), ls, sp(0, 7)),
+              PatConstructor(path_at("Some", 0, 4), rs, sp(40, 47)))
+}
+
+pub fn test_mustfail_constructor_ne_on_equal() -> Unit {
+    let ls: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    let rs: List<Pattern> = Cons(PatVar(id_at("v", 5, 6)), Nil);
+    assert_ne(PatConstructor(path_at("Some", 0, 4), ls, sp(0, 7)),
+              PatConstructor(path_at("Some", 0, 4), rs, sp(0, 7)))
+}
+
+pub fn test_mustfail_or_eq_on_different_left() -> Unit {
+    assert_eq(PatOr(PatVar(id_at("a", 0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)),
+              PatOr(PatWildcard(sp(0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)))
+}
+
+pub fn test_mustfail_or_ne_on_equal() -> Unit {
+    assert_ne(PatOr(PatVar(id_at("a", 0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)),
+              PatOr(PatVar(id_at("a", 0, 1)), PatVar(id_at("b", 4, 5)), sp(0, 5)))
+}
+
+// --- The `TypeExpr` / `Stmt` / `Expr` cluster (ADR 1.8.26c) -----------------
+//
+// These are the types 29.6.26f measured as reporting `ok` while comparing
+// NOTHING, so their twins matter more than any others here. Until 1.8.26c each
+// reached a generic ADT instantiation as a field type (`List<TypeExpr>`,
+// `List<Stmt>`, `List<Expr>`) and was refused as an opaque leaf.
+
+fn ty_path(name: String, a: Nat, b: Nat) -> TypeExpr {
+    TyPath(path_at(name, a, b))
+}
+
+pub fn test_mustfail_type_expr_eq_on_different_path() -> Unit {
+    assert_eq(ty_path("Nat", 0, 3), ty_path("Bool", 0, 4))
+}
+
+pub fn test_mustfail_type_expr_ne_on_equal() -> Unit {
+    assert_ne(ty_path("Nat", 0, 3), ty_path("Nat", 0, 3))
+}
+
+pub fn test_mustfail_type_expr_eq_on_different_tag() -> Unit {
+    assert_eq(ty_path("Nat", 0, 3), TyUnit(sp(0, 3)))
+}
+
+/// The instantiation-carrying constructor, differing inside its argument list.
+pub fn test_mustfail_type_expr_app_eq_on_different_argument() -> Unit {
+    let ls: List<TypeExpr> = Cons(ty_path("Nat", 5, 8), Nil);
+    let rs: List<TypeExpr> = Cons(ty_path("Bool", 5, 9), Nil);
+    assert_eq(TyApp(ty_path("List", 0, 4), ls, sp(0, 9)),
+              TyApp(ty_path("List", 0, 4), rs, sp(0, 9)))
+}
+
+/// An argument-count difference must not be truncated to the common prefix.
+pub fn test_mustfail_type_expr_app_eq_on_different_arity() -> Unit {
+    let one: List<TypeExpr> = Cons(ty_path("Nat", 5, 8), Nil);
+    let two: List<TypeExpr> = Cons(ty_path("Nat", 5, 8), Cons(ty_path("Bool", 10, 14), Nil));
+    assert_eq(TyApp(ty_path("Either", 0, 6), one, sp(0, 9)),
+              TyApp(ty_path("Either", 0, 6), two, sp(0, 15)))
+}
+
+pub fn test_mustfail_stmt_eq_on_different_value() -> Unit {
+    assert_eq(StmtExpr(ExprIntLit(1, sp(0, 1)), sp(0, 2)),
+              StmtExpr(ExprIntLit(2, sp(0, 1)), sp(0, 2)))
+}
+
+pub fn test_mustfail_stmt_ne_on_equal() -> Unit {
+    assert_ne(StmtExpr(ExprIntLit(1, sp(0, 1)), sp(0, 2)),
+              StmtExpr(ExprIntLit(1, sp(0, 1)), sp(0, 2)))
+}
+
+pub fn test_mustfail_expr_eq_on_different_literal() -> Unit {
+    assert_eq(ExprIntLit(1, sp(0, 1)), ExprIntLit(2, sp(0, 1)))
+}
+
+pub fn test_mustfail_expr_ne_on_equal() -> Unit {
+    assert_ne(ExprIntLit(1, sp(0, 1)), ExprIntLit(1, sp(0, 1)))
+}
+
+pub fn test_mustfail_expr_binary_eq_on_different_operand() -> Unit {
+    assert_eq(ExprBinary(OpAdd, ExprIntLit(1, sp(0, 1)), ExprIntLit(2, sp(4, 5)), sp(0, 5)),
+              ExprBinary(OpAdd, ExprIntLit(1, sp(0, 1)), ExprIntLit(3, sp(4, 5)), sp(0, 5)))
+}
+
+/// Recursion through an instantiation of the enclosing type.
+pub fn test_mustfail_expr_tuple_eq_on_different_element() -> Unit {
+    let ls: List<Expr> = Cons(ExprIntLit(1, sp(1, 2)), Cons(ExprIntLit(2, sp(4, 5)), Nil));
+    let rs: List<Expr> = Cons(ExprIntLit(1, sp(1, 2)), Cons(ExprIntLit(9, sp(4, 5)), Nil));
+    assert_eq(ExprTuple(ls, sp(0, 6)), ExprTuple(rs, sp(0, 6)))
+}
+
+/// The `List<Stmt>` edge that closes the cluster loop.
+pub fn test_mustfail_expr_block_eq_on_different_statement() -> Unit {
+    let ls: List<Stmt> = Cons(StmtExpr(ExprIntLit(1, sp(2, 3)), sp(2, 4)), Nil);
+    let rs: List<Stmt> = Cons(StmtExpr(ExprIntLit(7, sp(2, 3)), sp(2, 4)), Nil);
+    assert_eq(ExprBlock(ls, NoExpr, sp(0, 6)), ExprBlock(rs, NoExpr, sp(0, 6)))
+}
+
+/// If this reports `ok`, spans have stopped being compared at `Expr` and AC 7
+/// is vacuous.
+pub fn test_mustfail_expr_spans_treated_as_insignificant() -> Unit {
+    let l: Expr = ExprBinary(OpAdd, ExprIntLit(1, sp(0, 1)), ExprIntLit(2, sp(4, 5)), sp(0, 5));
+    let r: Expr = ExprBinary(OpAdd, ExprIntLit(1, sp(30, 31)), ExprIntLit(2, sp(34, 35)), sp(30, 35));
+    assert_eq(l, r)
+}
+
+/// `strip_spans_expr` must not collapse distinct content.
+pub fn test_mustfail_strip_spans_expr_collapses_content() -> Unit {
+    assert_eq(strip_spans_expr(ExprIntLit(1, sp(0, 1))),
+              strip_spans_expr(ExprIntLit(2, sp(40, 41))))
+}

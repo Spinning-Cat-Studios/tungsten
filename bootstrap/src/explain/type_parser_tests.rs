@@ -3,6 +3,8 @@ use super::*;
 #[test]
 fn parse_base_types() {
     assert_eq!(parse_type("Nat").unwrap(), TypeAst::Base("Nat".into()));
+    // 14.9.26c AC 6: the explain parser accepts `Int`.
+    assert_eq!(parse_type("Int").unwrap(), TypeAst::Base("Int".into()));
     assert_eq!(parse_type("Bool").unwrap(), TypeAst::Base("Bool".into()));
     assert_eq!(parse_type("Unit").unwrap(), TypeAst::Base("Unit".into()));
     assert_eq!(parse_type("Void").unwrap(), TypeAst::Base("Void".into()));

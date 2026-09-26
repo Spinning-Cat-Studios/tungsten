@@ -1,0 +1,4 @@
+// ADR 7.8.26e D3: a forbidden occurrence across a mutually recursive pair. A
+// per-type check cannot see this; it needs the SCC.
+type A = MkA(B -> Nat)
+type B = MkB(A)

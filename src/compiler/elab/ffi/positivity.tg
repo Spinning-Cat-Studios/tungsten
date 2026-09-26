@@ -1,0 +1,91 @@
+// src/compiler/elab/ffi/positivity.tg
+// Bindings for the strict-positivity mirror (ADR 18.8.26b D1/D6).
+//
+// The soundness rule itself is NOT reimplemented here. Both compilers call one
+// `check_strict_positivity` in `tungsten_core`; what crosses this seam is the
+// definition environment the rule runs over, marshalled from the per-field
+// TypeHandles `elaborate_adt_body` already holds.
+//
+// ## The protocol, as a grammar
+//
+//   reset ( def_begin add_param* ( ctor_begin add_field* )* set_alias_body? )* check
+//
+// There is deliberately no `def_end`: a definition is closed by the next
+// `def_begin` or by `check`. Every departure from the grammar RETURNS FALSE and
+// records a message for `tg_get_last_error` — none is silently ignored, because
+// a dropped field is a definition that passes positivity only because the
+// offending occurrence never arrived.
+//
+// ## Sentinels
+//
+// A positional (unnamed) field passes `INVALID_HANDLE()` as its field name,
+// never literal `0`: handle 0 is a valid arena index, so a `0` sentinel would
+// read a real object as absent.
+
+use elab::ffi::{TypeHandle, INVALID_HANDLE};
+
+// ===========================================================================
+// DEFINITION KINDS
+// ===========================================================================
+
+// The `kind` argument of positivity_def_begin. Any other value is a hard
+// error on the Rust side, not a default: a silently-defaulted kind turns a
+// record into an ADT and changes the answer.
+pub fn POSITIVITY_KIND_ADT() -> Nat { 0 }
+pub fn POSITIVITY_KIND_RECORD() -> Nat { 1 }
+pub fn POSITIVITY_KIND_ALIAS() -> Nat { 2 }
+pub fn POSITIVITY_KIND_STUB() -> Nat { 3 }
+
+// ===========================================================================
+// REGISTRATION (six externs)
+// ===========================================================================
+
+// Start a fresh definition environment, discarding the previous pass's
+// definitions and its violations.
+pub extern "C" fn tg_positivity_reset() -> Unit
+
+// Open a definition. `name` is a C-string pointer; `kind` is one of the
+// POSITIVITY_KIND_* values above.
+pub extern "C" fn tg_positivity_def_begin(name: Nat, kind: Nat) -> Bool
+
+// Add one type parameter to the open definition, in declaration order.
+pub extern "C" fn tg_positivity_add_param(name: Nat) -> Bool
+
+// Open a constructor on the open definition.
+pub extern "C" fn tg_positivity_ctor_begin(name: Nat) -> Bool
+
+// Add one field to the open constructor. `name` is INVALID_HANDLE() for a
+// positional ADT field, a C-string pointer for a named record field.
+pub extern "C" fn tg_positivity_add_field(name: Nat, ty: TypeHandle) -> Bool
+
+// Set the open alias's body.
+pub extern "C" fn tg_positivity_set_alias_body(ty: TypeHandle) -> Bool
+
+// ===========================================================================
+// READERS (three)
+// ===========================================================================
+
+// Close the stream and run the analysis; returns the violation count.
+//
+// Nullary because the environment is ambient: PositivityDefs is a map of owned
+// strings rather than an arena object, so there is no handle to pass.
+pub extern "C" fn tg_positivity_check() -> Nat
+
+// How many violations the last check found.
+pub extern "C" fn tg_positivity_violation_count() -> Nat
+
+// The i-th violation, as a C string holding "<type name>\n<message>".
+//
+// Indexed rather than handle-returning because one cluster can violate in
+// several fields: a single-handle return would render the first violation and
+// silently drop the rest. Null on an out-of-range index.
+pub extern "C" fn tg_positivity_violation_render(index: Nat) -> Nat
+
+// ===========================================================================
+// CONVENIENCE WRAPPERS
+// ===========================================================================
+
+/// The field-name sentinel for a positional ADT field.
+pub fn positivity_positional_field() -> Nat {
+    INVALID_HANDLE()
+}

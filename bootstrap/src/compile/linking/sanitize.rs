@@ -69,7 +69,8 @@ pub(super) fn emit_sanitized<'ctx>(
     }
     #[cfg(target_os = "macos")]
     {
-        cmd.args(["-lSystem", "-lc", "-lm"]);
+        // cc (Apple Clang) implicitly links libSystem (provides libc + libm).
+        // No explicit system libs needed on macOS.
     }
 
     if verbose {

@@ -1,0 +1,54 @@
+// src/compiler/elab/items/per_module/results.tg
+// Folding the per-module Body-Elaboration results into one flat set.
+//
+// Split from `mod.tg` (ADR 19.8.26d) because it answers a different question:
+// `mod.tg` decides the ORDER modules are elaborated in, this decides how their
+// outputs are concatenated once they are.
+//
+// **The flattened `defs` come back in REVERSE source order, with the modules
+// interleaved post-order.** Neither matches the bootstrap's traversal, and any
+// consumer whose output a user reads must impose its own order rather than
+// inherit this one — see the note on `elaborate_module_tree`.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{list_reverse};
+use elab::items::result::{ElabDef};
+use elab::error::{ElabError};
+use elab::items::per_module::types::{ModuleElabResult};
+
+/// Flatten all per-module defs into a single list.
+pub fn collect_all_defs(results: List<ModuleElabResult>) -> List<ElabDef> {
+    collect_all_defs_acc(results, Nil)
+}
+
+fn collect_all_defs_acc(results: List<ModuleElabResult>, acc: List<ElabDef>) -> List<ElabDef> {
+    match results {
+        Nil() => acc,
+        Cons(result, rest) =>
+            collect_all_defs_acc(rest, append_defs(result.defs, acc))
+    }
+}
+
+/// Append two def lists.
+fn append_defs(a: List<ElabDef>, b: List<ElabDef>) -> List<ElabDef> {
+    append_defs_acc(list_reverse(a), b)
+}
+
+fn append_defs_acc(reversed_a: List<ElabDef>, b: List<ElabDef>) -> List<ElabDef> {
+    match reversed_a {
+        Nil() => b,
+        Cons(def, rest) => append_defs_acc(rest, Cons(def, b))
+    }
+}
+
+/// Append two error lists.
+pub fn append_errors(a: List<ElabError>, b: List<ElabError>) -> List<ElabError> {
+    append_errors_acc(list_reverse(a), b)
+}
+
+fn append_errors_acc(reversed_a: List<ElabError>, b: List<ElabError>) -> List<ElabError> {
+    match reversed_a {
+        Nil() => b,
+        Cons(err, rest) => append_errors_acc(rest, Cons(err, b))
+    }
+}

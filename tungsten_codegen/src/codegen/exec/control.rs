@@ -11,6 +11,12 @@ use tungsten_core::types::Type;
 
 impl<'ctx> CodeGen<'ctx> {
     /// Compile if-then-else.
+    ///
+    /// The branch merge routes through the shared planner (ADR 2.7.26b T2):
+    /// the source-inferred result type is passed as the planner's authoritative
+    /// expected type — in release builds too, not as a debug assertion — a
+    /// musttail-terminated branch is excluded from the phi entirely, and a
+    /// reachable branch that disagrees with the expected type is a hard error.
     pub(crate) fn compile_if(
         &mut self,
         cond: &Term,
@@ -42,40 +48,77 @@ impl<'ctx> CodeGen<'ctx> {
             .build_conditional_branch(cond_val, then_bb, else_bb)
             .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
 
-        // Then branch
-        self.builder.position_at_end(then_bb);
+        let mut then_arm = self.compile_if_branch(then_bb, then_, result_llvm_ty, is_tail)?;
+        let mut else_arm = self.compile_if_branch(else_bb, else_, result_llvm_ty, is_tail)?;
+
+        // Both branches share the source-inferred result type — record it so a
+        // disagreement self-decodes (ADR 12.7.26c P2).
+        then_arm.source_ty = Some(result_ty.clone());
+        else_arm.source_ty = Some(result_ty.clone());
+
+        // Plan + build the merge: the source-inferred type is the expected
+        // input the reachable branches must agree with (production check).
+        let merge_arms = [then_arm, else_arm];
+        let site = format!("if/else in `{}`", self.current_fn_name());
+        let plan = crate::codegen::exec::merge::plan_merge(
+            &merge_arms,
+            Some(result_llvm_ty),
+            &site,
+            Some(&mut self.types),
+        )?;
+
+        for arm in &merge_arms {
+            self.terminate_merge_arm(arm, merge_bb)?;
+        }
+
+        self.build_planned_merge(merge_bb, &plan, result_llvm_ty, "if_result")
+    }
+
+    /// Compile one if/else branch: body + cast to the source-inferred result
+    /// type (reachable branches only — an unreachable branch's value is the
+    /// musttail epilogue's dummy and stays untouched; the planner excludes it).
+    fn compile_if_branch(
+        &mut self,
+        bb: inkwell::basic_block::BasicBlock<'ctx>,
+        body: &Term,
+        result_llvm_ty: inkwell::types::BasicTypeEnum<'ctx>,
+        is_tail: bool,
+    ) -> Result<crate::codegen::exec::merge::MergeArm<'ctx>, CodeGenError> {
+        self.builder.position_at_end(bb);
         self.compilation.in_tail_position = is_tail;
-        let then_val = self.compile_term(then_)?;
-        // Cast to consistent type if needed
-        let then_val = self.cast_to_type(then_val, result_llvm_ty)?;
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        let then_bb = self.builder.get_insert_block().unwrap();
+        let val = self.compile_term(body)?;
 
-        // Else branch
-        self.builder.position_at_end(else_bb);
-        self.compilation.in_tail_position = is_tail;
-        let else_val = self.compile_term(else_)?;
-        // Cast to consistent type if needed
-        let else_val = self.cast_to_type(else_val, result_llvm_ty)?;
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        let else_bb = self.builder.get_insert_block().unwrap();
+        let end_bb = self.builder.get_insert_block().unwrap();
+        let reachable = end_bb.get_first_use().is_some();
 
-        // Merge
-        self.builder.position_at_end(merge_bb);
-        let phi = self
-            .builder
-            .build_phi(result_llvm_ty, "if_result")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-        phi.add_incoming(&[(&then_val, then_bb), (&else_val, else_bb)]);
+        // Cast to the consistent (source-inferred) type if needed — only for
+        // reachable branches; T1's shrinking-aggregate guard makes a poisoned
+        // cast a hard error rather than silent truncation.
+        let val = if reachable {
+            self.cast_to_type(val, result_llvm_ty)?
+        } else {
+            val
+        };
+        let end_bb = self.builder.get_insert_block().unwrap();
 
-        Ok(phi.as_basic_value())
+        Ok(crate::codegen::exec::merge::MergeArm {
+            value: val,
+            end_bb,
+            reachable,
+            // Set by the caller (`compile_if`) from the shared inferred result
+            // type once both branches are built (ADR 12.7.26c P2).
+            source_ty: None,
+        })
     }
 
     /// Cast a value to a target type, using bitcast through memory if sizes differ.
+    ///
+    /// Shrinking an *aggregate* (struct/array) source to a smaller destination is
+    /// a hard error: no legitimate emission produces that shape — the sole in-tree
+    /// producer was the 1.7.26e §6.6 phi-poisoning miscompile, where a merge typed
+    /// from a dead musttail arm's `i1` dummy truncated real sret results through a
+    /// 1-byte memcpy. Failing here converts that class into a compile-time error
+    /// at the emission site (ADR 2.7.26b T1).
     pub(crate) fn cast_to_type(
         &mut self,
         val: BasicValueEnum<'ctx>,
@@ -88,6 +131,32 @@ impl<'ctx> CodeGen<'ctx> {
         // Sizes might differ - need to copy through memory
         let src_size = self.type_size_bytes(val.get_type());
         let dst_size = self.type_size_bytes(target_ty);
+
+        // Hard error: shrinking-aggregate cast (ADR 2.7.26b T1). Scalar↔scalar
+        // and widening casts keep the memcpy path below (zero-fill unchanged).
+        let src_aggregate_kind = match val.get_type() {
+            inkwell::types::BasicTypeEnum::StructType(_) => Some("struct"),
+            inkwell::types::BasicTypeEnum::ArrayType(_) => Some("array"),
+            _ => None,
+        };
+        if let Some(kind) = src_aggregate_kind {
+            if dst_size < src_size {
+                let fn_name = self
+                    .compilation
+                    .current_fn
+                    .map(|f| f.get_name().to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "<unknown function>".to_string());
+                return Err(CodeGenError::TypeError(format!(
+                    "shrinking aggregate cast in function `{fn_name}`: refusing to cast {kind} \
+                     source {src} ({src_size} bytes) to smaller destination {dst} ({dst_size} \
+                     bytes) — this indicates a merge/phi typed from a dead-arm placeholder; \
+                     the emitter must exclude unreachable arms from result-type unification \
+                     (ADR 2.7.26b T1; see 1.7.26e §6.6)",
+                    src = val.get_type().print_to_string(),
+                    dst = target_ty.print_to_string(),
+                )));
+            }
+        }
 
         // Allocate target-sized memory with 16-byte alignment for ARM64
         let alloca = self

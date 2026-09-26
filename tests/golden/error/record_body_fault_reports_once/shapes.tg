@@ -1,0 +1,8 @@
+pub type Box = { width: Nat, height: NoSuchType }
+
+// ADR 15.8.26d AC 1: an IN-MODULE construction site. Here the failed type
+// is a poisoned stub with no field list, which used to add an E0050 at
+// every such site (V3's 14). The seeded fault must stay the only diagnostic.
+pub fn make_box() -> Box { Box { width: 1, height: 2 } }
+pub fn make_box_anonymous() -> Box { { width: 1, height: 2 } }
+pub fn width_of(shape: Box) -> Nat { shape.width }

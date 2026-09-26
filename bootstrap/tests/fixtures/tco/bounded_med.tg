@@ -1,0 +1,26 @@
+// ADR 1.7.26b fixture — bounded finite-ADT driver SKIP → MED risk.
+//
+// `classify` recurses over a finite nullary enum `Ordering` and returns a
+// by-value tuple `(Nat, Nat)` (struct return → SKIP). The `flag: Bool` second
+// param only exists to give the function arity ≥ 2 (arity-1 functions get no
+// `$direct` multi-arg entry, so the musttail path never fires). No param is a
+// collection/unbounded type, but `Ordering` is a structurally bounded finite
+// ADT → MED risk.
+
+pub type Ordering = Less | Equal | Greater
+
+// Partial (ADR 11.8.26b): a measure recursion, out of Phase 1's scope.
+// This fixture exercises musttail classification, not termination.
+#[partial]
+fn classify(o: Ordering, flag: Bool) -> (Nat, Nat) {
+    match o {
+        Less() => (0, 0),
+        Equal() => (1, 1),
+        Greater() => classify(Equal, flag),
+    }
+}
+
+fn main() -> Nat {
+    let (a, b) = classify(Greater, true);
+    a + b
+}

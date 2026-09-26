@@ -1,0 +1,106 @@
+# Cost tier for every `tungsten test` entry file (ADR 6.8.26c D4/D7).
+#
+# WHY THIS FILE EXISTS. A cost-3 suite asserts types at *elaboration*; there is
+# nothing for a runtime assertion counter to find, so running it at cost 5 makes
+# every one of its tests report `ASSERTED NOTHING`. Five of these files already
+# declared `--check-only` in their own `make` target, and `make tg-test`'s
+# blanket loop ignored the declaration — the same file, two modes, one of them
+# written down and unread. Moving the tier here puts it somewhere the RUNNER can
+# see, so `tungsten test <file>` honours it with no flag and there is exactly one
+# copy of the answer.
+#
+# The runner finds this file by walking up from the entry file's directory, so
+# the directory holding it *is* the root every key below is relative to.
+#
+#   tier = 3   elaboration only. `expect_type` / `expect_error` / typed
+#              let-bindings have already run by the time the body would; the
+#              runner reports `Skipped (check-only)` and asserts nothing at
+#              runtime because there is nothing to assert.
+#   tier = 5   run the body and count executed assertions.
+#
+# THREE GUARDS make a declaration refutable rather than merely authoritative
+# (D7) — a wrong tier is otherwise a *silent* way to make the vacuity census
+# green by hiding tests instead of fixing them:
+#
+#   (a) a file that calls a runtime assertion may not be declared tier 3; the
+#       runner errors. `test_string_concat.tg` was the live instance — declared
+#       `--check-only` while making 14 runtime `assert_eq_string` calls.
+#   (b) each tier-3 file's `Skipped` count is pinned against a literal in
+#       ADR 6.8.26c §5, so a file cannot read as clean by losing tests.
+#   (c) a file matching `must_declare` below but absent from `[files]` is a
+#       runner error. Not a default: tier 3 would silently skip every new file,
+#       tier 5 would quietly re-open the defect this file fixes.
+
+# Globs whose matches MUST appear in [files]. `*` matches within one path
+# segment. This is `make tg-test`'s own glob — every file the blanket gate runs
+# has to have said which mode it wants.
+must_declare = ["src/compiler/test_*.tg"]
+
+[files]
+
+# --- cost 3: type-level assertions, discharged during elaboration ------------
+
+"src/compiler/test_list_ops.tg" = { tier = 3, why = "typed let-bindings assert list_* return types at elaboration (ADR 20.5.26e); no runtime assertion exists to count" }
+"src/compiler/test_compare_result.tg" = { tier = 3, why = "expect_type over the CompareResult ADTs plus typed __compare bindings (ADR 29.6.26f T11.1); expect_type erases to Unit at elaboration and can never be counted at runtime" }
+"src/compiler/test_string_slice.tg" = { tier = 3, why = "typed let-bindings over string_slice / string_split_once (ADR 19.8.26c AC7); tg_string_slice is not in the evaluator's executable set, so a runtime assertion would go Stuck and report ASSERTED NOTHING" }
+"tests/try_block.tg" = { tier = 3, why = "expect_type / expect_error over try-block desugaring (ADR 15.5.26d)" }
+"tests/type_alias.tg" = { tier = 3, why = "expect_type / expect_error over type aliases (ADR 15.5.26g)" }
+"tests/pattern_nested_tuple.tg" = { tier = 3, why = "expect_type over nested tuple patterns (ADR 20.5.26a)" }
+"tests/int_typing.tg" = { tier = 3, why = "expect_type / expect_error over the Int primitive: literal defaulting, operand-type dispatch, the bridges, the mixed-operand mismatch and the two new codes E0090/E0100 (ADR 14.9.26c AC 1)" }
+
+# The `golden -- test` fixtures. Same cause-3 class as `test_list_ops.tg` above,
+# missed when 6.8.26c swept `src/compiler/`: every one is `expect_type` only, so
+# at cost 5 each reported ASSERTED NOTHING and `cargo run -p golden -- test` went
+# 5/5 -> 2/5 the day 6.8.26b landed. Nothing caught it, because the close-out
+# ritual runs `golden -- error` and stops (ADR 6.8.26b close-out review).
+# These assert the RUNNER's own discovery, filtering and reporting, so their
+# `.expected` files pin the Skipped counts directly — guard (b), for free.
+"tests/golden/test/test_discovery.tg" = { tier = 3, why = "expect_type over discovery of two well-formed test_* functions" }
+"tests/golden/test/test_discovery_error.tg" = { tier = 3, why = "expect_type plus two deliberately ill-formed test_* signatures, to pin the skip warnings" }
+"tests/golden/test/test_filter.tg" = { tier = 3, why = "expect_type over three tests, to pin --filter's substring match" }
+
+# --- cost 5: runtime assertions -----------------------------------------------
+
+"src/compiler/test_attributes.tg" = { tier = 5, why = "assert_eq_nat / _bool / _string over the parsed item's attribute accessor (ADR 12.8.26b P1). Tier 5 deliberately: the defect it pins already parsed WITHOUT error, so only reading the attribute list back at runtime distinguishes an arrived annotation from a discarded one — a cost-3 type assertion could not see the difference" }
+"src/compiler/test_ast_compare.tg" = { tier = 5, why = "structural assert_eq over the self-contained AST types (ADR 29.6.26f)" }
+"src/compiler/test_ast_compare_cluster.tg" = { tier = 5, why = "structural assert_eq over the mutually recursive AST cluster (ADR 1.8.26c)" }
+"src/compiler/test_cir_captures.tg" = { tier = 5, why = "assert_eq_nat / assert_eq_string over CIR capture lists (ADR 13.5.26j)" }
+"src/compiler/test_codegen.tg" = { tier = 5, why = "assert_eq_string over emitted LLVM text (ADR 13.5.26m)" }
+"src/compiler/test_codegen_closures.tg" = { tier = 5, why = "assert_eq_string over the closure emitter's output (ADR 13.5.26m)" }
+"src/compiler/test_compare_asserts.tg" = { tier = 5, why = "the comparator assertion helpers themselves (ADR 1.8.26b)" }
+"src/compiler/test_ctor_store.tg" = { tier = 5, why = "assert_eq_nat over the constructor store and module map (ADR 23.7.26d)" }
+"src/compiler/test_driver_paths.tg" = { tier = 5, why = "assert_eq_string / assert_eq_bool over the bootstrap-binary resolution order and the two failure renderings (ADR 3.9.26b AC3/AC4). Tier 5 deliberately: the choice is a record and the message a String, so a cost-3 type assertion would confirm only that a String came back — which the defect this suite pins already did" }
+"src/compiler/test_env_layering.tg" = { tier = 5, why = "assert_eq_nat over the seeded-env layering contract (ADR 5.8.26f)" }
+"src/compiler/test_escape_count.tg" = { tier = 5, why = "assert_eq_nat / _bool / _string over the diagnostic escape-count sentinel and the answer it produces (ADR 5.9.26c AC1-AC3). Tier 5 deliberately: both arms return Option<Nat>, so a cost-3 assertion would confirm only that an Option came back — which the misnamed comparison this ADR replaces already did. The subject is a pure function over an injected count, so no arena, no handle and no developer build" }
+"src/compiler/test_import_store.tg" = { tier = 5, why = "assert_eq_nat over the import index (ADR 5.8.26b)" }
+"src/compiler/test_int_ops.tg" = { tier = 5, why = "assert_eq_int / assert_eq_nat / assert_eq_bool over signed arithmetic, comparison and the two bridges (ADR 14.9.26c AC 2). Tier 5 deliberately: the whole content is the VALUE — `-7 / 2` types as Int whether it truncates toward zero or not — and the evaluator's checked arms and the native intrinsics are separate implementations that only a runtime comparison can show agree. `tg_assert_eq_int` has an evaluator arm; the must-fail twin mustfail_int_ops.tg is outside must_declare's glob by design" }
+"src/compiler/test_int_match.tg" = { tier = 5, why = "assert_eq_nat over integer `match` arm selection — a negative literal, an or-of-literals, guards, the catch-all, a Nat fib (ADR 18.9.26e AC 1). Tier 5 deliberately: every arm has the same type, so a cost-3 assertion would confirm only that a Nat came back — which a chain built in the wrong order also returns. The must-fail twin mustfail_int_match.tg is outside must_declare's glob by design" }
+"src/compiler/test_list_utils.tg" = { tier = 5, why = "assert_eq_nat over driver/util list helpers" }
+"src/compiler/test_module_cycles.tg" = { tier = 5, why = "assert_eq_nat across a `mod.tg` <-> sibling module cycle (ADR 4.9.26f AC3). Tier 5 deliberately: elaboration accepting the cycle is only half the answer — the other half is that a call THROUGH the cycle still evaluates, and a cost-3 assertion would confirm only that the types resolved, which a broken driver/helper edge also does. It declares its own `tg_assert_eq_nat` rather than importing `driver::ffi::test`, so the suite costs its own three modules instead of the whole self-host" }
+"src/compiler/test_record_fields.tg" = { tier = 5, why = "assert_eq_string / _nat / _bool over `record_field_at_index` and `record_field_lookup`, the two ways to read a `List<RecordFieldInfo>` that must agree (ADR 7.9.26b AC4/AC5). Tier 5 deliberately: the answer is a `MaybeRecordField` whose wrong arm carries a real field of the right type, so a cost-3 assertion would confirm only that a field came back — which the positional reading this ADR removes also did" }
+"src/compiler/test_projections.tg" = { tier = 5, why = "assert_eq_string / _nat / _bool over `product_field_projection`, the one right-nested product convention the Core-term builder, the CIR builder and the type walk all fold (ADR 3.9.26g AC3/AC4). Tier 5 deliberately: the chain is a List<ProjStep> value, and the defect it pins already type-checked — a cost-3 assertion would confirm only that a list came back, which the wrong builder also did" }
+"src/compiler/test_string_builder.tg" = { tier = 5, why = "assert_eq_string / assert_eq_nat over the StringBuilder wrappers against the `++` fold of the same pieces (ADR 14.9.26a AC 1/AC 2). Tier 5 deliberately: the handle is an opaque Nat inside an ADT, so a cost-3 assertion would confirm only that a StringBuilder came back — the six tg_string_builder_* externs have evaluator arms, and --assertion-census is what proves each test's comparison ran. The must-fail twin mustfail_string_builder.tg is outside must_declare's glob by design" }
+"src/compiler/test_string_compare.tg" = { tier = 5, why = "assert_eq_nat over the three-way string comparator (ADR 21.7.26c)" }
+"src/compiler/test_string_concat.tg" = { tier = 5, why = "16 runtime assert_eq_string calls across 12 tests, confirmed by --assertion-census as 2+1+1+3+1 (the `++` operator, ADR 18.5.26f AC7) + 1+1+1+1+1+1+2 (the string_concat FUNCTION and string_join, ADR 20.8.26d AC4). The second group could not be written before 20.8.26d: string_concat's loop reached the unregistered tg_string_append_char, so every assertion around it went silently Stuck. Its `--check-only` target declaration was WRONG and is the reason guard (a) exists" }
+"src/compiler/test_string_utils.tg" = { tier = 5, why = "assert_eq_string / assert_eq_nat over driver/util string helpers" }
+"src/compiler/test_strmap.tg" = { tier = 5, why = "assert_eq_nat over the StrMap AVL index (ADR 21.7.26c)" }
+"src/compiler/test_test_verb.tg" = { tier = 5, why = "assert_eq_nat / _bool / _string over the `test` verb's pure decision functions — the signature filter, the empty-suite classification, the flag parser and the harness artifact path (ADR 7.8.26a). Tier 5 deliberately: the whole point of D2's pure split is that these assertions EXECUTE, and --assertion-census (6/6/6/3/2) is what proves no path went Stuck" }
+
+# --- expected failures (ADR 6.8.26c D6) ---------------------------------------
+#
+# The ONLY sanctioned way to leave a `tungsten test` finding un-repaired. It is
+# deliberately narrow, because the three easy alternatives are all forms of
+# lying: deleting the assertion, weakening its expected value, or demoting the
+# file to tier 3 (guard (a) forbids that one mechanically).
+#
+# `adr` is REQUIRED and names the successor that will REMOVE the entry — an
+# expected failure with nobody's name on it is just a disabled test. The entry
+# is also self-cleaning: a listed test that PASSES fails the run, so the day the
+# successor lands, the gate tells you to delete the entry rather than letting it
+# rot green.
+#
+# The corpus currently has NO expected failures. ADR 7.8.26c registered the
+# type arena on the evaluator, so the six `test_type_handle_to_codegen_type_*`
+# tests its entry owned now execute and pass, and the entry deleted itself the
+# way the paragraph above describes. The section stays because the mechanism
+# does.

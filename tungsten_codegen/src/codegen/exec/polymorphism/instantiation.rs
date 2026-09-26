@@ -224,8 +224,51 @@ impl<'ctx> CodeGen<'ctx> {
         Ok(())
     }
 
-    /// Format type args as a mono key string.
-    fn format_type_args_key(type_args: &[Type]) -> String {
+    /// Resolve a saturated generic call's monomorphized instance symbol for
+    /// the direct-call path (ADR 23.7.26c).
+    ///
+    /// Mirrors `compile_ty_app`'s key resolution exactly — applies the current
+    /// type substitution and strips `@`-prefix TyVars so the mono key matches
+    /// the registered instance map — but never *creates* an instance: a miss
+    /// (unregistered instance, or a mono-blocking TyVar in a still-polymorphic
+    /// body) returns `None` and the call site falls back to the closure path.
+    ///
+    /// Self-recursion resolves because both `compile_monomorphized_named` and
+    /// the per-unit pre-seeding (`register_mono_instance`) insert the instance
+    /// into `monomorph.instances` before the body compiles.
+    pub(crate) fn resolve_saturated_mono_callee(
+        &self,
+        global_name: &str,
+        ty_args: &[&Type],
+    ) -> Option<String> {
+        let resolved_args: Vec<Type> = ty_args
+            .iter()
+            .map(|ty_arg| {
+                let substituted = self.types.apply_type_subst(ty_arg);
+                self.strip_at_prefix_tyvars(&substituted)
+            })
+            .collect();
+        if resolved_args
+            .iter()
+            .any(|ty_arg| self.has_mono_blocking_tyvar(ty_arg))
+        {
+            return None;
+        }
+        let ty_key = Self::format_type_args_key(&resolved_args);
+        self.monomorph
+            .instances
+            .get(&(global_name.to_string(), ty_key))
+            .cloned()
+    }
+
+    /// Render the type-argument half of a `monomorph.instances` key.
+    ///
+    /// The single source of truth for mono-key formatting: `compile_ty_app`'s
+    /// resolution, `resolve_saturated_mono_callee` (the direct-call path), and
+    /// `register_mono_instance` (the pre-seeding side) MUST all render the key
+    /// identically or a call site silently misses its pre-registered instance
+    /// (ADR 23.7.26c). Keep this the only implementation.
+    pub(crate) fn format_type_args_key(type_args: &[Type]) -> String {
         if type_args.len() == 1 {
             format!("{:?}", type_args[0])
         } else {

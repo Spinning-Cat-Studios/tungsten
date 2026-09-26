@@ -1,0 +1,13 @@
+[E0062] Error: cannot prove termination of `len`
+   ╭─[tests/golden/error/termination_unknown_annotation.tg:5:1]
+   │
+ 5 │ fn len(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => 1 + len(t) } }
+   │ ────────────────────────────────────┬───────────────────────────────────  
+   │                                     ╰───────────────────────────────────── 
+   │ 
+   │ Help: `#[decreasing(…)]` must name a parameter: `l`
+   │ 
+   │ Note: `nope` is not a parameter of this definition
+───╯
+
+error: aborting due to 1 error

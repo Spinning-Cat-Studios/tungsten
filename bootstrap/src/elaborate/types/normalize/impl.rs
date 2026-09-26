@@ -9,6 +9,13 @@ use crate::elaborate::env::TypeDefKind;
 use crate::elaborate::Elaborator;
 use tungsten_core::Type;
 
+/// Backstop on concurrent `App` expansions during normalization. Regular
+/// generics only nest as deep as their argument spelling (each sibling
+/// instantiation's arguments are strict subterms of its parent's), so real
+/// code stays far below this; only a non-regular generic (`Nest<(T, T)>`)
+/// could otherwise expand unboundedly. See `normalize_app` (ADR 21.7.26e).
+const MAX_APP_EXPANSION_DEPTH: usize = 64;
+
 impl<'a> Elaborator<'a> {
     /// Internal implementation of type normalization with cycle detection.
     ///
@@ -182,6 +189,16 @@ impl<'a> Elaborator<'a> {
     }
 
     /// Normalize a Type::App for parameterized types.
+    ///
+    /// Two behaviours callers rely on (and that ADR 21.7.26j's normalization
+    /// check had to special-case):
+    /// - **Records stay nominal:** `App(RecordName, …)` is returned unexpanded,
+    ///   not as the structural `Product(…)` — so `normalize(App(Record))` does
+    ///   NOT equal the record's stored Phase-1e product encoding.
+    /// - **Generic instantiations under-expand:** `App(List, [Concrete])` is
+    ///   encoded one level but its own `App(Generic, [Concrete])` sub-references
+    ///   are left un-expanded, whereas Phase-1e fully expands them (e.g. to
+    ///   `Mu(…)`/`Sum(…)`). A residual `App` in the normalized form is the tell.
     fn normalize_app(
         &self,
         name: &str,
@@ -189,14 +206,29 @@ impl<'a> Elaborator<'a> {
         ty: &Type,
         in_progress: &mut HashSet<String>,
     ) -> Type {
-        // Cycle detection: if we're already expanding this type, return unexpanded
-        // For 0-arity types, return TyVar for consistency with TyVar case
-        if in_progress.contains(name) {
+        // Cycle detection. Parameterized types are keyed by *instantiation*
+        // (`Name<Args>`), not bare name: a sibling instantiation of the same
+        // generic (e.g. `List<Bucket>` while expanding `List<List<Bucket>>`)
+        // is not a cycle and must expand, or the fresh spelling diverges from
+        // the stored encoding, which carries it fully expanded (ADR 21.7.26e
+        // wall 1). Genuine recursion never re-enters here: self-references
+        // collapse to the μ-variable during field encoding, and mutual
+        // recursion re-encounters the *same* instantiation key.
+        let cycle_key = self.app_cycle_key(name, args);
+        if in_progress.contains(&cycle_key) {
+            // For 0-arity types, return TyVar for consistency with TyVar case
             return if args.is_empty() {
                 Type::TyVar(name.to_string())
             } else {
                 ty.clone()
             };
+        }
+
+        // Depth backstop for non-regular generics (a body whose self-argument
+        // grows per unfold, e.g. `Nest<(T, T)>`, produces a fresh key each
+        // level). Returning unexpanded is the pre-21.7.26e fail-safe.
+        if in_progress.len() >= MAX_APP_EXPANSION_DEPTH {
+            return ty.clone();
         }
 
         // Look up the type definition and get its encoding
@@ -218,8 +250,8 @@ impl<'a> Elaborator<'a> {
             }
         }
 
-        // Mark this type as being expanded
-        in_progress.insert(name.to_string());
+        // Mark this instantiation as being expanded
+        in_progress.insert(cycle_key.clone());
 
         let result = match &type_def.kind {
             TypeDefKind::ADT(constructors) => {
@@ -254,9 +286,24 @@ impl<'a> Elaborator<'a> {
             }
         };
 
-        // Done expanding this type
-        in_progress.remove(name);
+        // Done expanding this instantiation
+        in_progress.remove(&cycle_key);
         result
+    }
+
+    /// The `in_progress` cycle key for a `Type::App`: the bare name for
+    /// 0-arity references (shared with the `TyVar` path), the canonicalized
+    /// instantiation rendering (`Name<Args>`) otherwise, so distinct
+    /// instantiations of one generic never block each other (ADR 21.7.26e).
+    fn app_cycle_key(&self, name: &str, args: &[Type]) -> String {
+        if args.is_empty() {
+            return name.to_string();
+        }
+        let arg_keys: Vec<String> = args
+            .iter()
+            .map(|arg| self.canonicalize_type_arg(arg).to_string())
+            .collect();
+        format!("{}<{}>", name, arg_keys.join(", "))
     }
 
     /// Normalize a Product type by recursively normalizing both components.

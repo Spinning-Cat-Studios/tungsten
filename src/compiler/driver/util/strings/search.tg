@@ -1,0 +1,82 @@
+// Building and searching strings: concatenation, joining, substring search.
+
+use driver::ffi::{List, Nil, Cons, string_len, string_char_at_internal};
+
+/// Concatenate two strings.
+///
+/// **The TODO this carried was asking for something the language already has,
+/// and it stood long enough to be believed.** It read "needs proper FFI
+/// support"; `++` lowers to `Term::StrConcat`, a native Core term the
+/// evaluator executes — no `.tg` extern, no loop, no `#[partial]`. The body
+/// below is the loop that TODO was written to excuse, and replacing it is
+/// ADR 20.8.26d: it deletes a termination opt-out and makes 26 call chains
+/// (7 files) evaluator-executable, because `tg_string_append_char` is not in
+/// `tungsten info eval externs` and `StrConcat` puts no extern DECLARATION on
+/// the chain for the evaluator to refuse. Compiled code still calls a runtime
+/// `tg_string_concat` either way — the difference is the evaluator, not the
+/// binary. **Do not add a concatenation FFI.**
+pub fn string_concat(a: String, b: String) -> String {
+    a ++ b
+}
+
+/// Join list of strings with separator.
+pub fn string_join(parts: List<String>, sep: String) -> String {
+    match parts {
+        Nil() => "",
+        Cons(first, rest) => match rest {
+            Nil() => first,
+            Cons(_, _) => string_concat(string_concat(first, sep), string_join(rest, sep))
+        }
+    }
+}
+
+/// Check if a string contains a substring.
+pub fn string_contains(haystack: String, needle: String) -> Bool {
+    let h_len = string_len(haystack);
+    let n_len = string_len(needle);
+    if n_len == 0 {
+        true
+    } else if n_len > h_len {
+        false
+    } else {
+        string_contains_loop(haystack, needle, 0, h_len - n_len + 1, n_len)
+    }
+}
+
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
+fn string_contains_loop(haystack: String, needle: String, i: Nat, limit: Nat, n_len: Nat) -> Bool {
+    if i >= limit {
+        false
+    } else {
+        if string_match_at(haystack, needle, i, n_len) {
+            true
+        } else {
+            string_contains_loop(haystack, needle, i + 1, limit, n_len)
+        }
+    }
+}
+
+fn string_match_at(haystack: String, needle: String, offset: Nat, n_len: Nat) -> Bool {
+    string_match_at_loop(haystack, needle, offset, 0, n_len)
+}
+
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
+fn string_match_at_loop(haystack: String, needle: String, offset: Nat, i: Nat, n_len: Nat) -> Bool {
+    if i >= n_len {
+        true
+    } else {
+        let ch = string_char_at_internal(haystack, offset + i);
+        let cn = string_char_at_internal(needle, i);
+        if ch != cn {
+            false
+        } else {
+            string_match_at_loop(haystack, needle, offset, i + 1, n_len)
+        }
+    }
+}

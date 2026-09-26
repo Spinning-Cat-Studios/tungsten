@@ -1,4 +1,4 @@
-//! Cache I/O FFI functions for L2 elaboration caching (ADR 19.5.26e).
+//! Cache I/O FFI functions for self-host elaboration caching (ADR 19.5.26e).
 //!
 //! Provides SHA-256 hashing, recursive directory creation, and binary
 //! file I/O for the self-hosted compiler's elaboration cache.

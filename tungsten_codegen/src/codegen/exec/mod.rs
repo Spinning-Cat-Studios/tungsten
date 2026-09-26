@@ -8,9 +8,12 @@
 //! - `inference`: Type inference for code generation
 //! - `globals`: Global references and extern calls
 
+#[cfg(test)]
+mod cast_tests;
 pub(crate) mod closures;
 pub(crate) mod control;
 pub(crate) mod direct_calls;
 pub(crate) mod globals;
 pub(crate) mod inference;
+pub(crate) mod merge;
 pub(crate) mod polymorphism;

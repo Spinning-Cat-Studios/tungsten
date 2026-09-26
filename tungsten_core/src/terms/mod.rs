@@ -10,13 +10,14 @@
 //!     | extern "sym" | a < b | a <= b | a > b | a >= b  (Phase 3-Prep)
 //!     | `char_at` s n | ref v | get r | set r v  (Phase 3-Prep)
 
-mod analysis;
+pub mod analysis;
 mod constructors;
 mod constructors_arith;
 mod constructors_data;
 mod constructors_native;
 mod display;
 mod substitution;
+pub mod termination;
 mod traversal;
 
 use serde::{Deserialize, Serialize};
@@ -318,7 +319,33 @@ pub enum Term {
     /// Transparent to semantics (evaluation, typing, substitution) —
     /// codegen sets `set_current_debug_location()` on encountering this.
     Spanned(Box<Term>, TermSpan),
+
+    // === Signed Integers (ADR 14.9.26c) ===
+    // Appended, never interleaved with the `Nat` nodes: the cache is
+    // positional, and the evaluator dispatches on the SHAPE — `NatSub(3, 5)`
+    // is 0 and `IntBin(Sub, 3, 5)` is −2, with no type in hand to tell them
+    // apart.
+    /// Signed integer literal
+    IntLit(i64),
+
+    /// Signed binary operation: arithmetic yields `Int`, comparison `Bool`.
+    /// `+ - *` trap on overflow; `/ %` trap on a zero divisor and on `MIN / -1`.
+    IntBin(IntBinOp, Box<Term>, Box<Term>),
+
+    /// Signed negation: −a (traps on `MIN`)
+    IntNeg(Box<Term>),
+
+    /// `to_int(n)`: the identity on the value; traps above the signed maximum
+    NatToInt(Box<Term>),
+
+    /// `from_int(i)`: clamps negatives to 0 (Lean's `Int.toNat`)
+    IntToNat(Box<Term>),
 }
+
+pub use constructors_arith::IntBinOp;
+
+#[cfg(test)]
+mod int_tests;
 
 #[cfg(test)]
 mod tests;

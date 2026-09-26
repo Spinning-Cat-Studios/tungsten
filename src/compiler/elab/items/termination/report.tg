@@ -1,0 +1,124 @@
+// src/compiler/elab/items/termination/report.tg
+// Reporting half of the termination mirror (ADR 19.8.26d §2.3).
+//
+// Turns the rejections the shared engine found into E0710 / E0711 diagnostics,
+// and locates each at the span of the definition it names.
+
+use lexer::span::{Span, span_new};
+use parser::ast::{Item, ItemFn, ItemTheorem, ItemLemma, ItemAxiom, ident_name, item_span};
+use driver::ffi::{List, Nil, Cons, cstring_to_string};
+use driver::util::strings::{string_split_once};
+use elab::ffi::{
+    tg_termination_failure_render,
+    TERMINATION_KIND_PARTIAL_IN_PROOF
+};
+use elab::error::{
+    ElabError, ElabErrorKind, ErrCannotProveTermination, ErrPartialInProof, elab_error_new
+};
+
+// ===========================================================================
+// THE REPORT
+// ===========================================================================
+
+/// Render `count` rejections against `items`, prepending them to `errors`.
+///
+/// `items` is only ever walked when `count` is non-zero, which is why the
+/// caller may hand over a list it had to rebuild: the clean path — every run
+/// of a healthy corpus — pays nothing for it.
+pub fn report_termination_failures(
+    errors: List<ElabError>,
+    items: List<Item>,
+    count: Nat
+) -> List<ElabError> {
+    report_termination_rec(errors, items, 0, count)
+}
+
+// Partial (ADR 19.8.26d): the loop is over a Nat index, which has no subterms
+// to descend on -- a measure recursion, not a descent. Executable compiler
+// code no proof reaches; E0063 guards that.
+#[partial]
+fn report_termination_rec(
+    errors: List<ElabError>,
+    items: List<Item>,
+    index: Nat,
+    count: Nat
+) -> List<ElabError> {
+    if index >= count {
+        errors
+    } else {
+        let next = Cons(termination_failure_error(items, index), errors);
+        report_termination_rec(next, items, index + 1, count)
+    }
+}
+
+/// One rejection as an `ElabError`, pointed at the definition it names.
+fn termination_failure_error(items: List<Item>, index: Nat) -> ElabError {
+    let rendered = cstring_to_string(tg_termination_failure_render(index));
+    let (kind, rest) = string_split_once(rendered, termination_newline_char());
+    let (function, message) = string_split_once(rest, termination_newline_char());
+    let span = find_termination_span(items, function);
+    elab_error_new(termination_error_kind(kind, message), span)
+}
+
+/// Which diagnostic a rejection becomes.
+///
+/// The two are not interchangeable: E0711 says a proof reached a partial
+/// constant, which is repaired by removing the dependency, and E0710 says a
+/// recursion did not descend, which is repaired by descending or by annotating.
+fn termination_error_kind(kind: String, message: String) -> ElabErrorKind {
+    if kind == TERMINATION_KIND_PARTIAL_IN_PROOF() {
+        ErrPartialInProof(message)
+    } else {
+        ErrCannotProveTermination(message)
+    }
+}
+
+// ===========================================================================
+// THE WIRE FORMAT
+// ===========================================================================
+//
+// `tg_termination_failure_render` returns "<kind>\n<function>\n<message>". The
+// kind and the name travel beside the message rather than only inside it
+// because both are needed as DATA — the kind selects the error code, the name
+// finds the span — and parsing either back out of an English sentence would be
+// a second thing that can disagree.
+
+fn termination_newline_char() -> Nat { 10 }
+
+// ===========================================================================
+// SPAN LOOKUP
+// ===========================================================================
+
+/// The span of the definition named `function`, or an empty span when it is
+/// not among `items`.
+///
+/// A miss is a *location* failure, never a verdict one: the rejection is
+/// reported either way, because suppressing a soundness error for want of a
+/// span would be the silent-cap shape this gate exists to close.
+fn find_termination_span(items: List<Item>, function: String) -> Span {
+    match items {
+        Nil() => termination_no_span(),
+        Cons(item, rest) =>
+            if termination_item_defines(item, function) {
+                item_span(item)
+            } else {
+                find_termination_span(rest, function)
+            }
+    }
+}
+
+/// The span a rejection gets when its definition is not among the items.
+fn termination_no_span() -> Span {
+    span_new(0, 0, "")
+}
+
+/// Whether `item` is the definition of `function`.
+fn termination_item_defines(item: Item, function: String) -> Bool {
+    match item {
+        ItemFn(f) => ident_name(f.name) == function,
+        ItemTheorem(t) => ident_name(t.name) == function,
+        ItemLemma(t) => ident_name(t.name) == function,
+        ItemAxiom(a) => ident_name(a.name) == function,
+        _ => false
+    }
+}

@@ -1,0 +1,186 @@
+// Unit tests for StringBuilder (ADR 14.9.26a AC 1, AC 2).
+//
+// Cost 5: every assertion here is a RUNTIME comparison of the string a
+// builder hands out against the `++` fold over the same pieces. The six
+// `tg_string_builder_*` externs have evaluator arms, so these run on
+// `tungsten test`; `--assertion-census` is what proves none went Stuck.
+//
+// This file is its own entry and must NEVER be imported from
+// `src/compiler/main.tg`: the self-hosted compiler declares extern calls but
+// cannot lower them, so a call reachable from `main.tg` would break the
+// fixed point. The must-fail twin is `mustfail_string_builder.tg`.
+
+// Full module tree (matches test_string_concat.tg): with only `mod driver`,
+// Signature Collection fails resolving `Option` in driver::util (ADR 2.7.26b T5b).
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_string, assert_eq_nat};
+use driver::ffi::{List, Nil, Cons};
+use driver::ffi::builder::{
+    StringBuilder, MkStringBuilder, string_builder_new, string_builder_with_capacity,
+    push_str, push_char, string_builder_len, to_string
+};
+
+// ---------------------------------------------------------------------------
+// Helpers: the same pieces, through the builder and through `++`
+// ---------------------------------------------------------------------------
+
+/// Push every element of `parts`, in order. The builder threads through as
+/// the accumulator — the fold-through shape the module documents.
+fn push_all(sb: StringBuilder, parts: List<String>) -> StringBuilder {
+    match parts {
+        Nil() => sb,
+        Cons(s, rest) => push_all(push_str(sb, s), rest)
+    }
+}
+
+/// The `++` fold over the same list: the oracle every content test compares
+/// against.
+fn concat_all(acc: String, parts: List<String>) -> String {
+    match parts {
+        Nil() => acc,
+        Cons(s, rest) => concat_all(acc ++ s, rest)
+    }
+}
+
+/// Push `piece` `n` times.
+// Partial (ADR 11.8.26b): `n` descends by subtraction, not on a structural
+// subterm — a counted loop, which is the shape the termination gate refuses.
+#[partial]
+fn push_repeated(sb: StringBuilder, piece: String, n: Nat) -> StringBuilder {
+    if n == 0 { sb } else { push_repeated(push_str(sb, piece), piece, n - 1) }
+}
+
+/// `piece` concatenated `n` times, through `++`, accumulator-first so the
+/// evaluator's recursion depth stays the loop count rather than the string.
+#[partial]
+fn concat_repeated(acc: String, piece: String, n: Nat) -> String {
+    if n == 0 { acc } else { concat_repeated(acc ++ piece, piece, n - 1) }
+}
+
+// ---------------------------------------------------------------------------
+// AC 2: contents equal the `++` fold
+// ---------------------------------------------------------------------------
+
+/// An untouched builder yields the empty string.
+pub fn test_empty_builder_is_empty_string() -> Unit {
+    assert_eq_string(to_string(string_builder_new()), "")
+}
+
+/// A single push yields exactly that piece.
+pub fn test_single_push() -> Unit {
+    assert_eq_string(to_string(push_str(string_builder_new(), "hello")), "hello")
+}
+
+/// Pushing the pieces of a list yields the same string as folding them with
+/// `++`. This is the test the must-fail twin inverts, so its NAME is the
+/// signature `check-mustfail-fixtures` looks for — rename both together.
+pub fn test_pushes_equal_concat_fold() -> Unit {
+    let parts: List<String> = Cons("the ", Cons("quick ", Cons("brown ", Cons("fox", Nil))));
+    let built = to_string(push_all(string_builder_new(), parts));
+    let folded = concat_all("", parts);
+    assert_eq_string(built, folded);
+    assert_eq_string(built, "the quick brown fox")
+}
+
+/// Two `string_builder_new()` calls in ONE body are two builders.
+///
+/// The regression this pins is the evaluator's, not the runtime's:
+/// `string_builder_new` is a nullary global, and call-by-need memoization
+/// used to force it once per env — so every `new` in a body aliased one
+/// handle, and the second `to_string` aborted on a consumed builder while
+/// native code printed both strings. `EvalEnv::lookup` now refuses to memoize
+/// a global whose forcing performed an effect (ADR 14.9.26a).
+pub fn test_two_builders_in_one_body_are_distinct() -> Unit {
+    let first = push_str(string_builder_new(), "one");
+    let second = push_str(string_builder_new(), "two");
+    assert_eq_string(to_string(first), "one");
+    assert_eq_string(to_string(second), "two")
+}
+
+/// Multi-byte pieces survive byte for byte: `len` counts BYTES, and the text
+/// comes back unchanged.
+pub fn test_multibyte_pieces_round_trip() -> Unit {
+    // μ and α are two bytes each: 2 + 2 + 1 + 4.
+    let sb = push_str(push_str(string_builder_new(), "μα_"), "List");
+    assert_eq_nat(string_builder_len(sb), 9);
+    assert_eq_string(to_string(sb), "μα_List")
+}
+
+/// 10 000 pushes of a 44-byte piece equal the 10 000-way `++` fold.
+pub fn test_ten_thousand_pushes_equal_concat_fold() -> Unit {
+    let piece = "the quick brown fox jumps over the lazy dog!";
+    let sb = push_repeated(string_builder_new(), piece, 10000);
+    assert_eq_nat(string_builder_len(sb), 440000);
+    assert_eq_string(to_string(sb), concat_repeated("", piece, 10000))
+}
+
+// ---------------------------------------------------------------------------
+// AC 2: `len` equals the byte length after each push
+// ---------------------------------------------------------------------------
+
+pub fn test_len_tracks_bytes_after_each_push() -> Unit {
+    let sb = string_builder_new();
+    assert_eq_nat(string_builder_len(sb), 0);
+    let sb = push_str(sb, "ab");
+    assert_eq_nat(string_builder_len(sb), 2);
+    let sb = push_str(sb, "");
+    assert_eq_nat(string_builder_len(sb), 2);
+    let sb = push_str(sb, "cde");
+    assert_eq_nat(string_builder_len(sb), 5)
+}
+
+// ---------------------------------------------------------------------------
+// push_char: a Unicode scalar, encoded as UTF-8
+// ---------------------------------------------------------------------------
+
+/// U+00E9 (é) is two bytes, U+1F600 (😀) is four; both come back as text.
+pub fn test_push_char_multibyte_scalar() -> Unit {
+    let sb = push_char(push_char(push_char(string_builder_new(), 65), 233), 128512);
+    assert_eq_nat(string_builder_len(sb), 7);
+    assert_eq_string(to_string(sb), "Aé😀")
+}
+
+// ---------------------------------------------------------------------------
+// with_capacity: pre-sized, and observable through `len` only
+// ---------------------------------------------------------------------------
+
+/// `with_capacity(n)` then `n` bytes: the contents are what was pushed and
+/// `len` is `n`. Capacity is not exposed, so "no regrowth" is asserted on the
+/// Rust side (`with_capacity_then_that_many_bytes_does_not_regrow`); here the
+/// claim is that a pre-sized builder behaves as an empty one.
+pub fn test_with_capacity_then_that_many_bytes() -> Unit {
+    let sb = string_builder_with_capacity(8);
+    assert_eq_nat(string_builder_len(sb), 0);
+    let sb = push_str(sb, "12345678");
+    assert_eq_nat(string_builder_len(sb), 8);
+    assert_eq_string(to_string(sb), "12345678")
+}
+
+// ---------------------------------------------------------------------------
+// ADR 18.9.26d AC 2: a `match` on the single-constructor wrapper
+// ---------------------------------------------------------------------------
+//
+// `StringBuilder` unwraps to its `Nat` payload, so the scrutinee's type is a
+// bare scalar — the shape the self-hosted dispatcher used to refuse with
+// "cannot match on this type". The handle here is fabricated and never reaches
+// an extern: these assert the pattern binds the payload itself.
+
+/// Checked position: the body's expected type is the function's return type.
+fn builder_handle_checked(sb: StringBuilder) -> Nat {
+    match sb { MkStringBuilder(h) => h }
+}
+
+/// Synth position: the `let` gives the match no expected type.
+fn builder_handle_synth(sb: StringBuilder) -> Nat {
+    let handle = match sb { MkStringBuilder(h) => h + 1 };
+    handle
+}
+
+pub fn test_single_constructor_match_binds_the_payload() -> Unit {
+    assert_eq_nat(builder_handle_checked(MkStringBuilder(41)), 41);
+    assert_eq_nat(builder_handle_synth(MkStringBuilder(41)), 42)
+}

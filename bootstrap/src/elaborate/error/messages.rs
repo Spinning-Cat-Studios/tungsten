@@ -1,6 +1,7 @@
 //! Default messages for elaboration error kinds.
 //!
-//! Split from `kind.rs` to keep that file under the 400-line limit.
+//! Split from `kind.rs` to keep that file under the 400-line limit. (That
+//! file is now `kind/`, split again by ADR 11.8.26c for the same reason.)
 
 use super::kind::ElabErrorKind;
 
@@ -65,6 +66,21 @@ impl ElabErrorKind {
 
             // Pattern matching errors
             ElabErrorKind::NonExhaustiveMatch => "non-exhaustive match patterns".to_string(),
+            ElabErrorKind::MatchScrutineeNotAdt {
+                adt_name: Some(name),
+                found,
+            } => format!(
+                "match arms use constructors of `{}`, but the scrutinee has type `{}`",
+                name, found
+            ),
+            ElabErrorKind::MatchScrutineeNotAdt {
+                adt_name: None,
+                found,
+            } => format!(
+                "match arms are constructor patterns, but the scrutinee has \
+                 non-ADT type `{}`",
+                found
+            ),
             ElabErrorKind::UnreachableArm => "unreachable pattern".to_string(),
             ElabErrorKind::DeadCodeAfterReturn => "unreachable code after `return`".to_string(),
             ElabErrorKind::PatternTooDeep { depth, max } => {
@@ -145,6 +161,18 @@ impl ElabErrorKind {
             ElabErrorKind::RecursiveAlias(name) => {
                 format!("recursive type alias `{}` references itself", name)
             }
+            ElabErrorKind::NonStrictlyPositive { .. } => self.format_positivity_message(),
+
+            // Termination (ADR 29.6.26e) — the headline is rendered by the
+            // engine in `tungsten_core`, so the gate cannot word a rejection
+            // differently from `doctor check type termination`.
+            ElabErrorKind::CannotProveTermination { headline, .. } => headline.clone(),
+            ElabErrorKind::PartialInProof { proof, tainted } => format!(
+                "`{proof}` is a proof, so it may not depend on the partial constant `{tainted}`"
+            ),
+
+            // Nested inductive families (ADR 11.8.26c) — delegated, like E0061
+            ElabErrorKind::NestedRecursiveFamily { .. } => self.format_nested_family_message(),
 
             // Equality proof errors (ADR 21.5.26d) — delegated
             ElabErrorKind::ReflExpectedEquality(_)
@@ -174,11 +202,107 @@ impl ElabErrorKind {
                 )
             }
 
+            ElabErrorKind::ReturnOutsideFunction => {
+                "`return` outside of a function body".to_string()
+            }
+
+            ElabErrorKind::ComparatorUnavailable(ty) => {
+                format!(
+                    "no comparator available for type `{}` \
+                     (supported: primitives, tuples, sums/ADTs, records, and lists)",
+                    ty
+                )
+            }
+
+            ElabErrorKind::IntLiteralOutOfRange(literal) => {
+                format!(
+                    "integer literal `{}` is out of range for `Int` \
+                     (the signed 64-bit range is -9223372036854775808 to 9223372036854775807)",
+                    literal
+                )
+            }
+
+            ElabErrorKind::BuiltinTypeRedefined(name) => {
+                format!(
+                    "cannot redefine the builtin type `{}` — builtin lookup precedes \
+                     user types, so this definition would be unreachable",
+                    name
+                )
+            }
+
+            ElabErrorKind::InternalError(msg) => {
+                format!(
+                    "internal compiler error: {} — this is a bug in the Tungsten \
+                     compiler, not in your program; please report it",
+                    msg
+                )
+            }
+
             ElabErrorKind::Other(msg) => msg.clone(),
         }
     }
 
     /// Format messages for equality proof error kinds (ADR 21.5.26d).
+    /// Message for E0061 (ADR 7.8.26e §2.2).
+    ///
+    /// The type, constructor/record, field, offending occurrence **and** the
+    /// inherited-through chain all live in the primary message rather than in
+    /// notes, because the ariadne renderer surfaces only the last note — and
+    /// the intermediate type and parameter are the one part of a D2-shaped
+    /// violation the reader cannot see in their own source.
+    fn format_positivity_message(&self) -> String {
+        let ElabErrorKind::NonStrictlyPositive {
+            type_name,
+            ctor_name,
+            is_record,
+            field,
+            occurrence,
+            via,
+        } = self
+        else {
+            return String::new();
+        };
+        let position = if *is_record {
+            format!("record `{type_name}`, {field}")
+        } else {
+            format!("constructor `{ctor_name}`, {field}")
+        };
+        let through: String = via
+            .iter()
+            .map(|(intermediate, param)| format!(" through `{intermediate}`'s parameter `{param}`"))
+            .collect();
+        format!(
+            "`{type_name}` is not strictly positive: `{occurrence}` reaches a \
+             forbidden position in {position}{through}"
+        )
+    }
+
+    /// Message for E0064 (ADR 11.8.26c §2.2).
+    ///
+    /// The **binder** is named in the primary message rather than left to a
+    /// tool, because the tool that would print it — `info type type-encoding` —
+    /// is blocked by this very gate, exactly as `doctor check type positivity`
+    /// is by E0061. `doctor tool-reachability` carries that pairing so the
+    /// wording cannot drift back to "inspect it with …".
+    fn format_nested_family_message(&self) -> String {
+        let ElabErrorKind::NestedRecursiveFamily {
+            type_name,
+            binder,
+            nested_under,
+        } = self
+        else {
+            return String::new();
+        };
+        let nesting = nested_under
+            .as_ref()
+            .map(|generic| format!(" under generic type `{generic}`"))
+            .unwrap_or_default();
+        format!(
+            "cannot match on `{type_name}`: its recursive occurrence is nested{nesting}, \
+             so its μ-encoding (binder `{binder}`) does not unfold to a structural type"
+        )
+    }
+
     fn format_equality_message(&self) -> String {
         match self {
             ElabErrorKind::ReflExpectedEquality(ty) => {
@@ -209,86 +333,5 @@ impl ElabErrorKind {
         }
     }
 
-    /// Format messages for module/import error kinds.
-    fn format_module_message(&self) -> String {
-        match self {
-            ElabErrorKind::ModuleNotFound { module, suggestion } => {
-                if let Some(s) = suggestion {
-                    format!("cannot find module `{}`; did you mean `{}`?", module, s)
-                } else {
-                    format!("cannot find module `{}`", module)
-                }
-            }
-            ElabErrorKind::ItemNotFoundInModule { module, item } => {
-                format!("cannot find `{}` in module `{}`", item, module)
-            }
-            ElabErrorKind::DuplicateImport {
-                name,
-                first_source_module,
-                second_source_module,
-                ..
-            } => {
-                if first_source_module == second_source_module {
-                    format!("the name `{}` is imported multiple times", name)
-                } else {
-                    format!(
-                        "the name `{}` is imported from both `{}` and `{}`",
-                        name, first_source_module, second_source_module
-                    )
-                }
-            }
-            ElabErrorKind::GlobConflict {
-                name,
-                first_module,
-                second_module,
-            } => {
-                format!(
-                    "`{}` is imported from both `{}::*` and `{}::*`",
-                    name, first_module, second_module
-                )
-            }
-            ElabErrorKind::UnresolvedImport(path) => {
-                format!("cannot resolve import `{}`", path)
-            }
-            ElabErrorKind::PrivateModule {
-                module_path,
-                accessed_from,
-            } => {
-                format!(
-                    "module `{}` is private and cannot be accessed from `{}`",
-                    module_path, accessed_from
-                )
-            }
-            ElabErrorKind::PrivateItem {
-                item_name,
-                item_kind,
-                defined_in,
-                accessed_from,
-            } => {
-                format!(
-                    "{} `{}` is private (defined in `{}`) and cannot be accessed from `{}`",
-                    item_kind, item_name, defined_in, accessed_from
-                )
-            }
-            ElabErrorKind::PublicItemLeak {
-                item_name,
-                item_kind,
-                required_visibility,
-                leak_path,
-                leaked_visibility,
-            } => {
-                let path_str = leak_path.join(" -> ");
-                format!(
-                    "{} {} `{}` exposes {} type `{}` in its signature (via: {})",
-                    required_visibility,
-                    item_kind,
-                    item_name,
-                    leaked_visibility,
-                    leak_path.last().unwrap_or(&item_name.clone()),
-                    path_str
-                )
-            }
-            _ => unreachable!("format_module_message called with non-module error"),
-        }
-    }
+    // `format_module_message`: `messages_modules.rs`.
 }

@@ -5,8 +5,10 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 
-use crate::typecheck::{type_of, types_equal, TypeError};
+use crate::typecheck::{type_of, TypeError};
 
+use super::types::node_equality::type_handles_equal;
+use super::types::nodes::{import_type, materialize_type};
 use super::{with_arena, with_arena_ref, CtxHandle, TermHandle, TypeHandle};
 
 // ============================================================================
@@ -37,8 +39,8 @@ pub unsafe extern "C" fn tg_typecheck(
             arena.set_error("Invalid context handle");
             return false;
         };
-        let term = if let Some(t) = arena.get_term(term) {
-            t.clone()
+        let term = if let Some(t) = crate::ffi::terms::nodes::materialize_term(arena, term) {
+            t
         } else {
             arena.set_error("Invalid term handle");
             return false;
@@ -47,7 +49,7 @@ pub unsafe extern "C" fn tg_typecheck(
         match type_of(&ctx, &term) {
             Ok(ty) => {
                 arena.clear_error();
-                let handle = arena.alloc_type(ty);
+                let handle = import_type(arena, &ty);
                 *out_type = handle;
                 true
             }
@@ -63,28 +65,10 @@ pub unsafe extern "C" fn tg_typecheck(
 ///
 /// Returns `true` if the types are equal, `false` otherwise.
 /// TypeError (poison) unifies with any type to prevent error cascades.
+/// Runs directly on the node DAG — no materialization (ADR 2.7.26a §4).
 #[no_mangle]
 pub extern "C" fn tg_types_equal(t1: TypeHandle, t2: TypeHandle) -> bool {
-    use crate::types::Type;
-    with_arena_ref!(|arena| {
-        let ty1 = match arena.get_type(t1) {
-            Some(t) => t,
-            None => {
-                return false;
-            }
-        };
-        let ty2 = match arena.get_type(t2) {
-            Some(t) => t,
-            None => {
-                return false;
-            }
-        };
-        // TypeError unifies with anything — suppress secondary mismatches
-        if matches!(ty1, Type::Error) || matches!(ty2, Type::Error) {
-            return true;
-        }
-        types_equal(ty1, ty2)
-    })
+    with_arena_ref!(|arena| type_handles_equal(arena, t1, t2))
 }
 
 // ============================================================================
@@ -95,10 +79,11 @@ pub extern "C" fn tg_types_equal(t1: TypeHandle, t2: TypeHandle) -> bool {
 ///
 /// Returns a CString pointer (caller owns the memory).
 /// Returns null pointer if the handle is invalid.
+/// Materializes transiently — display is a cold path.
 #[no_mangle]
 pub extern "C" fn tg_type_format_display(ty: TypeHandle) -> *const c_char {
     with_arena_ref!(|arena| {
-        match arena.get_type(ty) {
+        match materialize_type(arena, ty) {
             Some(t) => {
                 let display = format!("{t}");
                 match CString::new(display) {

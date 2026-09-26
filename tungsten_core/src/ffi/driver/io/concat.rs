@@ -4,9 +4,10 @@
 //! - `tg_string_concat`: fresh allocation, preserves both inputs
 //! - `tg_string_concat_owned`: realloc on left buffer (left is consumed)
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 use std::ptr;
 
+use super::c_allocator;
 use super::strings::TgString;
 
 // ============================================================================
@@ -35,7 +36,9 @@ pub extern "C" fn tg_string_concat(left: TgString, right: TgString) -> TgString 
         };
     }
 
-    let buf = unsafe { libc::malloc(new_len as usize).cast::<u8>() };
+    // The shim's `malloc` is the runtime symbol, which records the request
+    // against the profiler itself (ADR 14.9.26b) — no external record here.
+    let buf = unsafe { c_allocator::malloc(new_len as usize).cast::<u8>() };
     if buf.is_null() {
         std::process::abort();
     }
@@ -65,8 +68,14 @@ pub extern "C" fn tg_string_concat(left: TgString, right: TgString) -> TgString 
 /// the allocator can extend in-place. The left operand is invalidated
 /// after this call — the caller must NOT use left.ptr afterward.
 ///
+/// The realloc goes through the runtime symbol (ADR 14.9.26b): in arena mode
+/// it is `Arena::grow_last`, in place when the left buffer is the thread's
+/// most recent allocation and a copy otherwise — never libc `realloc` on an
+/// arena pointer. That copy path is B1's first blocker: the old left buffer
+/// is not reclaimed until a region frees it in bulk.
+///
 /// # Safety
-/// - `left.ptr` must be a heap-allocated pointer from libc::malloc
+/// - `left.ptr` must be a heap-allocated pointer from the runtime allocator
 ///   (NOT a string literal, NOT a slice into another string)
 /// - The caller must guarantee `left` is dead after this call
 /// - `right.ptr` must be valid for `right.len` bytes, or null
@@ -78,12 +87,17 @@ pub extern "C" fn tg_string_concat_owned(left: TgString, right: TgString) -> TgS
         return tg_string_concat(left, right);
     }
 
-    let new_ptr =
-        unsafe { libc::realloc(left.ptr as *mut libc::c_void, new_len as usize).cast::<u8>() };
+    let new_ptr = unsafe {
+        c_allocator::realloc(left.ptr as *mut c_void, left.len as usize, new_len as usize)
+            .cast::<u8>()
+    };
 
     if new_ptr.is_null() {
         std::process::abort();
     }
+    // Record only the growth — realloc reuses left's buffer when it can, and
+    // `__tungsten_realloc` records nothing itself (it carries no class).
+    tungsten_runtime::alloc_profile_record_external(right.len, tungsten_runtime::CLASS_STRING);
 
     if !right.ptr.is_null() && right.len > 0 {
         unsafe {

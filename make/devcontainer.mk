@@ -2,20 +2,36 @@
 #
 # Commands for running the compiler inside a dev container with LLVM 18.
 # Requires: npm install -g @devcontainers/cli
+#
+# The x86_64 (QEMU) arm lives in make/devcontainer/x86_64.mk (ADR 31.7.26c) and
+# the self-host Core diagnostics in make/devcontainer/selfhost-core.mk (ADR
+# 3.9.26h); help-devcontainer below still prints every arm as one section.
+
+include make/devcontainer/x86_64.mk
+include make/devcontainer/selfhost-core.mk
 
 .PHONY: devcontainer-up devcontainer-test devcontainer-test-all devcontainer-build
 .PHONY: devcontainer-compile devcontainer-compile-run devcontainer-run devcontainer-check devcontainer-eval
-.PHONY: devcontainer-check-l2 devcontainer-build-check-l2 devcontainer-check-l3 devcontainer-build-check-l3
+.PHONY: devcontainer-check-selfhost devcontainer-build-check-selfhost devcontainer-check-selfhost-nocodegen devcontainer-build-check-selfhost-nocodegen
 .PHONY: devcontainer-check-l4 devcontainer-check-ir-determinism devcontainer-check-ir-determinism-fast devcontainer-check-ir-determinism-full
 .PHONY: devcontainer-check-ir-fingerprint-full
-.PHONY: devcontainer-dump-core devcontainer-check-tyvar-escape devcontainer-ensure-lib-symlink
+.PHONY: devcontainer-ensure-lib-symlink
 .PHONY: devcontainer-self-compile devcontainer-self-compile-with-check devcontainer-self-compile-step2
 .PHONY: devcontainer-self-compile-split devcontainer-self-compile-ir devcontainer-self-compile-llc devcontainer-self-compile-link
-.PHONY: devcontainer-self-compile-verify devcontainer-self-compile-dev devcontainer-self-compile-fast
-.PHONY: devcontainer-self-compile-verify-fast devcontainer-self-compile-direct devcontainer-full-bootstrap
+.PHONY: devcontainer-build-dev-tool devcontainer-self-compile-verify devcontainer-self-compile-dev devcontainer-self-compile-dev-fast devcontainer-self-compile-fast
+.PHONY: devcontainer-self-compile-verify-fast devcontainer-self-compile-direct devcontainer-full-bootstrap devcontainer-selfcompiled-stored-generics
 .PHONY: devcontainer-doctor-self-test devcontainer-doctor-self-test-full
-.PHONY: devcontainer-up-x86 devcontainer-build-x86 devcontainer-self-compile-x86 devcontainer-self-compile-verify-x86
-.PHONY: devcontainer-down devcontainer-down-x86 devcontainer-profile
+.PHONY: devcontainer-down devcontainer-profile devcontainer-target-reset
+
+# ADR 24.7.26b: the arm64 devcontainer isolates its Cargo build output in a
+# container-local named volume (CARGO_TARGET_DIR=/build/target), so release
+# artifacts no longer live under the bind-mounted ./target. Recipes that exec
+# those artifacts must expand CARGO_TARGET_DIR *inside* the container — hence
+# the `bash -c '...'` wrappers below. This snippet expands to that path in the
+# container, falling back to ./target when unset (pre-24.7.26b containers /
+# host). It is `$$`-escaped for make and must be used INSIDE a single-quoted
+# bash -c payload so the host shell never expands it.
+DC_TARGET = $${CARGO_TARGET_DIR:-target}
 
 # Start the dev container
 devcontainer-up:
@@ -30,8 +46,17 @@ devcontainer-test-all:
 	devcontainer exec --workspace-folder . cargo test
 
 # Build with codegen in dev container
-devcontainer-build:
+devcontainer-build: devcontainer-build-dev-tool
 	devcontainer exec --workspace-folder . cargo build --release
+
+# Build `tungsten-dev`, the in-container self-compile orchestrator. It lives
+# OUTSIDE the workspace `default-members`, so a bare `cargo build --release`
+# does NOT produce it — the self-compile targets below then fail with a bare
+# "No such file or directory" that says nothing about the cause (ADR 17.7.26e
+# retrospective). Every target that invokes it depends on this one; the build is
+# a no-op (~2 s) once warm.
+devcontainer-build-dev-tool:
+	@devcontainer exec --workspace-folder . cargo build --release -p tungsten-dev
 
 # Compile to native binary in dev container
 devcontainer-compile:
@@ -86,34 +111,26 @@ else
 	devcontainer exec --workspace-folder . cargo run -p tungsten_bootstrap -- eval "$(EXPR)"
 endif
 
-# Check L2 self-hosted compiler for type errors (uses release build)
-devcontainer-check-l2:
-	devcontainer exec --workspace-folder . ./target/release/tungsten check src/compiler/main.tg --max-errors=0
+# Self-host check: the codegen (release) bootstrap type-checks the self-hosted
+# compiler source. Codegen is the unmarked default; the -nocodegen sibling
+# below carries the marker.
+devcontainer-check-selfhost:
+	devcontainer exec --workspace-folder . bash -c '$(DC_TARGET)/release/tungsten check src/compiler/main.tg --max-errors=0'
 
-# Build and check L2 self-hosted compiler
-devcontainer-build-check-l2: devcontainer-build devcontainer-check-l2
+# Build the bootstrap, then run the self-host check
+devcontainer-build-check-selfhost: devcontainer-build devcontainer-check-selfhost
 
-# Dump Core IR for matching definitions (L2, uses release build)
-devcontainer-dump-core:
-ifndef PATTERN
-	@echo "Usage: make devcontainer-dump-core PATTERN=<pattern>"
-	@echo "Examples:"
-	@echo "  make devcontainer-dump-core PATTERN=main"
-	@echo "  make devcontainer-dump-core PATTERN='*'"
-else
-	devcontainer exec --workspace-folder . ./target/release/tungsten check src/compiler/main.tg --dump-core "$(PATTERN)" --max-errors=0
-endif
+# The four self-host Core diagnostics — dump-core, closed-terms,
+# well-typed-terms and tyvar-escape — are in make/devcontainer/selfhost-core.mk.
 
-# Check TyVar escapes in L2 self-hosted compiler (uses release build)
-devcontainer-check-tyvar-escape:
-	devcontainer exec --workspace-folder . ./target/release/tungsten check src/compiler/main.tg --check-tyvar-escape --max-errors=0
-
-# Check L3: bootstrap compiler type-checks the self-hosted source
-devcontainer-check-l3:
+# Self-host check, no-codegen variant: the --no-default-features bootstrap
+# type-checks the same self-hosted source. A build-config difference only —
+# it does NOT run the self-compiled tungsten1.
+devcontainer-check-selfhost-nocodegen:
 	devcontainer exec --workspace-folder . cargo run -p tungsten_bootstrap --no-default-features -- check src/compiler/main.tg --max-errors=0
 
-# Build bootstrap and check L3
-devcontainer-build-check-l3:
+# Build the no-codegen bootstrap, then run the no-codegen self-host check
+devcontainer-build-check-selfhost-nocodegen:
 	devcontainer exec --workspace-folder . cargo build -p tungsten_bootstrap --no-default-features
 	devcontainer exec --workspace-folder . cargo run -p tungsten_bootstrap --no-default-features -- check src/compiler/main.tg --max-errors=0
 
@@ -123,18 +140,31 @@ devcontainer-ensure-lib-symlink:
 
 # Compile the self-hosted compiler to native in dev container (Step 1: bootstrap → tungsten1)
 devcontainer-self-compile:
-	devcontainer exec --workspace-folder . ./target/release/tungsten compile src/compiler/main.tg -o tungsten1 -v
+	devcontainer exec --workspace-folder . bash -c '$(DC_TARGET)/release/tungsten compile src/compiler/main.tg -o tungsten1 -v'
 
-# Compile the self-hosted compiler + check it (Step 1 + Step 2: tungsten1 → tungsten2)
+# Fast self-compile, then the SELF-HOSTED compiler type-checks its own source
+# (ADR 18.9.26d). The only target that gates on `tungsten1 check main.tg` —
+# `-verify-fast` stops at the examples, which is how a refusal reached `main`.
+# The check is the last command, so its exit code is the target's: no pipe (a
+# `| tail` replaces it with the filter's), and `--max-errors 0` with a SPACE —
+# the self-hosted CLI takes the value from the next argument and silently
+# skips `--max-errors=0`.
 devcontainer-self-compile-with-check:
-	devcontainer-self-compile 2>&1 | tail -3 && docker exec -w /workspaces/Tungsten epic_ramanujan ./tungsten1 check src/compiler/main.tg
+	$(MAKE) devcontainer-self-compile-fast
+	devcontainer exec --workspace-folder . ./tungsten1 check src/compiler/main.tg --max-errors 0
 
-# Step 2: tungsten1 compiles itself to tungsten2
+# Step 2: tungsten1 compiles itself to tungsten2. tungsten1 delegates codegen to
+# the BOOTSTRAP, a second prerequisite this target used to leave implicit — and
+# that is the one that broke (ADR 3.9.26b D4). Assert it through the same
+# DC_TARGET as every other recipe; no TUNGSTEN_BOOTSTRAP_BIN, because the
+# resolution order is precisely what this exercises.
 devcontainer-self-compile-step2:
 	@if [ ! -f tungsten1 ]; then \
 		echo "Error: tungsten1 not found. Run 'make devcontainer-self-compile' first."; \
 		exit 1; \
 	fi
+	@devcontainer exec --workspace-folder . bash -c 'test -x $(DC_TARGET)/release/tungsten' || { \
+		echo 'Error: no bootstrap at $$CARGO_TARGET_DIR/release/tungsten — tungsten1 delegates codegen to it. Run: make devcontainer-build'; exit 1; }
 	devcontainer exec --workspace-folder . ./tungsten1 compile src/compiler/main.tg -o tungsten2 -v
 	@echo "✓ Built tungsten2 (self-hosted compiler compiled by tungsten1)"
 
@@ -174,21 +204,21 @@ devcontainer-check-ir-fingerprint-full:
 # Stage 3: Link all .o files to final binary
 devcontainer-self-compile-split:
 	@echo "=== Stage 1/3: Generating LLVM IR (per-file) ==="
-	devcontainer exec --workspace-folder . bash -c 'rm -rf /tmp/tungsten1_ll && mkdir -p /tmp/tungsten1_ll && ./target/release/tungsten compile src/compiler/main.tg --emit-llvm -o /tmp/tungsten1_ll/ -v'
+	devcontainer exec --workspace-folder . bash -c 'rm -rf /tmp/tungsten1_ll && mkdir -p /tmp/tungsten1_ll && $(DC_TARGET)/release/tungsten compile src/compiler/main.tg --emit-llvm -o /tmp/tungsten1_ll/ -v'
 	@echo ""
 	@echo "=== Stage 2/3: Compiling IR to object files (llc) ==="
 	@echo "This may take several minutes..."
 	devcontainer exec --workspace-folder . bash -c 'find /tmp/tungsten1_ll -name "*.ll" | while read f; do echo "  llc $$f"; llc -filetype=obj "$$f" -o "$${f%.ll}.o" -O2 --stats; done'
 	@echo ""
 	@echo "=== Stage 3/3: Linking ==="
-	devcontainer exec --workspace-folder . bash -c 'cc -o tungsten1 $$(find /tmp/tungsten1_ll -name "*.o") target/release/libtungsten_core.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc'
+	devcontainer exec --workspace-folder . bash -c 'cc -o tungsten1 $$(find /tmp/tungsten1_ll -name "*.o") $(DC_TARGET)/release/libtungsten_core.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc'
 	devcontainer exec --workspace-folder . rm -rf /tmp/tungsten1_ll
 	@echo ""
 	@echo "✓ Built tungsten1"
 
 # Generate IR only (for debugging) — writes per-file .ll files to tungsten1_ll/
 devcontainer-self-compile-ir:
-	devcontainer exec --workspace-folder . bash -c 'rm -rf tungsten1_ll && mkdir -p tungsten1_ll && ./target/release/tungsten compile src/compiler/main.tg --emit-llvm -o tungsten1_ll/ -v'
+	devcontainer exec --workspace-folder . bash -c 'rm -rf tungsten1_ll && mkdir -p tungsten1_ll && $(DC_TARGET)/release/tungsten compile src/compiler/main.tg --emit-llvm -o tungsten1_ll/ -v'
 
 # Compile per-file IR to object files (requires tungsten1_ll/ from devcontainer-self-compile-ir)
 devcontainer-self-compile-llc:
@@ -196,106 +226,64 @@ devcontainer-self-compile-llc:
 
 # Link object files to binary (requires tungsten1_ll/*.o from devcontainer-self-compile-llc)
 devcontainer-self-compile-link:
-	devcontainer exec --workspace-folder . bash -c 'cc -o tungsten1 $$(find tungsten1_ll -name "*.o") target/release/libtungsten_core.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc'
+	devcontainer exec --workspace-folder . bash -c 'cc -o tungsten1 $$(find tungsten1_ll -name "*.o") $(DC_TARGET)/release/libtungsten_core.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc'
 	@echo "✓ Linked tungsten1"
 
 # DevContainer self-compile-verify (full tier): self-compile + verify examples.
-devcontainer-self-compile-verify: devcontainer-self-compile
-	devcontainer exec --workspace-folder . ./target/release/tungsten-dev verify
+devcontainer-self-compile-verify: devcontainer-self-compile devcontainer-build-dev-tool
+	devcontainer exec --workspace-folder . bash -c '$(DC_TARGET)/release/tungsten-dev verify'
 
 # Fast self-compile via tungsten-dev (3-stage: IR → llc -O0 → link).
 # Parallelism defaults to nproc/2. Override: TUNGSTEN_CODEGEN_JOBS=N or --parallelism N.
-devcontainer-self-compile-fast:
-	devcontainer exec --workspace-folder . ./target/release/tungsten-dev self-compile --fast
+devcontainer-self-compile-fast: devcontainer-build-dev-tool
+	devcontainer exec --workspace-folder . bash -c '$(DC_TARGET)/release/tungsten-dev self-compile --fast'
 
 # Direct self-compile: emit .o in-process (no llc), single-stage (ADR 9.5.26e §2.1).
-devcontainer-self-compile-direct:
-	devcontainer exec --workspace-folder . ./target/release/tungsten-dev self-compile --direct
+devcontainer-self-compile-direct: devcontainer-build-dev-tool
+	devcontainer exec --workspace-folder . bash -c '$(DC_TARGET)/release/tungsten-dev self-compile --direct'
 
 # Fast self-compile + verify all examples (routine confidence check).
-devcontainer-self-compile-verify-fast: devcontainer-self-compile-fast
-	devcontainer exec --workspace-folder . ./target/release/tungsten-dev verify
+devcontainer-self-compile-verify-fast: devcontainer-self-compile-fast devcontainer-build-dev-tool
+	devcontainer exec --workspace-folder . bash -c '$(DC_TARGET)/release/tungsten-dev verify'
+
+# Self-compiled stored-generic battery (ADR 21.7.26k): run the tungsten1-elaborated
+# 21.7.26e-matrix fixtures against the container's existing ./tungsten1.
+devcontainer-selfcompiled-stored-generics:
+	devcontainer exec --workspace-folder . make selfcompiled-stored-generics-check
+
+# The self-compile tier a developer build rides on. `-dev` takes the default
+# -O2 path; `-dev-fast` overrides it with the llc -O0 tier (ADR 21.8.26a). One
+# recipe with a variable rather than two copies: the diagnostics swap has an
+# error path that must restore the production stub, and a second copy of it is
+# a second place to forget that.
+DEV_SELF_COMPILE_TARGET ?= devcontainer-self-compile
 
 # Developer build in devcontainer: self-compile with diagnostic tools enabled
 devcontainer-self-compile-dev:
 	@echo "=== Building tungsten1 in devcontainer (developer mode — diagnostic tools enabled) ==="
 	@# Step 1: Swap in developer diagnostics
-	@cp src/compiler/driver/ffi/diagnostics.tg src/compiler/driver/ffi/diagnostics.tg.prod
-	@cp src/compiler/driver/ffi/diagnostics_dev.tg src/compiler/driver/ffi/diagnostics.tg
+	@cp src/compiler/driver/ffi/diagnostics/mod.tg src/compiler/driver/ffi/diagnostics/mod.tg.prod
+	@cp src/compiler/driver/ffi/diagnostics/dev.tg src/compiler/driver/ffi/diagnostics/mod.tg
 	@# Step 2: Build (same as devcontainer-self-compile)
-	@$(MAKE) devcontainer-self-compile || { \
-		cp src/compiler/driver/ffi/diagnostics.tg.prod src/compiler/driver/ffi/diagnostics.tg; \
-		rm -f src/compiler/driver/ffi/diagnostics.tg.prod; \
+	@$(MAKE) $(DEV_SELF_COMPILE_TARGET) || { \
+		cp src/compiler/driver/ffi/diagnostics/mod.tg.prod src/compiler/driver/ffi/diagnostics/mod.tg; \
+		rm -f src/compiler/driver/ffi/diagnostics/mod.tg.prod; \
 		exit 1; \
 	}
 	@# Step 3: Restore production stubs
-	@cp src/compiler/driver/ffi/diagnostics.tg.prod src/compiler/driver/ffi/diagnostics.tg
-	@rm -f src/compiler/driver/ffi/diagnostics.tg.prod
+	@cp src/compiler/driver/ffi/diagnostics/mod.tg.prod src/compiler/driver/ffi/diagnostics/mod.tg
+	@rm -f src/compiler/driver/ffi/diagnostics/mod.tg.prod
 	@echo "✓ Built tungsten1 in devcontainer (developer mode)"
 
-# --- x86_64 devcontainer targets (QEMU emulation on ARM Mac) ---
-# These use a separate devcontainer config at .devcontainer/x86_64/ with
-# --platform linux/amd64. Builds are slower due to QEMU but produce real
-# x86_64 binaries. Uses CARGO_TARGET_DIR=/tmp/target_x86 inside the
-# container to avoid conflicting with host-arch build artifacts.
+# Developer build on the fast (llc -O0) tier — the iteration loop for a
+# diagnostic flag, where the binary's own speed does not matter.
+devcontainer-self-compile-dev-fast:
+	@$(MAKE) devcontainer-self-compile-dev DEV_SELF_COMPILE_TARGET=devcontainer-self-compile-fast
 
-# Start the x86_64 dev container
-devcontainer-up-x86:
-	devcontainer up --workspace-folder . --config .devcontainer/x86_64/devcontainer.json
-
-# Build with codegen in x86_64 dev container
-devcontainer-build-x86:
-	devcontainer exec --workspace-folder . --config .devcontainer/x86_64/devcontainer.json bash -c 'CARGO_TARGET_DIR=/tmp/target_x86 cargo build --release'
-
-# Self-compile in x86_64 container (bootstrap → tungsten1_x86)
-devcontainer-self-compile-x86: devcontainer-build-x86
-	devcontainer exec --workspace-folder . --config .devcontainer/x86_64/devcontainer.json bash -c '\
-		/tmp/target_x86/release/tungsten compile src/compiler/main.tg -o tungsten1_x86 -v'
-	@echo "✓ Built tungsten1_x86 (x86_64)"
-
-# Self-compile + verify all examples on x86_64
-# Checks output content (not just exit code) to prevent false positives (ADR 10.5.26c §2.2).
-devcontainer-self-compile-verify-x86: devcontainer-self-compile-x86
-	@echo "=== x86_64 self-compile-verify: testing tungsten1_x86 ==="
-	@# Smoke test: version must not print help (argv parsing sentinel)
-	@printf "  smoke %-35s" "version"; \
-	v_out=$$(devcontainer exec --workspace-folder . --config .devcontainer/x86_64/devcontainer.json bash -c \
-		"./tungsten1_x86 version" 2>&1); \
-	if echo "$$v_out" | grep -q "USAGE:"; then \
-		echo "❌ FATAL: version printed help — binary is broken"; \
-		echo "$$v_out" | head -5; exit 1; \
-	fi; \
-	if ! echo "$$v_out" | grep -qi "tungsten"; then \
-		echo "❌ FATAL: version did not print expected output"; \
-		echo "$$v_out" | head -5; exit 1; \
-	fi; \
-	echo "✅"
-	@# Content-verified check for each example
-	@failed=0; for prog in examples/hello.tg examples/answer.tg examples/option.tg \
-	             examples/arithmetic.tg examples/strings.tg examples/logic.tg \
-	             examples/pair.tg examples/list_ops.tg examples/result.tg \
-	             examples/ordering.tg; do \
-		printf "  check %-35s" "$$prog"; \
-		output=$$(devcontainer exec --workspace-folder . --config .devcontainer/x86_64/devcontainer.json bash -c \
-			"./tungsten1_x86 check $$prog" 2>&1); \
-		exit_code=$$?; \
-		if [ "$$exit_code" -eq 0 ]; then echo "✅"; \
-		else echo "❌ FAIL"; echo "$$output" | head -3; failed=1; fi; \
-	done; \
-	if [ "$$failed" -eq 1 ]; then echo "❌ x86_64 self-compile-verify FAILED"; exit 1; fi
-	@echo "✅ x86_64 self-compile-verify passed"
-
-# Stop and remove the x86_64 dev container
-devcontainer-down-x86:
-	@CONTAINER_ID=$$(docker ps -q --filter "label=devcontainer.local_folder=$$(pwd)" --filter "label=devcontainer.config_file=.devcontainer/x86_64/devcontainer.json"); \
-	if [ -n "$$CONTAINER_ID" ]; then \
-		docker stop $$CONTAINER_ID && docker rm $$CONTAINER_ID; \
-		echo "x86_64 dev container stopped and removed"; \
-	else \
-		echo "No x86_64 dev container running"; \
-	fi
-
-# Stop and remove the dev container
+# Stop and remove the dev container.
+# NOTE: this deliberately does NOT remove the tungsten-arm-target build volume
+# (ADR 24.7.26b D6) — the warm incremental cache must survive a normal stop.
+# Use `make devcontainer-target-reset` to wipe a poisoned cache.
 devcontainer-down:
 	@CONTAINER_ID=$$(docker ps -q --filter "label=devcontainer.local_folder=$$(pwd)"); \
 	if [ -n "$$CONTAINER_ID" ]; then \
@@ -304,6 +292,16 @@ devcontainer-down:
 	else \
 		echo "No dev container running"; \
 	fi
+
+# Reset the isolated arm64 build volume (ADR 24.7.26b D6).
+# The named volume persists a warm incremental cache across recreates — but
+# that includes a POISONED cache (a toolchain bump, a corrupt object) that a
+# `devcontainer rebuild` would previously have cleared. Wipe it here; the next
+# container build is cold. The volume must be idle (container stopped) to
+# remove — run `make devcontainer-down` first if this errors "volume in use".
+devcontainer-target-reset:
+	docker volume rm tungsten-arm-target
+	@echo "Removed tungsten-arm-target volume — next container build is cold."
 
 # Help section for devcontainer commands
 .PHONY: help-devcontainer
@@ -319,16 +317,20 @@ help-devcontainer:
 	@echo "  make devcontainer-run FILE=<file>         - Run (interpreted)"
 	@echo "  make devcontainer-check FILE=<file>       - Type-check a file"
 	@echo "  make devcontainer-eval EXPR=<expr>        - Eval an expression"
-	@echo "  make devcontainer-check-l2                - Check L2 compiler for errors"
-	@echo "  make devcontainer-build-check-l2          - Build then check L2"
-	@echo "  make devcontainer-dump-core PATTERN=<pat> - Dump Core IR (L2, comma-sep or *)"
-	@echo "  make devcontainer-check-tyvar-escape      - Check TyVar escapes (L2)"
-	@echo "  make devcontainer-check-l3                - Check L3 (bootstrap checks self-hosted)"
-	@echo "  make devcontainer-build-check-l3          - Build bootstrap then check L3"
+	@echo "  make devcontainer-check-selfhost          - Self-host check (release bootstrap)"
+	@echo "  make devcontainer-build-check-selfhost    - Build then run the self-host check"
+	@echo "  make devcontainer-dump-core PATTERN=<pat> - Dump Core IR (self-host, comma-sep or *)"
+	@echo "  make devcontainer-check-tyvar-escape      - Check TyVar escapes (self-host)"
+	@echo "  make devcontainer-selfhost-closed-terms   - Every self-host Core term closed? (needs -dev tungsten1)"
+	@echo "  make devcontainer-selfhost-well-typed-terms - Every eliminator over the right former? (needs -dev tungsten1)"
+	@echo "  make devcontainer-check-selfhost-nocodegen       - Self-host check (no-codegen bootstrap)"
+	@echo "  make devcontainer-build-check-selfhost-nocodegen - Build bootstrap then no-codegen self-host check"
 	@echo "  make devcontainer-self-compile-step2      - Build tungsten2 from tungsten1"
 	@echo "  make devcontainer-self-compile-dev         - Build tungsten1 with diagnostic tools"
+	@echo "  make devcontainer-self-compile-dev-fast   - Same, on the fast (llc -O0) tier"
 	@echo "  make devcontainer-self-compile-fast         - Fast self-compile (llc -O0)"
 	@echo "  make devcontainer-self-compile-verify-fast  - Fast self-compile + verify examples"
+	@echo "  make devcontainer-selfcompiled-stored-generics  - Stored-generic battery under tungsten1 (ADR 21.7.26k)"
 	@echo "  make devcontainer-full-bootstrap          - Full bootstrap (tungsten1 + tungsten2)"
 	@echo "  make devcontainer-check-l4                - Check L4 (tungsten2 checks itself)"
 	@echo "  make devcontainer-check-ir-determinism    - Full IR determinism gate (aliases -full)"
@@ -336,6 +338,12 @@ help-devcontainer:
 	@echo "  make devcontainer-check-ir-determinism-fast - Fast: elab cache reuse, excludes __mono.ll"
 	@echo "  make devcontainer-check-ir-fingerprint-full - Full-source IR fingerprint vs baseline"
 	@echo "  make devcontainer-down                    - Stop dev container"
+	@echo "  make devcontainer-target-reset            - Wipe the isolated build volume (ADR 24.7.26b)"
+	@echo ""
+	@echo "  Build isolation (ADR 24.7.26b): the arm64 container builds into a"
+	@echo "  container-local volume (CARGO_TARGET_DIR=/build/target), so host and"
+	@echo "  container no longer clobber each other's target/. The volume persists"
+	@echo "  a warm cache across recreates; reset a poisoned one with the target above."
 	@echo ""
 	@echo "  Log capture: stderr is captured to .devcontainer/logs/ (bind-mounted)."
 	@echo "  Inspect from host: cat .devcontainer/logs/<command>.stderr.log"
@@ -357,3 +365,5 @@ help-devcontainer:
 # Trace lands in .devcontainer/logs/profiles/ on the host (bind mount).
 devcontainer-profile:
 	devcontainer exec --workspace-folder . cargo run -p tungsten-dev --release -- profile
+
+HELP_SECTIONS += devcontainer

@@ -42,6 +42,17 @@ impl Parser<'_> {
                     Span::new(start, self.prev_span().end),
                 )))
             }
+            // `-5`: a negative integer literal (ADR 18.9.26e). Only a literal
+            // may follow the minus — a pattern is not an expression.
+            TokenKind::Minus if self.peek_n(1).kind == TokenKind::IntLiteral => {
+                self.advance();
+                let value = self.parse_int_literal(self.current_text());
+                self.advance();
+                Some(Pattern::Literal(LiteralPattern::NegInt(
+                    value,
+                    Span::new(start, self.prev_span().end),
+                )))
+            }
             TokenKind::True | TokenKind::False => {
                 let value = self.current().kind == TokenKind::True;
                 self.advance();

@@ -5,8 +5,14 @@
 // functions used across match elaboration.
 
 pub mod predicates;
+pub mod projection_path;
+pub mod projections;
+pub mod projections_cir;
 
 pub use elab::exprs::matches::patterns::predicates::*;
+pub use elab::exprs::matches::patterns::projection_path::*;
+pub use elab::exprs::matches::patterns::projections::*;
+pub use elab::exprs::matches::patterns::projections_cir::*;
 
 use parser::ast::{
     Pattern, PatVar, PatWildcard, PatConstructor, PatTuple, MatchArm,
@@ -32,6 +38,10 @@ use elab::env::defs::{
 // ===========================================================================
 
 /// Skip N layers of a right-nested Sum type by taking sum_right repeatedly.
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
 fn skip_sum_right(ty: TypeHandle, n: Nat) -> TypeHandle {
     if n == 0 {
         ty
@@ -117,7 +127,23 @@ fn get_arm_binding_from_resolved(
 // PATTERN BINDING
 // ===========================================================================
 
-/// Bind pattern variables in scope with their correct types.
+/// Bind a pattern's variables and report the name the CORE `Case` ARM will use.
+///
+/// The returned `String` is not a source identifier — it is the arm binder
+/// that ends up in the emitted term, and for a constructor with more than one
+/// field it is the synthetic `"_payload"` (for a tuple pattern, `"_tuple"`),
+/// because the source variables are bound in `env` instead.
+///
+/// **Pair every call with `wrap_arm_payload_projections`** on the same pattern
+/// and type (`projections.tg`). Binding in `env` alone type-checks the arm and
+/// leaves `h` and `t` FREE in the emitted term, which is what broke
+/// `tungsten1 run` on any multi-field match and made termination's descent
+/// refuse 281 sound definitions in `src/compiler/main.tg` (ADR 19.8.26d found
+/// it, ADR 21.8.26a fixed it). `tungsten doctor check selfhost closed-terms`
+/// is the census that says whether a site was missed.
+///
+/// A ONE-field constructor needs no projection: the sub-pattern's own binder is
+/// returned, so the source variable *is* the arm binder.
 pub fn bind_pattern_in_scope(env: Env, p: Pattern, ty: TypeHandle) -> (Env, String) {
     match p {
         PatVar(id) => {

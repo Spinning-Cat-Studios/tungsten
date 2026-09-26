@@ -1,0 +1,10 @@
+// ADR 14.8.26g P5: a signature fault called from 5 sites across 2 modules
+// reports ONE diagnostic, at the signature's span (D3's signature producer +
+// the application poison arm). Pre-change count under the unconditional
+// P1b->P3 window: 1 seeded E0002 + one E0013 per call site (measured 17 on
+// the V1 corpus, 15 of them E0013).
+mod lib;
+mod consumer_one;
+mod consumer_two;
+
+fn main() -> Nat { 0 }

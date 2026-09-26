@@ -167,7 +167,8 @@ impl<'a> Elaborator<'a> {
 
         // Axioms have no proof - they use sorry
         // Build: Λα. ... λ(h:P). sorry
-        let mut term = Term::Sorry;
+        // The hole is the author's, so it carries the item's span (ADR 18.9.26g).
+        let mut term = Term::spanned(Term::Sorry, TermSpan::new(axiom.span.start, axiom.span.end));
 
         // Push type parameters
         for tp in &axiom.type_params {

@@ -1,0 +1,186 @@
+// src/compiler/elab/cir/type_constructors.tg
+// Helper constructors for CodegenType, plus the TypeHandle → CodegenType
+// conversion that produces them.
+//
+// Split out of `constructors.tg` by ADR 10.9.26b along the CIR node family
+// seam: that file now holds the TERM constructors and this one the TYPE
+// constructors. The two families share no argument and no caller — every
+// `cir_*` builds a CodegenIR and every `ct_*` builds a CodegenType — so the
+// only thing they had in common was the file they sat in.
+
+use driver::ffi::cstring_to_string;
+use elab::ffi::{
+    TypeHandle,
+    tg_type_tag,
+    tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
+    tg_type_get_product_left, tg_type_get_product_right,
+    tg_type_get_sum_left, tg_type_get_sum_right,
+    tg_type_get_forall_var, tg_type_get_forall_body,
+    tg_type_get_mu_var, tg_type_get_mu_body,
+    tg_type_get_tyvar_name
+};
+use elab::cir::types::{CodegenIR, CodegenType,
+    CTNat, CTInt, CTBool, CTString, CTUnit, CTVoid, CTProp,
+    CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq
+};
+
+// ===========================================================================
+// TYPE HELPER CONSTRUCTORS
+// ===========================================================================
+
+/// Create Nat type.
+pub fn ct_nat() -> CodegenType {
+    CTNat
+}
+
+/// Create Int type (ADR 14.9.26c).
+pub fn ct_int() -> CodegenType {
+    CTInt
+}
+
+/// Create Bool type.
+pub fn ct_bool() -> CodegenType {
+    CTBool
+}
+
+/// Create String type.
+pub fn ct_string() -> CodegenType {
+    CTString
+}
+
+/// Create Unit type.
+pub fn ct_unit() -> CodegenType {
+    CTUnit
+}
+
+/// Create Void type.
+pub fn ct_void() -> CodegenType {
+    CTVoid
+}
+
+/// Create Prop type.
+pub fn ct_prop() -> CodegenType {
+    CTProp
+}
+
+/// Create Arrow type.
+pub fn ct_arrow(domain: CodegenType, codomain: CodegenType) -> CodegenType {
+    CTArrow(domain, codomain)
+}
+
+/// Create Product type.
+pub fn ct_pair(left: CodegenType, right: CodegenType) -> CodegenType {
+    CTPair(left, right)
+}
+
+/// Create Sum type.
+pub fn ct_sum(left: CodegenType, right: CodegenType) -> CodegenType {
+    CTSum(left, right)
+}
+
+/// Create Ref type.
+pub fn ct_ref(inner: CodegenType) -> CodegenType {
+    CTRef(inner)
+}
+
+/// Create Ptr type.
+pub fn ct_ptr(inner: CodegenType) -> CodegenType {
+    CTPtr(inner)
+}
+
+/// Create type variable.
+pub fn ct_var(name: String) -> CodegenType {
+    CTVar(name)
+}
+
+/// Create forall type.
+pub fn ct_forall(name: String, body: CodegenType) -> CodegenType {
+    CTForall(name, body)
+}
+
+/// Create mu (recursive) type.
+pub fn ct_mu(name: String, body: CodegenType) -> CodegenType {
+    CTMu(name, body)
+}
+
+/// Create equality type.
+pub fn ct_eq(ty: CodegenType, lhs: CodegenIR, rhs: CodegenIR) -> CodegenType {
+    CTEq(ty, lhs, rhs)
+}
+
+// ===========================================================================
+// TYPE HANDLE → CODEGEN TYPE CONVERSION
+// ===========================================================================
+
+/// Convert a TypeHandle (opaque Nat) to a CodegenType using FFI introspection.
+///
+/// Uses tg_type_tag() to identify the type variant and recursively converts
+/// composite types. Falls back to CTUnit for unrecognized types.
+// Partial (ADR 11.8.26b): no parameter is a structural subterm to descend on,
+// so this is a measure recursion — Non-Goals defers those to v2.1. Executable
+// compiler code that no proof reaches; E0063 fires if that ever changes.
+#[partial]
+pub fn type_handle_to_codegen_type(ty: TypeHandle) -> CodegenType {
+    let tag = tg_type_tag(ty);
+    if tag == 0 { CTNat }
+    else if tag == 1 { CTBool }
+    else if tag == 2 { CTString }
+    else if tag == 3 { CTUnit }
+    else if tag == 4 { CTVoid }
+    else if tag == 5 { CTProp }
+    else if tag == 6 {
+        // Arrow
+        let d = type_handle_to_codegen_type(tg_type_get_arrow_domain(ty));
+        let c = type_handle_to_codegen_type(tg_type_get_arrow_codomain(ty));
+        CTArrow(d, c)
+    }
+    else if tag == 7 {
+        // Product
+        let l = type_handle_to_codegen_type(tg_type_get_product_left(ty));
+        let r = type_handle_to_codegen_type(tg_type_get_product_right(ty));
+        CTPair(l, r)
+    }
+    else if tag == 8 {
+        // Sum
+        let l = type_handle_to_codegen_type(tg_type_get_sum_left(ty));
+        let r = type_handle_to_codegen_type(tg_type_get_sum_right(ty));
+        CTSum(l, r)
+    }
+    else if tag == 9 {
+        // TyVar
+        CTVar(cstring_to_string(tg_type_get_tyvar_name(ty)))
+    }
+    else if tag == 10 {
+        // Forall
+        let v = cstring_to_string(tg_type_get_forall_var(ty));
+        let b = type_handle_to_codegen_type(tg_type_get_forall_body(ty));
+        CTForall(v, b)
+    }
+    else if tag == 11 {
+        // Mu
+        let v = cstring_to_string(tg_type_get_mu_var(ty));
+        let b = type_handle_to_codegen_type(tg_type_get_mu_body(ty));
+        CTMu(v, b)
+    }
+    else if tag == 17 {
+        // Int (ADR 14.9.26c). Appended to the table after Adt, so it sits
+        // here rather than beside Nat — and it MUST sit somewhere: the `else`
+        // below erases every unmatched tag to CTUnit silently (AC 7b).
+        CTInt
+    }
+    else {
+        // Every tag not matched above. Deliberately NOT enumerated: the copy
+        // that used to sit here listed five tags and presented them as
+        // exhaustive, which stopped being true when `Adt` was added
+        // (ADR 13.8.26a). The authority is `tg_type_tag`'s `match` in
+        // `tungsten_core/src/ffi/types/predicates/mod.rs`.
+        //
+        // Worth saying once, because it is what the stale list hid: `Adt` (16)
+        // is matched by no arm above and therefore lands here — a static fact
+        // about this chain of `else if`s. Whether a tag-16 handle ever actually
+        // ARRIVES is a separate, open question; 13.8.26a P5 observed no such
+        // handle across the self-compile corpus but did not prove it cannot
+        // happen, so do not read this comment either way.
+        CTUnit
+    }
+}

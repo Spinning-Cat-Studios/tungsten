@@ -1,4 +1,7 @@
 // src/compiler/codegen/ir_types.tg
+// The driver never reaches this module: `run_compile` delegates codegen to the
+// bootstrap binary, so it is compiled and type-checked but executed only by
+// `test_codegen*.tg` / `test_cir_captures.tg`. See codegen/mod.tg (ADR 3.9.26a).
 // CodegenType → LLVM type string mapping.
 //
 // Must be ABI-compatible with the Rust bootstrap (tungsten_codegen/src/types/).
@@ -6,6 +9,7 @@
 // | CodegenType      | LLVM IR Type         | Notes                       |
 // |------------------|----------------------|-----------------------------|
 // | CTNat            | i64                  |                             |
+// | CTInt            | i64                  | signed ops; same slot size  |
 // | CTBool           | i1                   |                             |
 // | CTString         | { ptr, i64 }         | pointer + length            |
 // | CTUnit           | {}                   | zero-size struct            |
@@ -25,7 +29,7 @@ use driver::util::nat_to_string;
 
 use elab::cir::types::{
     CodegenType,
-    CTNat, CTBool, CTString, CTUnit, CTVoid, CTProp,
+    CTNat, CTInt, CTBool, CTString, CTUnit, CTVoid, CTProp,
     CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq
 };
 
@@ -37,6 +41,7 @@ use elab::cir::types::{
 pub fn llvm_type(ty: CodegenType) -> String {
     match ty {
         CTNat() => "i64",
+        CTInt() => "i64",
         CTBool() => "i1",
         CTString() => "{ ptr, i64 }",
         CTUnit() => "{}",
@@ -67,6 +72,7 @@ pub fn llvm_type(ty: CodegenType) -> String {
 pub fn type_size(ty: CodegenType) -> Nat {
     match ty {
         CTNat() => 8,
+        CTInt() => 8,
         CTBool() => 1,
         CTString() => 16,  // ptr (8) + i64 (8)
         CTUnit() => 0,

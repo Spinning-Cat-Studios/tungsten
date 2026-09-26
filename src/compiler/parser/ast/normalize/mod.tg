@@ -1,0 +1,57 @@
+// src/compiler/parser/ast/normalize/mod.tg
+// Span normalization for the surface AST (ADR 29.6.26f — Decisions, §2.2, AC 7).
+//
+// The structural comparator compares ASTs EXACTLY, spans included. That is a
+// deliberate policy choice, not an oversight: silently stripping spans inside
+// `assert_eq` would let a test pass on a node built from the wrong source
+// range, which is precisely the class of bug parser tests exist to catch.
+//
+// A test that genuinely wants to ignore source positions therefore normalizes
+// EXPLICITLY, by calling one of the functions below before asserting:
+//
+//     assert_eq(strip_spans_expr(parsed), strip_spans_expr(expected))
+//
+// Every function here rewrites each `Span` it reaches to `canonical_span()` and
+// is otherwise structure-preserving, so two ASTs differing only in spans become
+// structurally identical. Coverage is the whole `Expr`-reachable graph — the
+// mutually recursive `Expr` / `TypeExpr` / `Pattern` / `Stmt` / `Item` cluster
+// plus every span-carrying record between them. A partial normalizer would be
+// worse than none: it would pass through un-normalized nodes and report a
+// mismatch the caller has no way to interpret.
+//
+// Types that carry no `Span` anywhere (`Visibility`, `BinOp`, `UnaryOp`,
+// `PatLit`, `MaybeString`, and the scalar leaves) are passed through untouched
+// rather than given identity functions.
+//
+// ## THE DRIVER NEVER REACHES THIS SUBSYSTEM (ADR 3.9.26a)
+//
+// Nothing on a driver path imports these modules. `main.tg` declares
+// `mod parser;`, so they are compiled and type-checked on every build and read
+// as compiler machinery, but the only importers are the AST-comparison entry
+// files `test_ast_compare.tg`, `test_ast_compare_cluster.tg` and
+// `mustfail_ast_compare.tg`.
+//
+// Unlike `src/compiler/codegen/`, which is test-only because `run_compile`
+// delegates codegen to the bootstrap binary and will stop being so when the
+// self-host emits its own machine code, this subsystem is test-only BY DESIGN
+// and permanently: the paragraphs above are the argument for why the compiler
+// itself must never normalize spans. A driver path importing anything here
+// would be the defect, not the fix.
+//
+// Census: `tungsten doctor audit-driver-reach src/compiler/main.tg`.
+
+pub mod common;
+pub mod types;
+pub mod patterns;
+pub mod exprs;
+pub mod nodes;
+pub mod items;
+
+// Re-export so callers can `use parser::ast::normalize::{strip_spans_expr, ...}`
+// without knowing which file a given node type lives in.
+pub use parser::ast::normalize::common::*;
+pub use parser::ast::normalize::types::*;
+pub use parser::ast::normalize::patterns::*;
+pub use parser::ast::normalize::exprs::*;
+pub use parser::ast::normalize::nodes::*;
+pub use parser::ast::normalize::items::*;

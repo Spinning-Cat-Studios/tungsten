@@ -14,9 +14,13 @@
 
 pub mod terms;
 pub mod types;
+pub mod positivity;
+pub mod termination;
 
 pub use elab::ffi::terms::*;
 pub use elab::ffi::types::*;
+pub use elab::ffi::positivity::*;
+pub use elab::ffi::termination::*;
 
 // ============================================================================
 // Handle Types (aliases for clarity)

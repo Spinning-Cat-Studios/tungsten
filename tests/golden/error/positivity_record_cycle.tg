@@ -1,0 +1,5 @@
+// ADR 7.8.26e D3: the cycle runs through a RECORD, which is not a node in the
+// elaborator's ADT-only type graph. Reusing that graph computes `A`'s SCC as
+// {A} and false-accepts.
+type A = MkA(R -> Nat)
+type R = { a: A }

@@ -1,0 +1,18 @@
+// P3 negative test (ADR 29.6.26f): a `compare` on an incomparable type must be
+// rejected at compile time with the path to the first incomparable field.
+//
+// Here `T = Nat -> Nat` (a closure / function value), which is opaque and has no
+// structural comparator. Compiling this MUST fail with a message containing
+// "not comparable" and the incomparable path (`$: Arrow(Nat, Nat) is opaque`).
+//
+// Verified by: make tg-test-comparator-codegen (asserts the compile fails).
+
+type CompareResult = | Equal | NotEqual
+fn is_eq(r: CompareResult) -> Bool { match r { Equal() => true, NotEqual() => false } }
+fn f(n: Nat) -> Nat { n }
+fn g(n: Nat) -> Nat { n }
+
+fn main() -> Nat {
+    // Comparing function values — the P3 `Comparable<T>` rejection point.
+    if is_eq(compare(f, g)) { 1 } else { 0 }
+}

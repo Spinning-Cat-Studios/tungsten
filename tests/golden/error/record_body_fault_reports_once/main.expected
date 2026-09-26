@@ -1,0 +1,12 @@
+warning: Signature Collection global collection failed with 1 error; cross-module imports may not resolve.
+  first error: error[E0002]: cannot find type `NoSuchType` in this scope (at 37..47)
+  hint: run `tungsten doctor check module signature-collection <file>` for details
+[E0002] Error: cannot find type `NoSuchType` in this scope
+   ╭─[tests/golden/error/record_body_fault_reports_once/shapes.tg:1:38]
+   │
+ 1 │ pub type Box = { width: Nat, height: NoSuchType }
+   │                                      ─────┬────  
+   │                                           ╰────── not found in this scope
+───╯
+
+error: aborting due to 1 error

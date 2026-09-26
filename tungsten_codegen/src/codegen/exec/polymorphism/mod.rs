@@ -9,8 +9,13 @@
 //! - `dispatch`: `compile_ty_app` — the main TyApp dispatch logic
 //! - `instantiation`: `compile_monomorphized*` — specialized copy generation
 
+mod comparator;
 mod dispatch;
 mod instantiation;
+mod mono_state;
+
+pub use comparator::ComparatorSynth;
+pub(crate) use mono_state::MonomorphState;
 
 use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
@@ -158,7 +163,7 @@ impl<'ctx> CodeGen<'ctx> {
 
     /// Strip `@` prefixes from `TyVars` in a type tree.
     ///
-    /// `@`-prefixed `TyVars` are Phase 1c artifacts referencing concrete named types
+    /// `@`-prefixed `TyVars` are Type-Body Collection artifacts referencing concrete named types
     /// (e.g., `@Token` → `Token`). Stripping ensures mono key matching between
     /// the discovery phase (which strips) and codegen (which receives raw types).
     ///

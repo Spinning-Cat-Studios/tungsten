@@ -5,7 +5,7 @@
 mod classify;
 mod display;
 
-pub use display::keyword_from_str;
+pub use display::{keyword_from_str, ALL_KEYWORDS};
 
 use crate::span::Span;
 use serde::{Deserialize, Serialize};

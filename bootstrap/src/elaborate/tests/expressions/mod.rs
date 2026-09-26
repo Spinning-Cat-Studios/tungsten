@@ -4,5 +4,6 @@ mod basic;
 mod blocks;
 mod expect_error;
 mod expect_type;
+mod integers;
 mod operators;
 mod recursive_unification;

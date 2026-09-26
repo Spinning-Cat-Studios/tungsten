@@ -1,0 +1,11 @@
+// SUBJECT — arity 3, scalar tail, expression position (ADR 4.9.26c).
+//
+// Arity 3 is where the right-nested convention first needs two `snd`s before
+// its last field, so a builder that re-bases its depth on every recursive call
+// lands somewhere else here even though it agreed at arity 2.
+
+pub fn main() -> Nat {
+    let p = (1, 2, 3);
+    let r = let (a, b, c) = p; a * 100 + b * 10 + c;
+    r
+}

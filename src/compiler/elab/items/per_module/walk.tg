@@ -1,0 +1,137 @@
+// src/compiler/elab/items/per_module/walk.tg
+// The Body-Elaboration walk: which module is elaborated when, and against what.
+//
+// Split from `mod.tg` (ADR 19.8.26d) along the seam that was already there —
+// `mod.tg` states the three-phase pipeline and runs the gates that bracket it,
+// this owns the post-order recursion and the per-module env splice, together
+// with the two accumulators only the walk threads.
+
+use driver::ffi::{List, Nil, Cons, alloc_profile_marker};
+use driver::modules::path::{
+    ModulePath, module_path_child, module_path_display
+};
+use driver::modules::info::{ModuleInfo};
+use driver::modules::tree::parsed::{ParsedModule};
+use driver::modules::build::{get_module_name};
+use driver::modules::build::flatten::{filter_mod_decls};
+use driver::modules::build::resolve::{resolve_use_paths};
+use parser::ast::nodes::{source_file_items};
+use elab::env::{Env};
+use elab::env::types::{ElabMode};
+use elab::env::module::{ModuleMap};
+use elab::error::{ElabError};
+use elab::items::{elaborate_items_with_env};
+use elab::items::per_module::combined::{GlobalExports};
+use elab::items::per_module::inject::{inject_result_into_map, env_with_prior_map};
+use elab::items::per_module::results::{append_errors};
+use elab::items::per_module::types::{ModuleElabResult, build_module_result};
+
+// ===========================================================================
+// ELABORATION CONTEXT
+// ===========================================================================
+
+/// Shared context threaded through the per-module tree walk.
+/// Bundles the immutable parameters that every recursive call needs.
+/// Carries Signature Collection global exports for seeding per-module envs.
+pub type TreeElabCtx = {
+    module_info: ModuleInfo,
+    elab_mode: ElabMode,
+    global: GlobalExports,
+    /// The seeded env every module starts from, built ONCE (ADR 5.8.26f).
+    /// See `build_shared_base_env` for why it is invariant.
+    base_env: Env
+}
+
+/// The three accumulators the post-order Phase-B walk threads together:
+/// the completed per-module results (for the final def collection), the
+/// shared prior-results module-map (built once, spliced into each module's
+/// env — ADR 23.7.26d), and the accumulated errors. Bundled into one value so
+/// the walk stays within the parameter/return-arity budget.
+pub type BodyElabAccum = {
+    results: List<ModuleElabResult>,
+    prior_map: ModuleMap,
+    errors: List<ElabError>
+}
+
+// ===========================================================================
+// RECURSIVE TREE WALK
+// ===========================================================================
+
+/// Recursively elaborate a module and its submodules in post-order, threading
+/// the shared BodyElabAccum (results + prior-results map + errors).
+pub fn elaborate_tree_rec(
+    module: ParsedModule,
+    current_path: ModulePath,
+    ctx: TreeElabCtx,
+    acc: BodyElabAccum
+) -> BodyElabAccum {
+    // 1. Elaborate children first (post-order)
+    let acc = elaborate_submodules(module.submodules, current_path, ctx, acc);
+
+    // 2. Elaborate this module against the shared prior-results map
+    let result = elaborate_single_module(
+        module, current_path, ctx, acc.prior_map
+    );
+
+    // 3. Accumulate — fold this result into the shared map exactly once
+    {
+        results: Cons(result, acc.results),
+        prior_map: inject_result_into_map(acc.prior_map, result),
+        errors: append_errors(result.errors, acc.errors)
+    }
+}
+
+/// Elaborate a list of submodules, threading the BodyElabAccum through siblings.
+fn elaborate_submodules(
+    submodules: List<ParsedModule>,
+    parent_path: ModulePath,
+    ctx: TreeElabCtx,
+    acc: BodyElabAccum
+) -> BodyElabAccum {
+    match submodules {
+        Nil() => acc,
+        Cons(sub, rest) =>
+            let name = get_module_name(sub);
+            let child_path = module_path_child(parent_path, name);
+            let acc = elaborate_tree_rec(sub, child_path, ctx, acc);
+            elaborate_submodules(rest, parent_path, ctx, acc)
+    }
+}
+
+// ===========================================================================
+// SINGLE MODULE ELABORATION
+// ===========================================================================
+
+/// Elaborate a single module's items against its own env.
+///
+/// The env is seeded with Signature Collection global exports (types, values,
+/// constructors) so cross-branch references resolve correctly.
+fn elaborate_single_module(
+    module: ParsedModule,
+    current_path: ModulePath,
+    ctx: TreeElabCtx,
+    prior_map: ModuleMap
+) -> ModuleElabResult {
+    let _ = alloc_profile_marker(
+        "phaseB:module " ++ module_path_display(current_path)
+    );
+
+    // Get this module's items (excluding mod declarations)
+    let raw_items = filter_mod_decls(source_file_items(module.source_file));
+
+    // Resolve relative use-paths to absolute
+    let items = resolve_use_paths(raw_items, current_path, ctx.module_info);
+
+    // Start from the walk-invariant seeded env (elab mode + module-info stubs
+    // + Signature Collection globals), built ONCE in `build_shared_base_env`
+    // rather than reconstructed here per module (ADR 5.8.26f), then splice the
+    // shared prior-results map in front of it. `env_with_prior_map` enforces
+    // the layer-1-shadows-layer-2/3 contract (see inject.tg) and shares
+    // `prior_map` across modules (ADR 23.7.26d). This splice is the only part
+    // of the env that varies per module.
+    let env = env_with_prior_map(ctx.base_env, prior_map);
+
+    // Elaborate
+    let (elab_result, final_env) = elaborate_items_with_env(env, items);
+    build_module_result(current_path, elab_result, final_env)
+}

@@ -1,0 +1,23 @@
+// Unit tests for the tg_string_compare extern FFI (ADR 21.7.26c):
+// exercises the Rust primitive and its evaluator arm end-to-end from .tg.
+// Result encoding: 0 = LT, 1 = EQ, 2 = GT (CMP_* in elab/env/defs/ctor_index.tg).
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_nat};
+use driver::ffi::{string_compare};
+
+pub fn test_string_compare_lt() -> Unit {
+    assert_eq_nat(string_compare("abc", "abd"), 0)
+}
+
+pub fn test_string_compare_eq() -> Unit {
+    assert_eq_nat(string_compare("abc", "abc"), 1)
+}
+
+pub fn test_string_compare_gt() -> Unit {
+    assert_eq_nat(string_compare("abd", "abc"), 2)
+}

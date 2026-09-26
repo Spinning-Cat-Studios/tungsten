@@ -9,4 +9,4 @@ mod path;
 mod registry;
 
 pub use contents::{ConstructorStubDetail, ModuleContents, PathResolutionError};
-pub use path::ModulePath;
+pub use path::{canonicalize_module_path, ModulePath};

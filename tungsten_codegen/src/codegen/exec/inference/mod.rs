@@ -1,8 +1,14 @@
 //! Type inference for code generation.
 //!
 //! Requires type annotations for complex cases.
+//! Multi-arm control flow (If/Case/AdtMatch) result types unify
+//! dead-arm-aware in `arms.rs` (ADR 3.7.26a).
 
-// Tests: tests.rs
+// Tests: tests.rs, arms_tests.rs
+
+mod arms;
+#[cfg(test)]
+mod arms_tests;
 
 use crate::codegen::backend::CodeGenError;
 use crate::codegen::CodeGen;
@@ -46,10 +52,8 @@ impl CodeGen<'_> {
             Term::App(func, _) => self.infer_app_result_type(func, local_ctx),
             Term::Let(x, ty, _def, body) => self.infer_with_binding(x, ty, body, local_ctx),
 
-            // Control flow
-            Term::If(_, then_, else_) => self
-                .infer_term_type_with_ctx(then_, local_ctx)
-                .or_else(|_| self.infer_term_type_with_ctx(else_, local_ctx)),
+            // Control flow — arm result types unify dead-arm-aware (arms.rs)
+            Term::If(_, then_, else_) => self.infer_if_type(then_, else_, local_ctx),
             Term::Case(scrut, x_left, left, x_right, right) => {
                 self.infer_case_type(scrut, (x_left, left), (x_right, right), local_ctx)
             }
@@ -122,6 +126,21 @@ impl CodeGen<'_> {
         ty_arg: &Type,
         local_ctx: &HashMap<String, Type>,
     ) -> Result<Type, CodeGenError> {
+        // Structural-comparator intrinsic (ADR 29.6.26f P6′ step 2): `__cmp` has no
+        // registered type — `TyApp(Global("__cmp"), T)` is the comparator for `T`,
+        // whose (curried) type is `T → T → CompareResult`. Mirrors the type the
+        // synthesized `compare_T` is emitted with, so the enclosing application
+        // infers `CompareResult`.
+        if let Term::Global(name) = body {
+            if name == tungsten_core::eval::COMPARE_INTRINSIC {
+                let resolved = self.types.apply_type_subst(ty_arg);
+                let compare_result = Type::TyVar("CompareResult".to_string());
+                return Ok(Type::Arrow(
+                    Box::new(resolved.clone()),
+                    Box::new(Type::Arrow(Box::new(resolved), Box::new(compare_result))),
+                ));
+            }
+        }
         let body_ty = self.infer_term_type_with_ctx(body, local_ctx)?;
         if let Type::Forall(var, inner) = body_ty {
             let resolved_ty_arg = self.types.apply_type_subst(ty_arg);
@@ -153,30 +172,6 @@ impl CodeGen<'_> {
         Err(CodeGenError::TypeError(format!(
             "{label} on non-product: {raw_ty:?}"
         )))
-    }
-
-    /// Infer the type of a Case expression.
-    fn infer_case_type(
-        &self,
-        scrut: &Term,
-        left: (&str, &Term),
-        right: (&str, &Term),
-        local_ctx: &HashMap<String, Type>,
-    ) -> Result<Type, CodeGenError> {
-        if let Ok(scrut_ty) = self.infer_term_type_with_ctx(scrut, local_ctx) {
-            if let Type::Sum(ty_l, ty_r) = scrut_ty {
-                let mut left_ctx = local_ctx.clone();
-                left_ctx.insert(left.0.to_owned(), ty_l.as_ref().clone());
-                if let Ok(ty) = self.infer_term_type_with_ctx(left.1, &left_ctx) {
-                    return Ok(ty);
-                }
-                let mut right_ctx = local_ctx.clone();
-                right_ctx.insert(right.0.to_owned(), ty_r.as_ref().clone());
-                return self.infer_term_type_with_ctx(right.1, &right_ctx);
-            }
-        }
-        self.infer_term_type_with_ctx(left.1, local_ctx)
-            .or_else(|_| self.infer_term_type_with_ctx(right.1, local_ctx))
     }
 
     /// Infer the type of a Global reference.
@@ -221,27 +216,6 @@ impl CodeGen<'_> {
             "cannot infer type of extern_call '{symbol}' - not in def_types"
         )))
     }
-
-    /// Infer the type of an `AdtMatch` expression.
-    fn infer_adt_match_type(
-        &self,
-        scrutinee: &Term,
-        arms: &[(usize, String, Box<Term>)],
-        local_ctx: &HashMap<String, Type>,
-    ) -> Result<Type, CodeGenError> {
-        if let Some((_, var, body)) = arms.first() {
-            let scrut_ty = self.infer_term_type_with_ctx(scrutinee, local_ctx)?;
-            if let Type::Adt(_, _, variants) = scrut_ty {
-                if let Some((_, payload_ty)) = variants.first() {
-                    let mut arm_ctx = local_ctx.clone();
-                    arm_ctx.insert(var.clone(), payload_ty.clone());
-                    return self.infer_term_type_with_ctx(body, &arm_ctx);
-                }
-            }
-            return self.infer_term_type_with_ctx(body, local_ctx);
-        }
-        Err(CodeGenError::TypeError("AdtMatch with no arms".to_string()))
-    }
 }
 
 /// Returns the type for terms that always produce a known constant type.
@@ -270,7 +244,16 @@ fn infer_constant_type(term: &Term) -> Option<Type> {
         | Term::NatSub(_, _)
         | Term::NatMul(_, _)
         | Term::NatDiv(_, _)
-        | Term::NatMod(_, _) => Some(Type::Nat),
+        | Term::NatMod(_, _)
+        | Term::IntToNat(_) => Some(Type::Nat),
+
+        // Int (ADR 14.9.26c): the op enum decides between Int and Bool
+        Term::IntLit(_) | Term::IntNeg(_) | Term::NatToInt(_) => Some(Type::Int),
+        Term::IntBin(op, _, _) => Some(if op.is_comparison() {
+            Type::Bool
+        } else {
+            Type::Int
+        }),
 
         // String
         Term::StringLit(_) | Term::StrConcat(_, _) | Term::StrSubstring(_, _, _) => {
@@ -351,17 +334,17 @@ impl CodeGen<'_> {
         &self,
         mu_ty: &Type,
     ) -> Result<Type, CodeGenError> {
-        // Unwrap all nested Mu binders. For mutually recursive types, the
-        // type annotation carries multiple Mu layers (one per SCC member),
-        // and unfold peels through all of them to reach the inner type.
-        let mut current = mu_ty.clone();
-        while let Type::Mu(ref var, ref body) = current {
-            current = body.substitute(var, &current);
-        }
-        if &current == mu_ty {
+        // Unwrap all nested Mu binders (one per SCC member for mutually
+        // recursive types) in one simultaneous pass — the previous
+        // accumulated-substitution loop here was the same exponential
+        // unfold fixed in unwrap_mu_type (ADR 7.7.26k). A non-μ input (or
+        // a vacuous μX. X, which made the old loop spin forever) comes
+        // back unchanged and keeps the original error contract.
+        let unfolded = tungsten_core::types::unfold_mu_type(mu_ty);
+        if &unfolded == mu_ty {
             Err(CodeGenError::TypeError("unfold on non-mu type".to_string()))
         } else {
-            Ok(current)
+            Ok(unfolded)
         }
     }
 

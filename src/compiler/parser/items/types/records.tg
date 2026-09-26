@@ -75,6 +75,10 @@ fn parse_record_field_type(start_span: Span, name: String, cur: Cursor) -> Resul
 }
 
 /// Parse remaining record fields.
+// Partial (ADR 11.8.26b): the recursive call rebuilds its argument rather
+// than passing a strict subterm — a measure recursion, which Non-Goals defers to
+// v2.1. Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
 fn parse_record_fields_rest(cur: Cursor, acc: List<RecordField>) -> Result<(TypeDefBody, Span, Cursor), ParseError> {
     if cursor_check(cur, TokComma()) {
         let cur2 = cursor_advance(cur);

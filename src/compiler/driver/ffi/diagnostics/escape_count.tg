@@ -1,0 +1,45 @@
+// The TyVar-escape count's failure sentinel, and how a raw count becomes an
+// answer (ADR 5.9.26c).
+//
+// `tg_diagnostic_tyvar_escape_count` is declared `-> u64` and documents its
+// error return as `u64::MAX`
+// (`tungsten_core/src/ffi/driver/diagnostics/mod.rs`). That number is also
+// `invalid_handle()` and also `ffi_negative_one()`, and it means NEITHER of
+// them here:
+//
+//   - `invalid_handle()` is the term arena's "no such handle". Following that
+//     name lands a reader in the arena, which cannot answer a question about a
+//     diagnostic count.
+//   - `ffi_negative_one()` is a Rust `-1` widened by an unsigned return
+//     (ADR 3.9.26s). This call never returns `-1`; it returns `u64::MAX` on
+//     purpose, as its own documented error value.
+//
+// The three agree arithmetically, which is why the pun kept passing review.
+// Each gets its own name so that following one leads to where its answer lives.
+//
+// This file is deliberately NOT part of the `mod.tg` / `dev.tg` build swap. The
+// sentinel is a property of the Rust function and is identical in both builds,
+// so a copy in each swapped half would be two definitions with nothing keeping
+// them in step — the drift hazard `mod.tg`'s header warns about — and the
+// production build could not assert the developer build's constant.
+
+/// The value `tg_diagnostic_tyvar_escape_count` returns when it could not
+/// count: the handle was invalid, or the term would not materialise.
+///
+/// Named for what it means rather than for `u64::MAX`, because a reader still
+/// has to be told that this particular number means failure for this
+/// particular call.
+pub fn tyvar_escape_count_unavailable() -> Nat { 18446744073709551615 }
+
+/// A raw FFI escape count as an answer: `None` when the call failed, `Some(n)`
+/// otherwise.
+///
+/// Zero is an ordinary answer — a term with no escapes — and comes back as
+/// `Some(0)`, never as failure.
+pub fn tyvar_escape_count_answer(count: Nat) -> Option<Nat> {
+    if count == tyvar_escape_count_unavailable() {
+        None
+    } else {
+        Some(count)
+    }
+}

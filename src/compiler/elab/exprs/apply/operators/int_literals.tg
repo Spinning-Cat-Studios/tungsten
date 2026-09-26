@@ -1,0 +1,271 @@
+// src/compiler/elab/exprs/apply/operators/int_literals.tg
+// The expected-type-driven half of `Int` (ADR 14.9.26c §2.2): the numeric
+// arms of `check`, literal folding and range-checking, unary minus, and the
+// two bridges `to_int` / `from_int` that `synth_app` intercepts by name.
+// The operand-type dispatch for binary operators is the sibling `int.tg`.
+//
+// The compiler's own source stays `Nat`-only: a signed literal is carried as
+// its two's-complement BITS in a `Nat`, which cross the C ABI unchanged into
+// the bootstrap's `i64`.
+
+use lexer::span::Span;
+use parser::ast::{
+    Expr, ExprIntLit, ExprUnary, ExprBinary,
+    BinOp,
+    UnaryOp, OpNot, OpNeg,
+    expr_span
+};
+use driver::ffi::{List, Nil, Cons};
+use driver::util::nat_to_string;
+use elab::ffi::{
+    TermHandle, TypeHandle,
+    tg_term_int_lit, tg_term_int_neg,
+    tg_term_nat_to_int, tg_term_int_to_nat,
+    tg_type_nat, tg_type_int,
+    tg_types_equal
+};
+use elab::env::Env;
+use elab::exprs::forms::result::{
+    ElabExprResult, ElabExprOk, ElabExprErr, ElabExprError,
+    elab_expr_error, elab_expr_error_coded, add_expected_because, TermInfo
+};
+use elab::error::{ExpBinaryOperand, ExpUnaryOperand};
+use elab::cir::{
+    CodegenIR,
+    CIRIntLit, CIRIntNeg, CIRNatToInt, CIRIntToNat
+};
+use elab::exprs::{synth, check};
+use elab::exprs::forms::compare::{compare_synthesized, synth_and_compare};
+use elab::exprs::apply::operators::int::{
+    arith_op_symbol, is_arithmetic, bare_literal, MaybeLiteral, SomeLiteral, NoLiteral,
+    finish_with_right
+};
+
+// ===========================================================================
+// LITERALS
+// ===========================================================================
+
+/// Two's-complement bits of `-n`: `2^64 - n`, computed without leaving `Nat`
+/// (`2^64` itself does not fit, so it is `(2^64 - 1 - n) + 1`; `-0` is `0`).
+pub fn negated_bits(n: Nat) -> Nat {
+    if n == 0 { 0 } else { (18446744073709551615 - n) + 1 }
+}
+
+/// Does a literal of this magnitude and sign fit `Int`? A negated literal
+/// admits one more: `9223372036854775808` is out of range, `-9223372036854775808`
+/// is `MIN` (14.9.26c AC 1).
+pub fn int_literal_fits(magnitude: Nat, negated: Bool) -> Bool {
+    if negated { magnitude <= 9223372036854775808 } else { magnitude <= 9223372036854775807 }
+}
+
+/// An integer literal against `Int`, folded with its sign.
+pub fn check_int_literal(env: Env, magnitude: Nat, negated: Bool, span: Span) -> ElabExprResult {
+    if int_literal_fits(magnitude, negated) {
+        let bits = if negated { negated_bits(magnitude) } else { magnitude };
+        ElabExprOk(env, tg_term_int_lit(bits), tg_type_int(), CIRIntLit(bits))
+    } else {
+        let sign = if negated { "-" } else { "" };
+        ElabExprErr(elab_expr_error_coded(
+            "integer literal `" ++ sign ++ nat_to_string(magnitude) ++ "` is out of range for `Int` " ++
+            "(the signed 64-bit range is -9223372036854775808 to 9223372036854775807)",
+            span, "E0009"))
+    }
+}
+
+// ===========================================================================
+// THE NUMERIC ARMS OF `check`
+// ===========================================================================
+
+/// `check`'s default arm: the numeric arms against `Int`/`Nat` (a literal, a
+/// negated literal or an arithmetic expression is expected-type-driven), else
+/// synthesise and compare.
+pub fn check_default(env: Env, expr: Expr, expected: TypeHandle) -> ElabExprResult {
+    match check_numeric(env, expr, expected) {
+        NumericResult(result) => result,
+        NoNumericArm() => synth_and_compare(env, expr, expected)
+    }
+}
+
+/// The numeric arms of `check`: `NoNumericArm` sends everything else to the
+/// default synthesise-and-compare path.
+fn check_numeric(env: Env, expr: Expr, expected: TypeHandle) -> MaybeNumericResult {
+    if tg_types_equal(expected, tg_type_int()) {
+        check_numeric_against_int(env, expr)
+    } else if tg_types_equal(expected, tg_type_nat()) {
+        check_numeric_against_nat(env, expr)
+    } else {
+        NoNumericArm
+    }
+}
+
+pub type MaybeNumericResult =
+    | NoNumericArm
+    | NumericResult(ElabExprResult)
+
+/// A binary expression, bundled so the arity-guarded helpers stay under the
+/// parameter budget.
+type BinaryExpr = { op: BinOp, left: Expr, right: Expr, span: Span }
+
+fn check_numeric_against_int(env: Env, expr: Expr) -> MaybeNumericResult {
+    match expr {
+        ExprIntLit(n, span) => NumericResult(check_int_literal(env, n, false, span)),
+        ExprUnary(op, inner, span) => check_numeric_unary(env, op, inner, span),
+        ExprBinary(op, left, right, span) =>
+            check_arithmetic_both(env, { op: op, left: left, right: right, span: span }, tg_type_int()),
+        _ => NoNumericArm
+    }
+}
+
+fn check_numeric_against_nat(env: Env, expr: Expr) -> MaybeNumericResult {
+    match expr {
+        ExprBinary(op, left, right, span) =>
+            check_arithmetic_both(env, { op: op, left: left, right: right, span: span }, tg_type_nat()),
+        _ => NoNumericArm
+    }
+}
+
+/// `+ - * / %` against a numeric type checks both operands against it; an
+/// ordering yields `Bool` and is no numeric arm.
+fn check_arithmetic_both(env: Env, binary: BinaryExpr, ty: TypeHandle) -> MaybeNumericResult {
+    if is_arithmetic(binary.op) {
+        NumericResult(check_both(env, binary, ty))
+    } else {
+        NoNumericArm
+    }
+}
+
+fn check_numeric_unary(env: Env, op: UnaryOp, inner: Expr, span: Span) -> MaybeNumericResult {
+    match op {
+        OpNot() => NoNumericArm,
+        OpNeg() => NumericResult(check_negation(env, inner, span))
+    }
+}
+
+/// `-e` against `Int`: a bare literal folds; anything else checks against
+/// `Int` and negates.
+fn check_negation(env: Env, inner: Expr, span: Span) -> ElabExprResult {
+    match bare_literal(inner) {
+        SomeLiteral(n) => check_int_literal(env, n, true, span),
+        NoLiteral() => negate_checked(env, inner, span)
+    }
+}
+
+fn negate_checked(env: Env, inner: Expr, span: Span) -> ElabExprResult {
+    match check(env, inner, tg_type_int()) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpUnaryOperand("-", span))),
+        ElabExprOk(env2, term, _, cir) =>
+            ElabExprOk(env2, tg_term_int_neg(term), tg_type_int(), CIRIntNeg(cir))
+    }
+}
+
+/// Both operands against one numeric type, then the node for that type.
+fn check_both(env: Env, binary: BinaryExpr, ty: TypeHandle) -> ElabExprResult {
+    match check(env, binary.left, ty) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpBinaryOperand(arith_op_symbol(binary.op), binary.span))),
+        ElabExprOk(env2, lt, _, lcir) =>
+            let li: TermInfo = { term: lt, ty: ty, cir: lcir };
+            finish_with_right(env2, binary.op, li, binary.right, binary.span)
+    }
+}
+
+// ===========================================================================
+// NEGATION
+// ===========================================================================
+
+/// Unary minus: a bare literal folds to an `Int` literal, an `Int` operand
+/// negates, and a `Nat` operand keeps its refusal — reworded to point at `Int`.
+pub fn synth_negation(env: Env, operand: Expr, span: Span) -> ElabExprResult {
+    match bare_literal(operand) {
+        SomeLiteral(n) => check_int_literal(env, n, true, span),
+        NoLiteral() => synth_negation_of(env, operand, span)
+    }
+}
+
+fn synth_negation_of(env: Env, operand: Expr, span: Span) -> ElabExprResult {
+    match synth(env, operand) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpUnaryOperand("-", span))),
+        ElabExprOk(env2, term, ty, cir) =>
+            if tg_types_equal(ty, tg_type_int()) {
+                ElabExprOk(env2, tg_term_int_neg(term), tg_type_int(), CIRIntNeg(cir))
+            } else if tg_types_equal(ty, tg_type_nat()) {
+                ElabExprErr(elab_expr_error(
+                    "numeric negation of a Nat is not supported: Nat has no negative numbers; negate an Int — `-to_int(n)`",
+                    span))
+            } else {
+                let ti: TermInfo = { term: term, ty: ty, cir: cir };
+                negate_compared(env2, ti, span)
+            }
+    }
+}
+
+/// A synthesised operand of some other type: compare it against `Int` the way
+/// `check` would (poison, aliases, foralls), then negate.
+fn negate_compared(env: Env, operand: TermInfo, span: Span) -> ElabExprResult {
+    match compare_synthesized(env, operand, tg_type_int(), span) {
+        ElabExprErr(e) => ElabExprErr(add_expected_because(e, ExpUnaryOperand("-", span))),
+        ElabExprOk(env2, term, _, cir) =>
+            ElabExprOk(env2, tg_term_int_neg(term), tg_type_int(), CIRIntNeg(cir))
+    }
+}
+
+// ===========================================================================
+// BRIDGES: to_int / from_int (intercepted by name in synth_app, ADR 14.9.26c §2.4)
+// ===========================================================================
+
+// Arity is peeled one list cell per helper, as `substring.tg` does: a nested
+// `Cons(arg, Nil())` pattern lowers with a `sorry` in its unreachable arm,
+// which would mark the whole compiler "contains sorry".
+
+/// `to_int(n)`: the identity on the value; traps above the signed maximum.
+pub fn handle_to_int(env: Env, args: List<Expr>, span: Span) -> ElabExprResult {
+    match args {
+        Cons(arg, rest) => handle_to_int_rest(env, arg, rest, span),
+        Nil() => ElabExprErr(to_int_arity_error(span))
+    }
+}
+
+fn handle_to_int_rest(env: Env, arg: Expr, rest: List<Expr>, span: Span) -> ElabExprResult {
+    match rest {
+        Nil() => bridge_nat_to_int(env, arg),
+        Cons(_, _) => ElabExprErr(to_int_arity_error(span))
+    }
+}
+
+fn to_int_arity_error(span: Span) -> ElabExprError {
+    elab_expr_error("`to_int` takes exactly one argument: to_int(nat)", span)
+}
+
+fn bridge_nat_to_int(env: Env, arg: Expr) -> ElabExprResult {
+    match check(env, arg, tg_type_nat()) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, _, cir) =>
+            ElabExprOk(env2, tg_term_nat_to_int(term), tg_type_int(), CIRNatToInt(cir))
+    }
+}
+
+/// `from_int(i)`: clamps negatives to 0 (Lean's `Int.toNat`).
+pub fn handle_from_int(env: Env, args: List<Expr>, span: Span) -> ElabExprResult {
+    match args {
+        Cons(arg, rest) => handle_from_int_rest(env, arg, rest, span),
+        Nil() => ElabExprErr(from_int_arity_error(span))
+    }
+}
+
+fn handle_from_int_rest(env: Env, arg: Expr, rest: List<Expr>, span: Span) -> ElabExprResult {
+    match rest {
+        Nil() => bridge_int_to_nat(env, arg),
+        Cons(_, _) => ElabExprErr(from_int_arity_error(span))
+    }
+}
+
+fn from_int_arity_error(span: Span) -> ElabExprError {
+    elab_expr_error("`from_int` takes exactly one argument: from_int(int)", span)
+}
+
+fn bridge_int_to_nat(env: Env, arg: Expr) -> ElabExprResult {
+    match check(env, arg, tg_type_int()) {
+        ElabExprErr(e) => ElabExprErr(e),
+        ElabExprOk(env2, term, _, cir) =>
+            ElabExprOk(env2, tg_term_int_to_nat(term), tg_type_nat(), CIRIntToNat(cir))
+    }
+}

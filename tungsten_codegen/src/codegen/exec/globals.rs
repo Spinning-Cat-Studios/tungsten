@@ -77,8 +77,18 @@ impl<'ctx> CodeGen<'ctx> {
             return Ok(closure.into());
         }
 
+        // ADR 1.7.26f §2.2: today's globals are top-level functions/thunks, so
+        // an unresolved name is a missing external prototype in this codegen
+        // unit — not an unsupported construct.
+        let unit = self
+            .naming
+            .module_prefix
+            .as_ref()
+            .map(|prefix| format!(" in unit '{prefix}'"))
+            .unwrap_or_default();
         Err(CodeGenError::Unsupported(format!(
-            "global '{name}' not found (global variables not yet supported in codegen)"
+            "top-level function '{name}' referenced but not declared{unit} \
+             (its defining unit must be declared as an external prototype here)"
         )))
     }
 
@@ -277,6 +287,38 @@ mod tests {
         let mut codegen = setup_codegen_with_function(&context);
 
         let result = codegen.compile_global("nonexistent");
-        assert!(result.is_err());
+        match result {
+            Err(CodeGenError::Unsupported(msg)) => {
+                // ADR 1.7.26f §2.2: name the function and the real failure —
+                // a missing declaration, not an unsupported construct.
+                assert!(
+                    msg.contains("top-level function 'nonexistent' referenced but not declared"),
+                    "unexpected message: {msg}"
+                );
+                assert!(
+                    !msg.contains("global variables not yet supported"),
+                    "old misleading message resurfaced: {msg}"
+                );
+            }
+            other => panic!("expected Unsupported error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_compile_global_not_found_names_unit_when_prefix_set() {
+        let context = Context::create();
+        let mut codegen = setup_codegen_with_function(&context);
+        codegen.set_module_prefix("__mono".to_string());
+
+        let result = codegen.compile_global("nonexistent");
+        match result {
+            Err(CodeGenError::Unsupported(msg)) => {
+                assert!(
+                    msg.contains("in unit '__mono'"),
+                    "unit name missing from message: {msg}"
+                );
+            }
+            other => panic!("expected Unsupported error, got {other:?}"),
+        }
     }
 }

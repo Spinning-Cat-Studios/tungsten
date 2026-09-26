@@ -54,6 +54,27 @@ impl<'a> Elaborator<'a> {
     /// Try to elaborate a path-based call as a built-in or constructor application.
     ///
     /// Returns `Ok(Some(...))` if handled, `Ok(None)` to fall through to regular application.
+    ///
+    /// **This table shadows the value environment, and that has consequences for
+    /// `.tg` code that no tool currently reports** (ADR 19.8.26c). A name matched
+    /// here is never resolved, so a `.tg` function carrying it is:
+    ///
+    /// - **invisible to the bootstrap** — every call site is intercepted, so
+    ///   `info def <name> --callers` truthfully reports `none` and
+    ///   `doctor audit-dead-definitions` calls it dead. Neither is wrong; both
+    ///   read as "delete me" and both are answering a bootstrap-side question;
+    /// - **load-bearing for the self-host**, whose `synth_app`
+    ///   (`src/compiler/elab/exprs/apply/app/mod.tg`) intercepts only
+    ///   `expect_type` / `expect_error` / `compare` / `substring` and the two
+    ///   `Int` bridges, and resolves everything else the ordinary way, by bare
+    ///   name.
+    ///
+    /// The tell in a Core IR dump is the **absent `global:` prefix**: a real
+    /// reference carries one, a builtin does not. `driver/modules/build/mod.tg`'s
+    /// `substring` is the live instance, and the two spellings of it disagree —
+    /// `elab_substring` takes a **length**, that function takes an **end index**.
+    /// Tracked as ADR 20.8.26c; do not "clean up" a `.tg` definition whose name
+    /// appears below without reading it first.
     fn try_elab_special_application(
         &mut self,
         path: &crate::ast::Path,
@@ -71,6 +92,10 @@ impl<'a> Elaborator<'a> {
                 "substring" => return self.elab_substring(args, span).map(Some),
                 "expect_type" => return self.elab_expect_type(args, span).map(Some),
                 "expect_error" => return self.elab_expect_error(args, span).map(Some),
+                "__compare" => return self.elab_compare(args, span).map(Some),
+                "compare" => return self.elab_compare_poly(args, span).map(Some),
+                "to_int" => return self.elab_to_int(args, span).map(Some),
+                "from_int" => return self.elab_from_int(args, span).map(Some),
                 _ => {}
             }
         }
@@ -119,6 +144,19 @@ impl<'a> Elaborator<'a> {
     ) -> ElabResult<(Term, Type)> {
         for (position, arg) in args.iter().enumerate() {
             let Type::Arrow(param_ty, result_ty) = current_ty else {
+                // Application against poison (ADR 14.8.26g §2.2): a callee
+                // whose signature failed to collect is registered as
+                // `Type::Error`, and its one recorded error already names the
+                // real fault — an E0013 here would repeat it at every call
+                // site. The argument is still inferred so its own independent
+                // faults surface; the application's result is poison, which
+                // the run-level refusal (D8) keeps out of codegen.
+                if matches!(current_ty, Type::Error) {
+                    let (arg_term, _) = self.infer(arg)?;
+                    current_term = Term::app(current_term, arg_term);
+                    current_ty = Type::Error;
+                    continue;
+                }
                 return Err(ElabError::expected_function(arg.span(), current_ty));
             };
 

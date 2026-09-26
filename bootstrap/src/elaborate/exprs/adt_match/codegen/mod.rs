@@ -190,10 +190,10 @@ impl<'a> Elaborator<'a> {
                 }
                 Err(ElabError::new(
                     Span::new(0, 0),
-                    ElabErrorKind::Other(format!(
-                        "expected sum type in ADT match for {}, got {:?}",
-                        ctx.adt_name, sum_type
-                    )),
+                    ElabErrorKind::MatchScrutineeNotAdt {
+                        adt_name: Some(ctx.adt_name.to_string()),
+                        found: sum_type.clone(),
+                    },
                 ))
             }
         }

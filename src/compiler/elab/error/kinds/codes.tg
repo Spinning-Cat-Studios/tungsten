@@ -1,0 +1,89 @@
+// src/compiler/elab/error/kinds/codes.tg
+// One projection of `ElabErrorKind`: the `E….` code a kind reports under.
+//
+// A total match, so a new variant in `mod.tg` fails to compile here until it
+// is given a code — which is what stops a kind from silently inheriting
+// another's number.
+
+use elab::error::kinds::{ElabErrorKind};
+
+// ===========================================================================
+// ERROR CODES
+// ===========================================================================
+
+/// Get the error code for an error kind.
+pub fn error_kind_code(kind: ElabErrorKind) -> String {
+    match kind {
+        // Type errors (E0001-E0099)
+        ErrTypeMismatch(_, _) => "E0001",
+        ErrArityMismatch(_, _) => "E0002",
+        ErrNotAFunction(_) => "E0003",
+        ErrNotAType(_) => "E0004",
+        ErrNotAnAdt(_) => "E0005",
+        ErrNotASum(_) => "E0006",
+        ErrNotAPair(_) => "E0007",
+        ErrCannotInfer(_) => "E0008",
+        ErrIntLiteralOutOfRange(_) => "E0009",
+
+        // Name resolution errors (E0100-E0199)
+        ErrUnresolvedType(_) => "E0100",
+        ErrUnresolvedValue(_) => "E0101",
+        ErrUnresolvedModule(_) => "E0102",
+        ErrDuplicateDef(_) => "E0103",
+        ErrDuplicateImport(_, _, _, _, _) => "E0106",
+        ErrPrivateAccess(_, _, _) => "E0104",
+        ErrAmbiguousName(_, _) => "E0105",
+        ErrBuiltinTypeRedefined(_) => "E0107",
+
+        // Item/definition errors (E0200-E0299)
+        ErrMissingReturnType(_) => "E0200",
+        ErrInvalidExtern(_) => "E0201",
+        ErrImportNotFound(_) => "E0202",
+        ErrGlobImportEmpty(_) => "E0203",
+        ErrCyclicDependency(_) => "E0204",
+        ErrInvalidVisibility(_) => "E0205",
+        ErrMissingBody(_) => "E0206",
+        
+        // Pattern matching errors (E0300-E0399)
+        ErrInexhaustiveMatch(_) => "E0300",
+        ErrUnreachablePattern() => "E0301",
+        ErrConstructorNotFound(_, _) => "E0302",
+        ErrDuplicateField(_) => "E0303",
+        ErrMissingField(_) => "E0304",
+        ErrExtraField(_) => "E0305",
+        ErrMultiArmMatch(_) => "E0306",
+        ErrPatternTooDeep(_) => "E0307",
+        ErrUnsupportedPattern(_) => "E0308",
+        
+        // Proof errors (E0400-E0499)
+        ErrProofRequired(_) => "E0400",
+        ErrSorryInProd() => "E0401",
+        ErrInvalidRefl(_, _) => "E0402",
+        ErrSubstExpectedEquality(_) => "E0403",
+        ErrTransEndpointMismatch(_, _) => "E0404",
+        ErrCongExpectedFunction(_) => "E0405",
+        ErrMotiveNotPredicate(_) => "E0475",
+        ErrMotiveDomainMismatch(_, _) => "E0476",
+        ErrMotiveBodyNotType() => "E0477",
+        
+        // Reference/mutability errors (E0500-E0599)
+        ErrRefInPureContext() => "E0500",
+        ErrCannotMutate(_) => "E0501",
+        
+        // Expression errors (E0600-E0699)
+        ErrNoReturnContext() => "E0600",
+        ErrNoMainFunction() => "E0601",
+        ErrInvalidMainSig(_) => "E0602",
+        
+        // Soundness gates (E0700-E0799)
+        ErrNonStrictlyPositive(_) => "E0700",
+        ErrCannotProveTermination(_) => "E0710",
+        ErrPartialInProof(_) => "E0711",
+        
+        // Other errors (E0900-E0999)
+        ErrRecursionLimitExceeded(_) => "E0900",
+        ErrPhase1Violation(_) => "E0901",
+        ErrNotImplemented(_) => "E0902",
+        ErrOther(_) => "E0999"
+    }
+}

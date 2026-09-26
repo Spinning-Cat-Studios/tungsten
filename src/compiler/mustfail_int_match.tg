@@ -1,0 +1,42 @@
+// Negative control for test_int_match.tg (ADR 18.9.26e AC 1).
+//
+// The positive suite asserts which arm an integer `match` selects. A
+// comparison the evaluator cannot execute goes silently Stuck in EITHER
+// polarity, and the runner then reports `ok` while asserting nothing (ADR
+// 6.8.26b). So this file asserts something FALSE through the same wrapper,
+// and `check-mustfail-fixtures` (make/quality/tg-tests.mk) requires it to FAIL and to
+// fail for its OWN reason: the runner's failure line must name
+// `test_or_arm_is_not_shadowed_by_the_guard`, the one test below.
+//
+//   tungsten test src/compiler/mustfail_int_match.tg --require-tests
+//     -> assertion failed … test_or_arm_is_not_shadowed_by_the_guard
+//        exit != 0
+//
+// The value chosen is the one a chain built in the wrong order would give:
+// `7` matches the or-of-literals arm (20) BEFORE the guarded arm (30), and
+// only a lowering that tried arms last-to-first, or guards first, answers 30.
+//
+// Deliberately NOT named `test_*.tg`: `make tg-test` globs that pattern and a
+// file that must fail would fail the gate by design.
+
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+
+fn assert_eq_nat(left: Nat, right: Nat) -> Unit {
+    tg_assert_eq_nat(left, right)
+}
+
+fn classify(n: Int) -> Nat {
+    match n {
+        -1 => 10,
+        0 | 7 => 20,
+        x if x > 0 => 30,
+        _ => 40
+    }
+}
+
+/// Asserts `classify(7)` is the guarded arm's 30 — the answer first-match-wins
+/// must NOT give. The name is the failure signature the gate greps for —
+/// rename it together with the `case` arm in make/quality/tg-tests.mk.
+fn test_or_arm_is_not_shadowed_by_the_guard() -> () {
+    assert_eq_nat(classify(7), 30)
+}

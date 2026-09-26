@@ -1,0 +1,75 @@
+// src/compiler/parser/ast/nodes/attributes.tg
+// Item attribute AST nodes (ADR 12.8.26b P1).
+//
+// The two attributes the soundness gates read are `#[partial]` (opt out of
+// termination certification) and `#[decreasing(arg)]` (name the descent
+// parameter when the search is ambiguous). Before this file the self-hosted
+// front end had no representation for either: `#` lexed to `TokHash`,
+// `dispatch_item_kind` had no arm for it, and the resulting parse error was
+// bound and discarded by `parse_items_acc` — so an annotation, a typo'd
+// annotation and no annotation at all were indistinguishable in the output.
+
+use lexer::span::Span;
+use parser::ast::common::{Ident, ident_name};
+use parser::option::{Option, None, Some};
+use driver::ffi::{List, Nil, Cons};
+
+// ===========================================================================
+// ATTRIBUTE
+// ===========================================================================
+
+/// One `#[name]` or `#[name(arg)]` annotation on an item.
+///
+/// `arg` is `None` for a bare attribute. The grammar deliberately stops at one
+/// optional identifier argument: that is exactly what `#[decreasing(arg)]`
+/// needs, and a wider attribute grammar would be a language change rather than
+/// the parser repair this ADR scopes.
+pub type Attribute = {
+    name: Ident,
+    arg: Option<Ident>,
+    span: Span
+}
+
+/// Create an attribute.
+pub fn attribute_new(name: Ident, arg: Option<Ident>, span: Span) -> Attribute {
+    { name: name, arg: arg, span: span }
+}
+
+/// The attribute's name, unwrapped from its `Ident`.
+pub fn attribute_name(attr: Attribute) -> String {
+    ident_name(attr.name)
+}
+
+/// Whether `attrs` carries an attribute called `name`.
+///
+/// The membership test the termination mirror reads for `partial`; kept here
+/// beside the type rather than in the elaborator so both compilers' notion of
+/// "is this definition annotated" has one spelling.
+pub fn attribute_list_has(attrs: List<Attribute>, name: String) -> Bool {
+    match attrs {
+        Nil() => false,
+        Cons(attr, rest) =>
+            if attribute_name(attr) == name {
+                true
+            } else {
+                attribute_list_has(rest, name)
+            }
+    }
+}
+
+/// The argument of the first attribute called `name`, if it has one.
+///
+/// `#[decreasing(a)]` → `Some(a)`. `None` covers both "no such attribute" and
+/// "present but bare"; the caller that needs to tell those apart pairs this
+/// with [`attribute_list_has`].
+pub fn attribute_list_arg(attrs: List<Attribute>, name: String) -> Option<Ident> {
+    match attrs {
+        Nil() => None,
+        Cons(attr, rest) =>
+            if attribute_name(attr) == name {
+                attr.arg
+            } else {
+                attribute_list_arg(rest, name)
+            }
+    }
+}

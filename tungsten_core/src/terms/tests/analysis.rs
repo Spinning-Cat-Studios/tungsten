@@ -199,3 +199,185 @@ fn var_use_count_deeply_nested_lets() {
     let outer = let_str("a", tvar("x"), mid);
     assert_eq!(outer.var_use_count("x"), 2);
 }
+
+// --- sorry_sites (ADR 18.9.26g AC1) ---
+
+use crate::terms::analysis::{Construct, SorryCounts, SorrySite};
+use crate::terms::TermSpan;
+
+fn authored_hole(start: u32, end: u32) -> Term {
+    Term::spanned(Term::Sorry, TermSpan::new(start, end))
+}
+
+fn adt_match_with_arm(binder: &str, body: Term) -> Term {
+    Term::adt_match(
+        Term::Unit,
+        vec![
+            (0, "x".to_string(), Box::new(Term::Zero)),
+            (1, binder.to_string(), Box::new(body)),
+        ],
+    )
+}
+
+fn case_with_right(binder: &str, body: Term) -> Term {
+    Term::Case(
+        Box::new(Term::Unit),
+        "x".to_string(),
+        Box::new(Term::Zero),
+        binder.to_string(),
+        Box::new(body),
+    )
+}
+
+// 18.9.26g AC1: a spanned hole is authored, at its span.
+#[test]
+fn sorry_sites_spanned_hole_is_authored() {
+    let term = Term::Succ(Box::new(authored_hole(3, 8)));
+    assert_eq!(
+        term.sorry_sites(),
+        vec![SorrySite::Authored(TermSpan::new(3, 8))]
+    );
+}
+
+// 18.9.26g AC1: a bare hole as the whole body of an `__unreachable_<n>` arm.
+#[test]
+fn sorry_sites_unreachable_arm_is_synthesised() {
+    let term = adt_match_with_arm("__unreachable_1", Term::Sorry);
+    assert_eq!(
+        term.sorry_sites(),
+        vec![SorrySite::Synthesised(Construct::UnreachablePatternArm)]
+    );
+}
+
+// 18.9.26g AC1: a bare hole as the whole body of an `__abs<n>` branch.
+#[test]
+fn sorry_sites_absurd_branch_is_synthesised() {
+    let term = case_with_right("__abs0", Term::Sorry);
+    assert_eq!(
+        term.sorry_sites(),
+        vec![SorrySite::Synthesised(Construct::AbsurdBranch)]
+    );
+    // The left branch's binder is read too.
+    let left = Term::Case(
+        Box::new(Term::Unit),
+        "__abs2".to_string(),
+        Box::new(Term::Sorry),
+        "y".to_string(),
+        Box::new(Term::Zero),
+    );
+    assert_eq!(
+        left.sorry_sites(),
+        vec![SorrySite::Synthesised(Construct::AbsurdBranch)]
+    );
+}
+
+// 18.9.26g AC1: an intervening node under a marker binder makes it unclassified.
+#[test]
+fn sorry_sites_intervening_let_is_unclassified() {
+    let body = Term::let_in("y", Type::Nat, Term::Zero, Term::Sorry);
+    assert_eq!(
+        adt_match_with_arm("__unreachable_1", body.clone()).sorry_sites(),
+        vec![SorrySite::Unclassified]
+    );
+    assert_eq!(
+        case_with_right("__abs1", body).sorry_sites(),
+        vec![SorrySite::Unclassified]
+    );
+}
+
+// 18.9.26g AC1: any other binder, and near-miss spellings, are unclassified.
+#[test]
+fn sorry_sites_other_binders_are_unclassified() {
+    for binder in [
+        "y",
+        "__unreachable_",
+        "__unreachable_x",
+        "__abs",
+        "__absx",
+        "__rest0",
+        "x__abs1",
+    ] {
+        assert_eq!(
+            adt_match_with_arm(binder, Term::Sorry).sorry_sites(),
+            vec![SorrySite::Unclassified],
+            "arm binder {binder}"
+        );
+        assert_eq!(
+            case_with_right(binder, Term::Sorry).sorry_sites(),
+            vec![SorrySite::Unclassified],
+            "case binder {binder}"
+        );
+    }
+    // The marker kinds do not cross: `__abs` on an AdtMatch arm, `__unreachable_` on a Case.
+    assert_eq!(
+        adt_match_with_arm("__abs1", Term::Sorry).sorry_sites(),
+        vec![SorrySite::Unclassified]
+    );
+    assert_eq!(
+        case_with_right("__unreachable_1", Term::Sorry).sorry_sites(),
+        vec![SorrySite::Unclassified]
+    );
+}
+
+// 18.9.26g AC1: a user binder spelled like the marker holding a spanned hole
+// is still authored — the span, not the binder, decides.
+#[test]
+fn sorry_sites_marker_binder_with_spanned_hole_is_authored() {
+    let term = adt_match_with_arm("__unreachable_1", authored_hole(0, 5));
+    assert_eq!(
+        term.sorry_sites(),
+        vec![SorrySite::Authored(TermSpan::new(0, 5))]
+    );
+}
+
+// 18.9.26g AC1: the scrutinee is never a marker position; spans elsewhere recurse.
+#[test]
+fn sorry_sites_scrutinee_and_spanned_non_hole() {
+    let term = Term::AdtMatch(
+        Box::new(Term::Sorry),
+        vec![(0, "__unreachable_0".to_string(), Box::new(Term::Zero))],
+    );
+    assert_eq!(term.sorry_sites(), vec![SorrySite::Unclassified]);
+    let case = Term::Case(
+        Box::new(Term::Sorry),
+        "__abs0".to_string(),
+        Box::new(Term::Zero),
+        "__abs1".to_string(),
+        Box::new(Term::Zero),
+    );
+    assert_eq!(case.sorry_sites(), vec![SorrySite::Unclassified]);
+    let spanned_succ = Term::spanned(Term::Succ(Box::new(Term::Sorry)), TermSpan::new(1, 2));
+    assert_eq!(spanned_succ.sorry_sites(), vec![SorrySite::Unclassified]);
+    assert!(Term::Zero.sorry_sites().is_empty());
+}
+
+// 18.9.26g AC1: counts sum per class across terms.
+#[test]
+fn sorry_counts_sum_each_class() {
+    let mixed = Term::Pair(
+        Box::new(authored_hole(0, 1)),
+        Box::new(adt_match_with_arm("__unreachable_1", Term::Sorry)),
+    );
+    let absurd = case_with_right("__abs0", Term::Sorry);
+    let counts = SorryCounts::of([&mixed, &absurd, &Term::Sorry, &Term::Zero]);
+    assert_eq!(
+        counts,
+        SorryCounts {
+            authored: 1,
+            synthesised: 2,
+            unclassified: 1
+        }
+    );
+    assert_eq!(counts.not_authored(), 3);
+    assert_eq!(counts.total(), 4);
+    assert_eq!(SorryCounts::default().total(), 0);
+}
+
+#[test]
+fn construct_labels_name_the_lowering() {
+    assert_eq!(
+        Construct::UnreachablePatternArm.label(),
+        "unreachable pattern arm"
+    );
+    assert_eq!(Construct::AbsurdBranch.label(), "absurd branch");
+}

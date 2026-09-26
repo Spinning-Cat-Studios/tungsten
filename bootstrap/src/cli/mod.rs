@@ -2,68 +2,21 @@
 //!
 //! Extracted from main.rs to keep the driver module focused on dispatch logic.
 
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use std::path::PathBuf;
+
+mod expr;
+mod options;
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use expr::ExprCommands;
+pub(crate) use options::{Cli, ColorMode};
 
 use crate::explain;
 use crate::info;
 use tungsten_bootstrap::doctor;
-
-/// Controls when ANSI color codes are emitted in test output.
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-pub enum ColorMode {
-    /// Color when stdout is a TTY (default)
-    Auto,
-    /// Always emit color codes
-    Always,
-    /// Never emit color codes
-    Never,
-}
-
-#[derive(Parser)]
-#[command(name = "tungsten")]
-#[command(author, version, about = "The Tungsten proof language compiler")]
-#[command(
-    long_about = "Tungsten is a proof language that combines programming and theorem proving.\n\n\
-                  This is the bootstrap compiler, written in Rust. Once Tungsten is self-hosting,\n\
-                  it will be replaced by a compiler written in Tungsten itself."
-)]
-#[command(
-    after_help = "Core commands: check, run, test, compile, eval, repl, clean, cache\n\
-                  Diagnostics:   info, explain, doctor, diff, commands\n\
-                  Experience:    sidecar\n\n\
-                  Run `tungsten <command> --help` for details on a specific command.\n\
-                  Run `tungsten commands` for a flat listing of all commands.\n\
-                  Run `tungsten info pipeline` for diagnostic flags and inspection tools."
-)]
-pub(crate) struct Cli {
-    #[command(subcommand)]
-    pub command: Option<Commands>,
-
-    /// Run a file directly (shorthand for `tungsten run <FILE>`)
-    #[arg(value_name = "FILE")]
-    pub file: Option<PathBuf>,
-
-    /// Show verbose output
-    #[arg(short, long, global = true)]
-    pub verbose: bool,
-
-    /// Maximum number of errors to display (0 = no limit)
-    #[arg(long, global = true, default_value = "20")]
-    pub max_errors: usize,
-
-    /// Dump elaborated type annotations to stderr (diagnostic)
-    #[arg(long, global = true)]
-    pub dump_types: bool,
-
-    /// Always show diagnostic hints in error output (even in non-TTY contexts)
-    #[arg(long, global = true)]
-    pub hints: bool,
-
-    /// Suppress diagnostic hints in error output
-    #[arg(long, global = true)]
-    pub no_hints: bool,
-}
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
@@ -101,6 +54,7 @@ pub(crate) enum Commands {
     ///   tungsten test examples/list.tg
     ///   tungsten test examples/list.tg --filter inference
     ///   tungsten test examples/list.tg --check-only
+    ///   tungsten test examples/list.tg --watchdog 300
     Test {
         /// The source file containing tests
         file: PathBuf,
@@ -114,9 +68,27 @@ pub(crate) enum Commands {
         #[arg(long)]
         module: Option<String>,
 
-        /// Only run `expect_type` checks (no codegen); runtime tests are skipped
+        /// Force cost 3: `expect_type` only, runtime tests skipped. Rarely needed — `tg-test-tiers.toml` declares each file's tier (ADR 6.8.26c)
         #[arg(long)]
         check_only: bool,
+
+        /// Fail (exit ≠ 0) when zero runnable tests are discovered — prevents
+        /// a vacuous green run (ADR 2.7.26b T5b)
+        #[arg(long)]
+        require_tests: bool,
+
+        /// Per-test wall-clock bound in seconds; a test that exceeds it is
+        /// reported TIMEOUT instead of hanging. 0 disables (ADR 21.7.26f)
+        #[arg(long, default_value_t = 60)]
+        watchdog: u64,
+
+        /// Print how many assertions each test actually EXECUTED, not just
+        /// whether it passed (ADR 6.8.26b). A zero already fails the run on
+        /// its own; the census exists for the non-zero rows — a test that
+        /// executes 1 of its 3 assertions passes, gates green, and is two
+        /// thirds imaginary
+        #[arg(long)]
+        assertion_census: bool,
 
         /// When to use color in test output
         #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
@@ -215,23 +187,43 @@ pub(crate) enum Commands {
         no_codegen: bool,
 
         /// Enable allocation profiling: emit per-function allocation hooks
-        /// and print a sorted allocation report at program exit.
+        /// and print a sorted allocation report at program exit. The flag
+        /// changes the emitted allocation shape: profiled, every site calls
+        /// __tungsten_alloc unconditionally (the profiler records inside it);
+        /// unprofiled, each site branches on the arena mode and calls malloc
+        /// directly when it is off (ADR 18.9.26c). TUNGSTEN_ARENA=bump[:mib]
+        /// at run time selects the bump arena (ADR 14.9.26b); the report ends
+        /// with the arena's chunk/reserved/used/high-water tail.
         /// Optionally filter to a specific function: --alloc-profile=fn_name
         #[arg(long, value_name = "FN", num_args = 0..=1, default_missing_value = "", require_equals = true)]
         alloc_profile: Option<String>,
+
+        /// Compile only the named codegen unit(s), skipping all others and the
+        /// __mono depot. Requires --emit-llvm. Repeatable. Unit names as shown
+        /// by `tungsten info codegen units` (e.g.
+        /// parser__exprs__pratt__parse_unary_op). Cross-module declares and
+        /// mono ownership still come from the full unit set, so the emitted IR
+        /// matches a full build. For isolating one unit's memory/time during
+        /// IR-construction profiling (ADR 3.7.26b).
+        #[arg(long, value_name = "UNIT")]
+        only_unit: Vec<String>,
+
+        /// Print synthesized comparator Core terms as they are emitted (ADR
+        /// 12.7.26c P6). These terms are built by the codegen-time comparator
+        /// intercept AFTER elaboration, so `--dump-ir` cannot show them.
+        /// Optionally filter to defs whose symbol contains a substring:
+        /// --dump-synthesized=compare_List
+        #[arg(long, value_name = "SYMBOL", num_args = 0..=1, default_missing_value = "", require_equals = true)]
+        dump_synthesized: Option<String>,
     },
 
-    /// Evaluate an expression
-    Eval {
-        /// The expression to evaluate
-        expr: String,
-    },
-
-    /// Start interactive REPL
-    Repl,
-
-    /// Clear the build cache
-    Clean,
+    /// Evaluate an expression or start an interactive REPL
+    #[command(subcommand)]
+    #[command(
+        after_help = "See also: `tungsten run <file>` to evaluate a source file.\n\
+                             The flat `tungsten eval <expr>` and `tungsten repl` spellings still work."
+    )]
+    Expr(ExprCommands),
 
     /// Manage the build cache
     #[command(subcommand)]
@@ -284,6 +276,28 @@ pub(crate) enum Commands {
     },
 
     // --- Hidden aliases for backward compatibility ---
+    /// The flat spelling `tungsten expr eval` replaced (ADR 19.8.26a).
+    #[command(name = "eval", hide = true)]
+    EvalLegacy {
+        /// The expression to evaluate
+        expr: String,
+    },
+
+    /// The flat spelling `tungsten expr repl` replaced (ADR 19.8.26a).
+    #[command(name = "repl", hide = true)]
+    ReplLegacy,
+
+    /// The flat spelling `tungsten cache clean-project` replaced (ADR
+    /// 19.8.26a). Re-homed rather than sub-namespaced: it clears a build cache,
+    /// so `cache` is where it always belonged, and sitting next to
+    /// `cache clean` is what finally makes the scope difference visible instead
+    /// of leaving it to two `after_help` paragraphs warning about each other.
+    #[command(name = "clean", hide = true)]
+    CleanLegacy {
+        /// Entry source file whose project cache to clear (default: current directory)
+        file: Option<PathBuf>,
+    },
+
     /// Compare two LLVM IR files structurally (type defs + function signatures)
     #[command(hide = true)]
     DiffIr {

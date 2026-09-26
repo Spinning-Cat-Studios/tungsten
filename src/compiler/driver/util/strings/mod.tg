@@ -1,0 +1,17 @@
+// String operations: comparison, classification, conversion, search.
+//
+// Split out of a single `strings.tg` by ADR 11.8.26b: the annotation pass put a
+// `#[partial]` on ten index-walking loops in here, which carried the file past
+// the 300-line `.tg` code-health cap.
+
+pub mod compare;
+pub mod classify;
+pub mod convert;
+pub mod search;
+pub mod slice;
+
+pub use driver::util::strings::compare::*;
+pub use driver::util::strings::classify::*;
+pub use driver::util::strings::convert::*;
+pub use driver::util::strings::search::*;
+pub use driver::util::strings::slice::*;

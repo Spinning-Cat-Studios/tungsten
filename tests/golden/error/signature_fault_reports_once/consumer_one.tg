@@ -1,0 +1,5 @@
+use lib::{helper};
+
+pub fn one_a() -> Nat { helper(1) }
+pub fn one_b() -> Nat { helper(2) }
+pub fn one_c(n: Nat) -> Nat { helper(n) }

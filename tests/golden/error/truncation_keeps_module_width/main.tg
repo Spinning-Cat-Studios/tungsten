@@ -1,0 +1,7 @@
+// ADR 14.8.26g P5 (D7): at --max-errors=2 (main.args), a project with two
+// failing modules of 2+1 errors still shows one diagnostic from EACH module,
+// not the first module twice, plus the omitted-count summary.
+mod alpha;
+mod beta;
+
+fn main() -> Nat { 0 }

@@ -6,7 +6,7 @@
 //   2. Elaborate body checking against T
 //   3. Wrap result in Ok (Inl for Result, since Result = Ok(T) | Err(E) and Ok is index 0 = left)
 //
-// Sum encoding note (ADR 19.5.26d §P3): L2's Result<T, E> = Ok(T) | Err(E)
+// Sum encoding note (ADR 19.5.26d §P3): the self-hosted compiler's Result<T, E> = Ok(T) | Err(E)
 // encodes as Sum(T, E). Ok is at source-order index 0, which maps to Inl
 // (left side of Sum). This hardcodes Ok=left; for dynamic index lookup see
 // try_expr.tg. Adding new module imports here triggers latent tungsten1

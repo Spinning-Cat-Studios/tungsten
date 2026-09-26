@@ -11,7 +11,7 @@
 
 use crate::ast::Visibility;
 use crate::elaborate::env::{self, Constructor, TypeDef, TypeDefKind};
-use crate::elaborate::exprs::constructors::context::ConstructorContext;
+use crate::elaborate::exprs::constructors::context::{ConstructorContext, ConstructorParent};
 use crate::elaborate::Elaborator;
 use crate::span::Span;
 use tungsten_core::{Context, Term, Type};
@@ -140,10 +140,47 @@ fn test_get_constructor_context_valid() {
     let info = env::ConstructorInfo::test_stub("Option", 0, 0);
     let result = elab.get_constructor_context(&info, span);
     assert!(result.is_ok());
-    let ctx = result.unwrap();
+    let ConstructorParent::Adt(ctx) = result.unwrap() else {
+        panic!("a healthy ADT is not the poison verdict");
+    };
     assert_eq!(ctx.constructors.len(), 2);
     assert_eq!(ctx.type_params, vec!["T".to_string()]);
     assert!(!ctx.is_recursive); // Option is not recursive
+}
+
+/// `get_constructor_context` on a poisoned parent (ADR 15.8.26d D2) is the
+/// poison verdict, not the "is a stub, not an ADT" internal error the stub
+/// kind used to raise at every constructor call.
+#[test]
+fn test_get_constructor_context_poisoned_parent_is_transit() {
+    let mut elab = make_elaborator();
+    let span = Span::new(0, 0);
+
+    let mut poisoned = TypeDef::test_stub("Event", TypeDefKind::Stub);
+    poisoned.encoded_type = Some(Type::Error);
+    elab.env.define_type(poisoned);
+
+    let info = env::ConstructorInfo::test_stub("Event", 0, 1);
+    let result = elab.get_constructor_context(&info, span);
+    assert!(
+        matches!(result, Ok(ConstructorParent::Poisoned)),
+        "expected the poison verdict, got {:?}",
+        result.err()
+    );
+}
+
+/// The verdict is exact: an UNPOISONED stub is still the internal error —
+/// nothing was reported for it, so silence there would hide a real bug.
+#[test]
+fn test_get_constructor_context_unpoisoned_stub_still_refuses() {
+    let mut elab = make_elaborator();
+    let span = Span::new(0, 0);
+    elab.env
+        .define_type(TypeDef::test_stub("Pending", TypeDefKind::Stub));
+
+    let info = env::ConstructorInfo::test_stub("Pending", 0, 1);
+    let result = elab.get_constructor_context(&info, span);
+    assert!(result.is_err());
 }
 
 /// Test types_pattern_match with type variable matches anything.

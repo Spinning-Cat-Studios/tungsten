@@ -1,0 +1,13 @@
+[E0062] Error: cannot prove termination of `rec`
+   ╭─[tests/golden/error/termination_higher_order.tg:6:1]
+   │
+ 6 │ fn rec(l: Lst) -> Nat { apply(rec, l) }
+   │ ───────────────────┬───────────────────  
+   │                    ╰───────────────────── 
+   │ 
+   │ Help: call the definition directly so the recursion is visible, or mark it `#[partial]`
+   │ 
+   │ Note: `rec` is mentioned outside call position, so the recursive call cannot be inspected
+───╯
+
+error: aborting due to 1 error

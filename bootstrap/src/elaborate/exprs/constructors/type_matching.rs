@@ -45,8 +45,10 @@ impl<'a> Elaborator<'a> {
 
         for (name, type_def) in self.env.iter_types() {
             if let TypeDefKind::ADT(constructors) = &type_def.kind {
-                // Encode the ADT as a sum type (may contain type variables for generic ADTs)
-                let encoded = self.encode_adt_constructors_to_sum(constructors);
+                // Encode the ADT in the canonical comparison shape (may
+                // contain type variables for generic ADTs)
+                let encoded =
+                    self.encode_adt_constructors_to_sum(name, &type_def.params, constructors);
                 // Use pattern matching that allows type variables to match anything
                 if self.types_pattern_match(&encoded, ty, &type_def.params) {
                     return Some(name.clone());
@@ -103,6 +105,14 @@ impl<'a> Elaborator<'a> {
         concrete: &Type,
         type_params: &[String],
     ) -> bool {
+        // Primitive types must match exactly (ADR 18.9.26f). A pattern over both
+        // names rather than a match guard: a mixed pair falls through to the
+        // arms below exactly as it did before.
+        if let (Some(pattern_name), Some(concrete_name)) =
+            (pattern.primitive_name(), concrete.primitive_name())
+        {
+            return pattern_name == concrete_name;
+        }
         match (pattern, concrete) {
             // Type variable in pattern matches anything
             (Type::TyVar(name), _) if type_params.contains(name) => true,
@@ -132,16 +142,28 @@ impl<'a> Elaborator<'a> {
                         .all(|(p, c)| self.types_pattern_match(p, c, type_params))
             }
 
+            // Flat ADT (ADR 2.2.26 3+-ctor policy): same name, matching args,
+            // and variant payloads matched pairwise by (name, payload). Needed
+            // since encode_adt_constructors_to_sum produces the canonical Adt
+            // shape for 3+-ctor ADTs (ADR 21.7.26e third-encoder fold).
+            (Type::Adt(pn, pa, pv), Type::Adt(cn, ca, cv)) => {
+                pn == cn
+                    && pa.len() == ca.len()
+                    && pv.len() == cv.len()
+                    && pa
+                        .iter()
+                        .zip(ca.iter())
+                        .all(|(p, c)| self.types_pattern_match(p, c, type_params))
+                    && pv
+                        .iter()
+                        .zip(cv.iter())
+                        .all(|((pname, pty), (cname, cty))| {
+                            pname == cname && self.types_pattern_match(pty, cty, type_params)
+                        })
+            }
+
             // Ref types must match their inner types
             (Type::Ref(p), Type::Ref(c)) => self.types_pattern_match(p, c, type_params),
-
-            // Base types must match exactly
-            (Type::Nat, Type::Nat)
-            | (Type::Bool, Type::Bool)
-            | (Type::String, Type::String)
-            | (Type::Unit, Type::Unit)
-            | (Type::Void, Type::Void)
-            | (Type::Prop, Type::Prop) => true,
 
             _ => false,
         }

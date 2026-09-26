@@ -1,13 +1,118 @@
 //! Arithmetic, comparison, string, and recursive type term constructors.
 //!
 //! Nat operations (+, -, *, /, %), comparison operators (<, <=, >, >=, ==),
-//! string operations (lit, concat, len, eq), and recursive types (fix, fold, unfold).
+//! signed `Int` operations (ADR 14.9.26c), string operations (lit, concat,
+//! len, eq), and recursive types (fix, fold, unfold).
+
+use serde::{Deserialize, Serialize};
 
 use crate::types::Type;
 
 use super::Term;
 
+/// The operator of an [`Term::IntBin`] node (ADR 14.9.26c).
+///
+/// One enum rather than ten variants so every `Term` dispatcher gains one arm
+/// and the per-operator `match` lives in a function of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum IntBinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl IntBinOp {
+    /// The source-level operator, as the printer and the trap message spell it.
+    #[must_use]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            IntBinOp::Add => "+",
+            IntBinOp::Sub => "-",
+            IntBinOp::Mul => "*",
+            IntBinOp::Div => "/",
+            IntBinOp::Mod => "%",
+            IntBinOp::Eq => "==",
+            IntBinOp::Lt => "<",
+            IntBinOp::Le => "<=",
+            IntBinOp::Gt => ">",
+            IntBinOp::Ge => ">=",
+        }
+    }
+
+    /// `true` for the six comparison operators, whose result is `Bool`.
+    #[must_use]
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            IntBinOp::Eq | IntBinOp::Lt | IntBinOp::Le | IntBinOp::Gt | IntBinOp::Ge
+        )
+    }
+
+    /// The operator's numeric code, as it crosses the FFI (`tg_term_int_bin`).
+    #[must_use]
+    pub fn code(self) -> u64 {
+        self as u64
+    }
+
+    /// Inverse of [`IntBinOp::code`]; `None` for a code no operator owns.
+    #[must_use]
+    pub fn from_code(code: u64) -> Option<IntBinOp> {
+        const ALL: [IntBinOp; 10] = [
+            IntBinOp::Add,
+            IntBinOp::Sub,
+            IntBinOp::Mul,
+            IntBinOp::Div,
+            IntBinOp::Mod,
+            IntBinOp::Eq,
+            IntBinOp::Lt,
+            IntBinOp::Le,
+            IntBinOp::Gt,
+            IntBinOp::Ge,
+        ];
+        ALL.get(usize::try_from(code).ok()?).copied()
+    }
+}
+
 impl Term {
+    // === Signed Integer Operations (ADR 14.9.26c) ===
+
+    /// Create a signed integer literal
+    #[must_use]
+    pub fn int_lit(value: i64) -> Term {
+        Term::IntLit(value)
+    }
+
+    /// Create a signed binary operation: a `op` b
+    #[must_use]
+    pub fn int_bin(op: IntBinOp, a: Term, b: Term) -> Term {
+        Term::IntBin(op, Box::new(a), Box::new(b))
+    }
+
+    /// Create signed negation: −a
+    #[must_use]
+    pub fn int_neg(a: Term) -> Term {
+        Term::IntNeg(Box::new(a))
+    }
+
+    /// Create the `Nat → Int` bridge: `to_int(n)`
+    #[must_use]
+    pub fn nat_to_int(n: Term) -> Term {
+        Term::NatToInt(Box::new(n))
+    }
+
+    /// Create the `Int → Nat` bridge: `from_int(i)`
+    #[must_use]
+    pub fn int_to_nat(i: Term) -> Term {
+        Term::IntToNat(Box::new(i))
+    }
+
     /// Create natural addition: a + b
     #[must_use]
     pub fn nat_add(a: Term, b: Term) -> Term {

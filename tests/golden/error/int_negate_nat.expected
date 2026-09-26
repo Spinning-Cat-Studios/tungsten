@@ -1,0 +1,11 @@
+[E0100] Error: `numeric negation of a Nat` is not supported
+   ╭─[tests/golden/error/int_negate_nat.tg:2:23]
+   │
+ 2 │ fn f(n: Nat) -> Nat { -n }
+   │                       ─┬  
+   │                        ╰── 
+   │ 
+   │ Help: Nat has no negative numbers; negate an Int — `-to_int(n)`
+───╯
+
+error: aborting due to 1 error

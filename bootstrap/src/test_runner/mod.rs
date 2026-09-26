@@ -1,16 +1,22 @@
 //! `tungsten test` — test discovery, execution, and reporting (ADR 5.5.26a).
 
+mod discovery;
+mod run;
+mod scope;
+mod summary;
+mod tier;
+
 #[cfg(test)]
 mod tests;
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Instant;
-
-use tungsten_core::Type;
 
 use crate::cli::ColorMode;
+
+use discovery::{classify_empty_suite, discover_tests, EmptySuiteAction};
+use scope::{scope_defs_to_module, ModuleScopeResult};
 
 /// ANSI text styles for test output.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,7 +45,6 @@ fn paint(s: &str, style: Style, use_color: bool) -> String {
 }
 
 use tungsten_bootstrap::driver::{self, Mode, PipelineOpts, PipelineResult};
-use tungsten_bootstrap::elaborate::CoreDef;
 
 /// A discovered test function.
 #[derive(Debug)]
@@ -51,133 +56,89 @@ struct TestFunction {
 #[derive(Debug)]
 enum TestOutcome {
     Passed,
-    #[allow(dead_code)] // Will be used when runtime assertion capture is implemented
     Failed(String),
     Skipped(String),
+    /// The watchdog deadline elapsed before the body reached a value
+    /// (ADR 21.7.26f / D1). Counted as a failure, but reported distinctly:
+    /// "this test never came back" is a different diagnosis from
+    /// "this test's assertion was false".
+    TimedOut {
+        secs: u64,
+        steps: u64,
+    },
+    /// A global re-entered its own forcing during evaluation — it has no
+    /// value (ADR 22.7.26a). Counted as a failure, reported distinctly from
+    /// both `Failed` and `TimedOut`: pre-detection this shape was a stack
+    /// overflow, and folding it into a passing "stuck" outcome would let the
+    /// test go silently green (§1.3). The cycle is the ordered path,
+    /// closed — `["f", "f"]` for direct self-reference.
+    BlackHole {
+        cycle: Vec<String>,
+    },
+    /// A structural comparison never ran (ADR 1.8.26b D3): `compare<T>` at a
+    /// `T` whose comparator could not be synthesized, a residual comparison
+    /// reaching an assertion, or a projection into a non-pair. Counted as a
+    /// failure and reported distinctly for the same reason `BlackHole` is —
+    /// pre-detection every one of these was reported **`ok`**, because the
+    /// assertion never executed and so never set the failure flag. "This test
+    /// asserted nothing" is a different diagnosis from "this assertion was
+    /// false", and conflating them is what made the defect class invisible.
+    NeverCompared {
+        reason: String,
+    },
+    /// The body reached a value having executed **zero** assertions
+    /// (ADR 6.8.26b). Counted as a failure and reported distinctly for the
+    /// same reason `NeverCompared` is, and it covers the route that one
+    /// cannot: 1.8.26b's guard inspects an assertion's operands, so it fires
+    /// only when the assertion runs. When an enclosing expression goes `Stuck`
+    /// first — an extern outside `EXECUTABLE_EXTERNS`, say — the assertion is
+    /// never reached, there are no operands to inspect, and the test used to
+    /// report `ok`. Counting executions catches both without knowing why.
+    AssertedNothing,
+    /// The body executed at least one assertion and then stopped making
+    /// progress (ADR 6.8.26b D7) — it reached a residual, not `Unit`.
+    ///
+    /// The evaluator returns a stuck term as a *value* (`StepResult::Stuck =>
+    /// return current`), so this arrives as `Ok`, not `Err`, and the runner
+    /// used to discard it. A test whose *third* assertion sticks therefore
+    /// reported `ok` on a count of two — partial vacuity that the
+    /// zero-assertion check cannot see, because the count is nonzero.
+    ///
+    /// Ordered AFTER `AssertedNothing`: a body that sticks before its first
+    /// assertion has both a zero count and a residual, and "asserted nothing"
+    /// is the more useful of the two diagnoses.
+    DidNotFinish {
+        assertions: u64,
+    },
+    /// A test the manifest lists as expected to fail, which duly failed
+    /// (ADR 6.8.26c D6). Reported and named, but not gating.
+    ///
+    /// `owner` is the successor ADR that will remove the entry — required by
+    /// the manifest schema, because an expected failure with nobody's name on
+    /// it is just a disabled test. `reported` carries the outcome it would
+    /// otherwise have had, so the reader still sees *how* it failed rather
+    /// than only that it was permitted to.
+    ExpectedFailure {
+        owner: String,
+        reported: Box<TestOutcome>,
+    },
 }
 
-/// Discovery error for non-conforming test_* functions.
-#[derive(Debug)]
-struct DiscoveryError {
-    name: String,
-    reason: String,
-}
-
-/// Check if a type represents `Unit` (arity-0, returns Unit).
-fn is_unit_type(ty: &Type) -> bool {
-    matches!(ty, Type::Unit)
-}
-
-/// Check if a type is an arrow (function) type.
-fn is_arrow_type(ty: &Type) -> bool {
-    matches!(ty, Type::Arrow(_, _))
-}
-
-/// Discover test functions from elaborated definitions.
-///
-/// Returns (valid tests, discovery errors).
-fn discover_tests(
-    defs: &[CoreDef],
-    filter: Option<&str>,
-) -> (Vec<TestFunction>, Vec<DiscoveryError>) {
-    let mut tests = Vec::new();
-    let mut errors = Vec::new();
-
-    for def in defs {
-        if !def.name.starts_with("test_") {
-            continue;
+impl TestOutcome {
+    /// The short label this outcome prints under, used for the nested line an
+    /// `ExpectedFailure` reports its underlying diagnosis on.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Passed => "ok",
+            Self::Failed(_) => "FAILED",
+            Self::Skipped(_) => "skipped",
+            Self::TimedOut { .. } => "TIMEOUT",
+            Self::BlackHole { .. } => "BLACK HOLE",
+            Self::NeverCompared { .. } => "NEVER COMPARED",
+            Self::AssertedNothing => "ASSERTED NOTHING",
+            Self::DidNotFinish { .. } => "DID NOT FINISH",
+            Self::ExpectedFailure { .. } => "EXPECTED FAILURE",
         }
-
-        // Apply filter
-        if let Some(pattern) = filter {
-            if !def.name.contains(pattern) {
-                continue;
-            }
-        }
-
-        // Validate: must be arity 0 (not an arrow type) and return Unit
-        if is_arrow_type(&def.ty) {
-            errors.push(DiscoveryError {
-                name: def.name.clone(),
-                reason: "test function must take no parameters".to_string(),
-            });
-            continue;
-        }
-
-        if !is_unit_type(&def.ty) {
-            errors.push(DiscoveryError {
-                name: def.name.clone(),
-                reason: format!("test function must return Unit, found {}", def.ty),
-            });
-            continue;
-        }
-
-        tests.push(TestFunction {
-            name: def.name.clone(),
-        });
-    }
-
-    (tests, errors)
-}
-
-/// Result of scoping definitions to a target module (ADR 12.5.26b).
-#[derive(Debug)]
-enum ModuleScopeResult {
-    /// Exactly one module matched; contains the defs from that module.
-    Matched(Vec<CoreDef>),
-    /// No module matched the target path.
-    NoMatch,
-    /// Multiple modules matched (ambiguous suffix); contains the matching paths.
-    Ambiguous(Vec<PathBuf>),
-}
-
-/// Scope definitions to a single module by matching `target` against `module_defs` source paths.
-///
-/// The target is normalized (strip leading `./`, canonicalize) and compared against
-/// each module entry's source file path. Matches are tried as:
-/// 1. Exact path match (after normalization)
-/// 2. Suffix match (target is a suffix of the module source path)
-///
-/// If multiple modules match via suffix, returns `Ambiguous`.
-fn scope_defs_to_module(
-    module_defs: &[(Vec<String>, PathBuf, Vec<CoreDef>)],
-    target: &str,
-    project_root: &Path,
-) -> ModuleScopeResult {
-    // Normalize the target: strip leading "./" and resolve relative to project_root
-    let target_path = Path::new(target);
-    let normalized = if target_path.is_absolute() {
-        target_path.to_path_buf()
-    } else {
-        // Strip leading "./" by canonicalizing components
-        let stripped = target.strip_prefix("./").unwrap_or(target);
-        project_root.join(stripped)
-    };
-
-    let mut matches: Vec<(PathBuf, Vec<CoreDef>)> = Vec::new();
-
-    for (_mod_path, source_file, defs) in module_defs {
-        // Try exact match first
-        if source_file == &normalized {
-            return ModuleScopeResult::Matched(defs.clone());
-        }
-
-        // Try suffix match: does the module source path end with the target?
-        let stripped = target.strip_prefix("./").unwrap_or(target);
-        if let Ok(suffix) = Path::new(stripped).strip_prefix(".") {
-            // Already stripped
-            if source_file.ends_with(suffix) {
-                matches.push((source_file.clone(), defs.clone()));
-            }
-        } else if source_file.ends_with(stripped) {
-            matches.push((source_file.clone(), defs.clone()));
-        }
-    }
-
-    match matches.len() {
-        0 => ModuleScopeResult::NoMatch,
-        1 => ModuleScopeResult::Matched(matches.into_iter().next().unwrap().1),
-        _ => ModuleScopeResult::Ambiguous(matches.into_iter().map(|(p, _)| p).collect()),
     }
 }
 
@@ -187,25 +148,67 @@ pub struct TestOptions<'a> {
     pub filter: Option<&'a str>,
     pub module: Option<&'a str>,
     pub check_only: bool,
+    pub require_tests: bool,
+    /// Print the per-test executed-assertion count (ADR 6.8.26b).
+    pub assertion_census: bool,
+    /// Per-test wall-clock bound in seconds; `0` disables the watchdog
+    /// (ADR 21.7.26f / D1).
+    pub watchdog_secs: u64,
     pub color: ColorMode,
     pub verbose: bool,
     pub max_errors: usize,
     pub dump_types: bool,
 }
 
+/// What `tg-test-tiers.toml` says about this entry file.
+struct ManifestVerdict {
+    tier: Option<tier::CostTier>,
+    /// Test name → the successor ADR owning its expected-failure entry.
+    expected_failures: std::collections::BTreeMap<String, String>,
+}
+
+/// Resolve `file`'s manifest verdict, or the empty one if nothing governs it.
+///
+/// Resolved BEFORE the pipeline runs, so a mis-declaration fails in
+/// milliseconds rather than after a whole-compiler elaboration.
+fn manifest_verdict(file: &Path) -> Result<ManifestVerdict, tier::TierError> {
+    let Some(manifest) = tier::TierManifest::governing(file)? else {
+        return Ok(ManifestVerdict {
+            tier: None,
+            expected_failures: std::collections::BTreeMap::new(),
+        });
+    };
+    let source = std::fs::read_to_string(file).unwrap_or_default();
+    Ok(ManifestVerdict {
+        tier: manifest.tier_for(file, &source)?,
+        expected_failures: manifest.expected_failures(file),
+    })
+}
+
 /// Run the test command.
 pub fn cmd_test(opts: &TestOptions<'_>) -> ExitCode {
+    let verdict = match manifest_verdict(opts.file) {
+        Ok(verdict) => verdict,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let pipeline_opts = PipelineOpts {
         mode: Mode::Test,
         verbose: opts.verbose,
         dump_types: opts.dump_types,
     };
 
-    let (defs, module_defs) =
+    let (defs, module_defs, comparator_types) =
         match driver::run_file_with_options(opts.file, &pipeline_opts, false, opts.max_errors) {
             Ok(PipelineResult::Tested {
-                defs, module_defs, ..
-            }) => (defs, module_defs),
+                defs,
+                module_defs,
+                comparator_types,
+                ..
+            }) => (defs, module_defs, comparator_types),
             Ok(PipelineResult::Failed) => return ExitCode::FAILURE,
             Ok(_) => {
                 eprintln!("error: unexpected pipeline result");
@@ -217,12 +220,20 @@ pub fn cmd_test(opts: &TestOptions<'_>) -> ExitCode {
             }
         };
 
-    // Scope defs to target module if --module is provided (ADR 12.5.26b)
+    // Scope defs to target module if --module is provided (ADR 12.5.26b).
+    // `defs` (the full set) is retained as the evaluator's globals so a scoped test
+    // can still call helpers defined in other modules (ADR 29.6.26f / T13).
     let scoped_defs = if let Some(module_target) = opts.module {
         let project_root = opts.file.parent().unwrap_or(Path::new("."));
         match scope_defs_to_module(&module_defs, module_target, project_root) {
             ModuleScopeResult::Matched(defs) => defs,
             ModuleScopeResult::NoMatch => {
+                if opts.require_tests {
+                    eprintln!(
+                        "error: no module matching '{module_target}' found and --require-tests is set"
+                    );
+                    return ExitCode::FAILURE;
+                }
                 eprintln!("warning: no module matching '{module_target}' found; 0 tests run");
                 return ExitCode::SUCCESS;
             }
@@ -235,7 +246,7 @@ pub fn cmd_test(opts: &TestOptions<'_>) -> ExitCode {
             }
         }
     } else {
-        defs
+        defs.clone()
     };
 
     let (tests, discovery_errors) = discover_tests(&scoped_defs, opts.filter);
@@ -245,9 +256,19 @@ pub fn cmd_test(opts: &TestOptions<'_>) -> ExitCode {
         eprintln!("warning: skipping {}: {}", err.name, err.reason);
     }
 
-    if tests.is_empty() && discovery_errors.is_empty() {
-        println!("no tests found");
-        return ExitCode::SUCCESS;
+    match classify_empty_suite(tests.len(), discovery_errors.len(), opts.require_tests) {
+        EmptySuiteAction::FailRequireTests => {
+            eprintln!(
+                "error: zero runnable tests discovered (--require-tests); {} function(s) skipped",
+                discovery_errors.len()
+            );
+            return ExitCode::FAILURE;
+        }
+        EmptySuiteAction::ReportNoTests => {
+            println!("no tests found");
+            return ExitCode::SUCCESS;
+        }
+        EmptySuiteAction::Proceed => {}
     }
 
     let use_color = match opts.color {
@@ -256,104 +277,12 @@ pub fn cmd_test(opts: &TestOptions<'_>) -> ExitCode {
         ColorMode::Auto => std::io::stdout().is_terminal(),
     };
 
-    run_and_report(&tests, opts.check_only, use_color)
-}
-
-/// Run tests and print results.
-fn run_and_report(tests: &[TestFunction], check_only: bool, use_color: bool) -> ExitCode {
-    let total = tests.len();
-    println!(
-        "\nrunning {} test{}",
-        total,
-        if total == 1 { "" } else { "s" }
-    );
-    println!();
-
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    let mut skipped = 0usize;
-    let mut failures: Vec<(&str, String)> = Vec::new();
-
-    let start = Instant::now();
-
-    for test in tests {
-        let outcome = if check_only {
-            // In check-only mode, we've already evaluated expect_type during
-            // elaboration. Runtime tests are reported as skipped.
-            TestOutcome::Skipped("check-only".to_string())
-        } else {
-            // For MVP, all test_* functions that passed elaboration with
-            // ElabMode::Test have already had their expect_type assertions
-            // evaluated. Runtime assert_eq_* would require codegen.
-            // Since the bootstrap evaluator ran these during elaboration,
-            // if we got here, the test passed.
-            TestOutcome::Passed
-        };
-
-        match &outcome {
-            TestOutcome::Passed => {
-                println!(
-                    "test {} ... {}",
-                    test.name,
-                    paint("ok", Style::Green, use_color)
-                );
-                passed += 1;
-            }
-            TestOutcome::Failed(msg) => {
-                println!(
-                    "test {} ... {}",
-                    test.name,
-                    paint("FAILED", Style::Red, use_color)
-                );
-                failures.push((&test.name, msg.clone()));
-                failed += 1;
-            }
-            TestOutcome::Skipped(reason) => {
-                println!(
-                    "test {} ... {} ({})",
-                    test.name,
-                    paint("skipped", Style::Yellow, use_color),
-                    reason
-                );
-                skipped += 1;
-            }
-        }
-    }
-
-    let elapsed = start.elapsed();
-
-    // Print failures detail
-    if !failures.is_empty() {
-        println!();
-        println!("{}", paint("failures:", Style::Bold, use_color));
-        for (name, msg) in &failures {
-            println!("  {name}:");
-            for line in msg.lines() {
-                println!("    {line}");
-            }
-        }
-    }
-
-    // Print summary
-    println!();
-    let status = if failed > 0 {
-        paint("FAILED", Style::BoldRed, use_color)
-    } else {
-        paint("ok", Style::BoldGreen, use_color)
+    let run_opts = run::RunOptions {
+        check_only: tier::should_skip_bodies(opts.check_only, verdict.tier),
+        watchdog_secs: opts.watchdog_secs,
+        use_color,
+        assertion_census: opts.assertion_census,
+        expected_failures: verdict.expected_failures,
     };
-    println!(
-        "{} {}. {} passed; {} failed; {} skipped; finished in {:.2}s",
-        paint("result:", Style::Bold, use_color),
-        status,
-        passed,
-        failed,
-        skipped,
-        elapsed.as_secs_f64(),
-    );
-
-    if failed > 0 {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    run::run_and_report(&tests, &defs, &comparator_types, &run_opts)
 }

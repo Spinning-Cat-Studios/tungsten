@@ -37,6 +37,14 @@ pub struct ModuleContents {
     pub imported_values: HashMap<String, ImportInfo>,
     /// Imported constructors: local name → import info
     pub imported_constructors: HashMap<String, ImportInfo>,
+    /// Re-export provenance for values copied by the driver's `pub use` pass
+    /// (ADR 12.7.26a §2.1): local name → (source module, original name).
+    /// The driver copies re-exported names into `values` without provenance;
+    /// this map preserves the chain so canonical value resolution can walk
+    /// through re-exporting modules. Kept separate from `imported_values` so
+    /// glob-import expansion and duplicate-import checks never see these
+    /// synthesized entries.
+    pub reexported_value_sources: HashMap<String, (ModulePath, String)>,
 }
 
 /// Pre-elaboration constructor details from the parsed AST (ADR 5.5.26b).

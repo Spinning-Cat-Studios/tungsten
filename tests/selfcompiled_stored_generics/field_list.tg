@@ -1,0 +1,66 @@
+// tests/selfcompiled_stored_generics/field_list.tg
+// ADR 21.7.26k (D3): tungsten1-run regression battery over stored generic
+// instantiations, mirroring the L1 reproducer matrix (ADR 21.7.26e §2.1).
+// This file: CONTROL cells — List (k=1) stored in record FIELD position,
+// across all four argument categories {builtin, record, 2-ctor sum, nested}.
+// Run with `./tungsten1 check` (L2 elaborates it — `tungsten test` would
+// only exercise the already-fixed L1).
+
+pub type List<T> = Nil | Cons(T, List<T>)
+
+pub fn touch_list<X>(xs: List<X>) -> List<X> { xs }
+
+type Rec = { count: Nat, label: String }
+
+type Choice =
+    | ChoiceNat(Nat)
+    | ChoiceStr(String)
+
+// Cell: field × List × builtin (Nat)
+type FieldListNat = { stored: List<Nat> }
+
+fn project_list_nat(s: FieldListNat) -> List<Nat> { s.stored }
+
+fn roundtrip_list_nat(s: FieldListNat) -> FieldListNat {
+    { stored: touch_list(s.stored) }
+}
+
+// Cell: field × List × record
+type FieldListRec = { stored: List<Rec> }
+
+fn project_list_rec(s: FieldListRec) -> List<Rec> { s.stored }
+
+fn roundtrip_list_rec(s: FieldListRec) -> FieldListRec {
+    { stored: touch_list(s.stored) }
+}
+
+// Cell: field × List × 2-ctor sum
+type FieldListChoice = { stored: List<Choice> }
+
+fn project_list_choice(s: FieldListChoice) -> List<Choice> { s.stored }
+
+fn roundtrip_list_choice(s: FieldListChoice) -> FieldListChoice {
+    { stored: touch_list(s.stored) }
+}
+
+// Cell: field × List × nested (List<Rec> — the sibling-instantiation shape
+// that collapsed to the μ-variable pre-fix on L1)
+type FieldListNested = { stored: List<List<Rec>> }
+
+fn project_list_nested(s: FieldListNested) -> List<List<Rec>> { s.stored }
+
+fn roundtrip_list_nested(s: FieldListNested) -> FieldListNested {
+    { stored: touch_list(s.stored) }
+}
+
+pub fn main() -> Nat {
+    let nat_cell: FieldListNat = { stored: Cons(1, Nil) };
+    let rec_cell: FieldListRec = { stored: Nil };
+    let choice_cell: FieldListChoice = { stored: Cons(ChoiceNat(2), Nil) };
+    let nested_cell: FieldListNested = { stored: Nil };
+    let _n = project_list_nat(roundtrip_list_nat(nat_cell));
+    let _r = project_list_rec(roundtrip_list_rec(rec_cell));
+    let _c = project_list_choice(roundtrip_list_choice(choice_cell));
+    let _x = project_list_nested(roundtrip_list_nested(nested_cell));
+    0
+}

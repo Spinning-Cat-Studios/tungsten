@@ -1,25 +1,20 @@
 // src/compiler/elab/cir/constructors.tg
-// Helper constructor functions for CodegenIR and CodegenType.
+// Helper constructor functions for CodegenIR — the TERM half of the CIR
+// builder surface.
+//
+// The CodegenType constructors (`ct_*`) and the TypeHandle → CodegenType
+// conversion that feeds them live in the sibling `type_constructors.tg`,
+// split out by ADR 10.9.26b along the CIR node family seam.
 
-use driver::ffi::{List, Nil, Cons, cstring_to_string};
-use elab::ffi::{
-    TypeHandle,
-    tg_type_tag,
-    tg_type_get_arrow_domain, tg_type_get_arrow_codomain,
-    tg_type_get_product_left, tg_type_get_product_right,
-    tg_type_get_sum_left, tg_type_get_sum_right,
-    tg_type_get_forall_var, tg_type_get_forall_body,
-    tg_type_get_mu_var, tg_type_get_mu_body,
-    tg_type_get_tyvar_name
-};
+use driver::ffi::{List, Nil, Cons};
+use elab::ffi::TypeHandle;
 use elab::cir::free_vars::free_vars;
+use elab::cir::type_constructors::type_handle_to_codegen_type;
 use elab::cir::types::{CodegenIR, CodegenType,
     CIRNatLit, CIRVar, CIRGlobal, CIRLambda, CIRApp, CIRLet,
     CIRPair, CIRFst, CIRSnd, CIRInl, CIRInr, CIRCase,
     CIRIf, CIRFold, CIRUnfold, CIRExternCall,
-    CIRCaptureList, CIRCaptureNil,
-    CTNat, CTBool, CTString, CTUnit, CTVoid, CTProp,
-    CTArrow, CTPair, CTSum, CTRef, CTPtr, CTVar, CTForall, CTMu, CTEq
+    CIRIntLit, CIRIntBin, CIRIntNeg, CIRNatToInt, CIRIntToNat
 };
 
 // ===========================================================================
@@ -29,6 +24,33 @@ use elab::cir::types::{CodegenIR, CodegenType,
 /// Create a natural number literal CIR.
 pub fn cir_nat_lit(n: Nat) -> CodegenIR {
     CIRNatLit(n)
+}
+
+// --- Signed integers (ADR 14.9.26c) ---
+
+/// Create a signed literal CIR from its two's-complement bits.
+pub fn cir_int_lit(bits: Nat) -> CodegenIR {
+    CIRIntLit(bits)
+}
+
+/// Create a signed binary operation; `op` is the bootstrap's `IntBinOp::code`.
+pub fn cir_int_bin(op: Nat, a: CodegenIR, b: CodegenIR) -> CodegenIR {
+    CIRIntBin(op, a, b)
+}
+
+/// Create signed negation.
+pub fn cir_int_neg(a: CodegenIR) -> CodegenIR {
+    CIRIntNeg(a)
+}
+
+/// Create the `Nat → Int` bridge.
+pub fn cir_nat_to_int(n: CodegenIR) -> CodegenIR {
+    CIRNatToInt(n)
+}
+
+/// Create the `Int → Nat` bridge.
+pub fn cir_int_to_nat(i: CodegenIR) -> CodegenIR {
+    CIRIntToNat(i)
 }
 
 /// Create a variable reference.
@@ -116,139 +138,4 @@ pub fn cir_unfold(mu_ty: CodegenType, v: CodegenIR) -> CodegenIR {
 /// Create an extern call.
 pub fn cir_extern_call(name: String, args: List<CodegenIR>) -> CodegenIR {
     CIRExternCall(name, args)
-}
-
-// ===========================================================================
-// TYPE HELPER CONSTRUCTORS
-// ===========================================================================
-
-/// Create Nat type.
-pub fn ct_nat() -> CodegenType {
-    CTNat
-}
-
-/// Create Bool type.
-pub fn ct_bool() -> CodegenType {
-    CTBool
-}
-
-/// Create String type.
-pub fn ct_string() -> CodegenType {
-    CTString
-}
-
-/// Create Unit type.
-pub fn ct_unit() -> CodegenType {
-    CTUnit
-}
-
-/// Create Void type.
-pub fn ct_void() -> CodegenType {
-    CTVoid
-}
-
-/// Create Prop type.
-pub fn ct_prop() -> CodegenType {
-    CTProp
-}
-
-/// Create Arrow type.
-pub fn ct_arrow(domain: CodegenType, codomain: CodegenType) -> CodegenType {
-    CTArrow(domain, codomain)
-}
-
-/// Create Product type.
-pub fn ct_pair(left: CodegenType, right: CodegenType) -> CodegenType {
-    CTPair(left, right)
-}
-
-/// Create Sum type.
-pub fn ct_sum(left: CodegenType, right: CodegenType) -> CodegenType {
-    CTSum(left, right)
-}
-
-/// Create Ref type.
-pub fn ct_ref(inner: CodegenType) -> CodegenType {
-    CTRef(inner)
-}
-
-/// Create Ptr type.
-pub fn ct_ptr(inner: CodegenType) -> CodegenType {
-    CTPtr(inner)
-}
-
-/// Create type variable.
-pub fn ct_var(name: String) -> CodegenType {
-    CTVar(name)
-}
-
-/// Create forall type.
-pub fn ct_forall(name: String, body: CodegenType) -> CodegenType {
-    CTForall(name, body)
-}
-
-/// Create mu (recursive) type.
-pub fn ct_mu(name: String, body: CodegenType) -> CodegenType {
-    CTMu(name, body)
-}
-
-/// Create equality type.
-pub fn ct_eq(ty: CodegenType, lhs: CodegenIR, rhs: CodegenIR) -> CodegenType {
-    CTEq(ty, lhs, rhs)
-}
-
-// ===========================================================================
-// TYPE HANDLE → CODEGEN TYPE CONVERSION
-// ===========================================================================
-
-/// Convert a TypeHandle (opaque Nat) to a CodegenType using FFI introspection.
-///
-/// Uses tg_type_tag() to identify the type variant and recursively converts
-/// composite types. Falls back to CTUnit for unrecognized types.
-pub fn type_handle_to_codegen_type(ty: TypeHandle) -> CodegenType {
-    let tag = tg_type_tag(ty);
-    if tag == 0 { CTNat }
-    else if tag == 1 { CTBool }
-    else if tag == 2 { CTString }
-    else if tag == 3 { CTUnit }
-    else if tag == 4 { CTVoid }
-    else if tag == 5 { CTProp }
-    else if tag == 6 {
-        // Arrow
-        let d = type_handle_to_codegen_type(tg_type_get_arrow_domain(ty));
-        let c = type_handle_to_codegen_type(tg_type_get_arrow_codomain(ty));
-        CTArrow(d, c)
-    }
-    else if tag == 7 {
-        // Product
-        let l = type_handle_to_codegen_type(tg_type_get_product_left(ty));
-        let r = type_handle_to_codegen_type(tg_type_get_product_right(ty));
-        CTPair(l, r)
-    }
-    else if tag == 8 {
-        // Sum
-        let l = type_handle_to_codegen_type(tg_type_get_sum_left(ty));
-        let r = type_handle_to_codegen_type(tg_type_get_sum_right(ty));
-        CTSum(l, r)
-    }
-    else if tag == 9 {
-        // TyVar
-        CTVar(cstring_to_string(tg_type_get_tyvar_name(ty)))
-    }
-    else if tag == 10 {
-        // Forall
-        let v = cstring_to_string(tg_type_get_forall_var(ty));
-        let b = type_handle_to_codegen_type(tg_type_get_forall_body(ty));
-        CTForall(v, b)
-    }
-    else if tag == 11 {
-        // Mu
-        let v = cstring_to_string(tg_type_get_mu_var(ty));
-        let b = type_handle_to_codegen_type(tg_type_get_mu_body(ty));
-        CTMu(v, b)
-    }
-    else {
-        // Eq (12), Ref (13), Ptr (14), App (15), unknown (99)
-        CTUnit
-    }
 }

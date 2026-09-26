@@ -1,0 +1,74 @@
+// src/compiler/driver/util/strings/slice.tg
+// Slicing a string out of another: the FFI-backed `[start, end)` slice and a
+// split-at-first-occurrence helper built on it (ADR 19.8.26c).
+//
+// One canonical binding for `tg_string_slice`. Before this file existed the
+// binding was private to `elab::error::source`, and four other sites each
+// hand-rolled a character-accumulator loop — every one carrying a termination
+// opt-out for a routine the runtime already provides. Both compilers key
+// values on the BARE name, so a second `string_slice` anywhere is an E0016
+// reported in the other file; this file is the one place the name is allowed
+// to live.
+
+use driver::ffi::types::{string_len, string_char_at_internal};
+
+/// Take `[start, end)`. Both ends are CLAMPED by the runtime, so an
+/// out-of-range index yields a shorter slice rather than an error — callers
+/// that need to detect that must compare lengths themselves.
+extern "C" fn tg_string_slice(s: String, start: Nat, end_pos: Nat) -> String
+
+pub fn string_slice(s: String, start: Nat, end_pos: Nat) -> String {
+    tg_string_slice(s, start, end_pos)
+}
+
+/// Everything before the first `ch` (a character CODE, not an index), and
+/// everything after it. When `ch` does not occur, the whole string and `""` —
+/// per ADR 19.8.26c D6 the caller decides whether that is a finding; a caller
+/// that must distinguish `"a\n"` from `"a"` has to compare lengths.
+pub fn string_split_once(s: String, ch: Nat) -> (String, String) {
+    let len = string_len(s);
+    let idx = string_index_of_char(s, ch);
+    if idx >= len {
+        (s, "")
+    } else {
+        (string_slice(s, 0, idx), string_slice(s, idx + 1, len))
+    }
+}
+
+/// The index of the first `ch`, or `string_len(s)` when it does not occur.
+///
+/// **This is the DECISION half of `string_split_once`, and it is public so it
+/// can be tested.** The two halves have different testability and the
+/// difference decides the whole file's coverage: this one bottoms out in
+/// `tg_string_len_internal` and `tg_string_char_at_internal`, both of which the
+/// **evaluator executes**, so a cost-5 assertion on it actually runs. The
+/// slicing half needs `tg_string_slice`, which the evaluator does **not**
+/// execute (ADR 19.8.26c D4) — an assertion there goes silently Stuck and the
+/// runner reports `ok`. Confirm either claim with:
+///
+///     tungsten info eval reachable-externs string_index_of_char src/compiler/main.tg
+///
+/// It was private until 19.8.26c's `/check-adr` pass observed that this left
+/// the ADR's only executable new logic unreachable from any test — the same
+/// split `driver/ffi/io.tg`'s `basename_start` already documents, not applied
+/// to the code that introduced it. Asserted in `test_string_utils.tg`; the
+/// not-found sentinel is `string_len`, which is what makes
+/// `string_split_once`'s separator-absent contract (D6) decidable without
+/// slicing anything.
+pub fn string_index_of_char(s: String, ch: Nat) -> Nat {
+    string_index_of_char_from(s, ch, 0, string_len(s))
+}
+
+// Partial (ADR 11.8.26b): `i` ascends toward `len` rather than descending on a
+// structural subterm — a measure recursion, deferred to v2.1. Executable
+// compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn string_index_of_char_from(s: String, ch: Nat, i: Nat, len: Nat) -> Nat {
+    if i >= len {
+        len
+    } else if string_char_at_internal(s, i) == ch {
+        i
+    } else {
+        string_index_of_char_from(s, ch, i + 1, len)
+    }
+}

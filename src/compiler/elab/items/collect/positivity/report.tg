@@ -1,0 +1,127 @@
+// src/compiler/elab/items/collect/positivity/report.tg
+// Reporting half of the strict-positivity mirror (ADR 18.8.26b P3).
+//
+// Turns the violations the shared engine found into E0700 diagnostics, and
+// locates each at the span of the type definition it names.
+
+use lexer::span::{Span, span_new};
+use parser::ast::{Item, ItemType, ItemTypeAlias, ident_name};
+use driver::ffi::{List, Nil, Cons, cstring_to_string};
+use driver::util::strings::{string_split_once};
+use elab::ffi::{tg_positivity_check, tg_positivity_violation_render};
+use elab::error::{ErrNonStrictlyPositive, elab_error_new};
+use elab::items::result::{ElabContext, elab_context_add_error};
+
+// ===========================================================================
+// THE PASS
+// ===========================================================================
+
+/// Run the check over everything this pass registered and record one E0700 per
+/// violation.
+///
+/// Called after the collection pass rather than inside it, so the combined
+/// Signature-Collection pass — whose errors are discarded — does not pay for an
+/// analysis nobody reads.
+pub fn check_positivity_pass(ctx: ElabContext, items: List<Item>) -> ElabContext {
+    let count = tg_positivity_check();
+    report_positivity_violations(ctx, items, 0, count)
+}
+
+// Partial (ADR 11.8.26b): the loop is over a Nat index or a String, neither of
+// which has subterms to descend on -- a measure recursion, not a descent.
+// Executable compiler code no proof reaches; E0063 guards that.
+#[partial]
+fn report_positivity_violations(
+    ctx: ElabContext,
+    items: List<Item>,
+    index: Nat,
+    count: Nat
+) -> ElabContext {
+    if index >= count {
+        ctx
+    } else {
+        let ctx2 = report_one_positivity_violation(ctx, items, index);
+        report_positivity_violations(ctx2, items, index + 1, count)
+    }
+}
+
+fn report_one_positivity_violation(ctx: ElabContext, items: List<Item>, index: Nat) -> ElabContext {
+    let rendered = cstring_to_string(tg_positivity_violation_render(index));
+    let type_name = positivity_wire_type_name(rendered);
+    let message = positivity_wire_message(rendered);
+    let span = find_positivity_span(items, type_name);
+    elab_context_add_error(ctx, elab_error_new(ErrNonStrictlyPositive(message), span))
+}
+
+// ===========================================================================
+// THE WIRE FORMAT
+// ===========================================================================
+//
+// `tg_positivity_violation_render` returns "<type name>\n<message>". The name
+// travels beside the message rather than only inside it because it is needed
+// as DATA — it is how the span to report at is found — and parsing it back out
+// of an English sentence would be a second thing that can disagree.
+
+fn positivity_newline_char() -> Nat { 10 }
+
+/// The name half of the wire pair. On a rendering with no newline the whole
+/// string is the name — `string_split_once`'s separator-absent contract
+/// (ADR 19.8.26c D6), which is exactly what the hand-rolled walk did.
+fn positivity_wire_type_name(rendered: String) -> String {
+    let (type_name, _) = string_split_once(rendered, positivity_newline_char());
+    type_name
+}
+
+/// The message half. On a rendering with no newline this is `""`, again the
+/// separator-absent contract of `string_split_once` (ADR 19.8.26c D6).
+fn positivity_wire_message(rendered: String) -> String {
+    let (_, message) = string_split_once(rendered, positivity_newline_char());
+    message
+}
+
+// ===========================================================================
+// SPAN LOOKUP
+// ===========================================================================
+
+/// The span of the type definition named `type_name`, or an empty span when
+/// the definition is not among this module's items.
+///
+/// A miss is a *location* failure, never a verdict one: the violation is
+/// reported either way, because suppressing a soundness error for want of a
+/// span would be the silent-cap shape this gate exists to close.
+fn find_positivity_span(items: List<Item>, type_name: String) -> Span {
+    match items {
+        Nil() => positivity_no_span(),
+        Cons(item, rest) =>
+            if positivity_item_defines(item, type_name) {
+                positivity_item_span(item)
+            } else {
+                find_positivity_span(rest, type_name)
+            }
+    }
+}
+
+/// The span a violation gets when its type is not among this module's items.
+fn positivity_no_span() -> Span {
+    span_new(0, 0, "")
+}
+
+/// Whether `item` is the definition of `type_name`.
+fn positivity_item_defines(item: Item, type_name: String) -> Bool {
+    match item {
+        ItemType(def) => ident_name(def.name) == type_name,
+        ItemTypeAlias(def) => ident_name(def.name) == type_name,
+        _ => false
+    }
+}
+
+/// A type item's own span. Split from the predicate above rather than returning
+/// a zero-or-one list from one function, because pairing a `match` with a
+/// `match` on its result is the nesting the code-health gate refuses.
+fn positivity_item_span(item: Item) -> Span {
+    match item {
+        ItemType(def) => def.span,
+        ItemTypeAlias(def) => def.span,
+        _ => positivity_no_span()
+    }
+}

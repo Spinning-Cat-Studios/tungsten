@@ -121,3 +121,49 @@ fn test_error_duplicate_import_alias_help_uses_source_name() {
         "help should NOT use local alias 'Span' in the path, got: {help}"
     );
 }
+
+/// The MESSAGE itself, not only the notes: same-module duplicates say
+/// "multiple times", cross-module ones name both modules, and a missing
+/// module names the module. Without these, `format_module_message` could
+/// return anything and the tests above would still pass.
+#[test]
+fn module_error_messages_name_their_subjects() {
+    let same = ElabError::duplicate_import(
+        Span::new(50, 60),
+        DuplicateImportInfo {
+            name: "Span".to_string(),
+            source_name: "Span".to_string(),
+            first_import_span: Span::new(10, 20),
+            first_source_module: "lexer::span".to_string(),
+            second_source_module: "lexer::span".to_string(),
+        },
+    );
+    assert_eq!(same.message, "the name `Span` is imported multiple times");
+
+    let different = ElabError::duplicate_import(
+        Span::new(50, 60),
+        DuplicateImportInfo {
+            name: "Span".to_string(),
+            source_name: "Span".to_string(),
+            first_import_span: Span::new(10, 20),
+            first_source_module: "lexer::span".to_string(),
+            second_source_module: "parser::ast".to_string(),
+        },
+    );
+    assert_eq!(
+        different.message,
+        "the name `Span` is imported from both `lexer::span` and `parser::ast`"
+    );
+
+    let missing = ElabError::new(
+        Span::new(0, 5),
+        ElabErrorKind::ModuleNotFound {
+            module: "lexer".to_string(),
+            suggestion: Some("lexer::span".to_string()),
+        },
+    );
+    assert_eq!(
+        missing.message,
+        "cannot find module `lexer`; did you mean `lexer::span`?"
+    );
+}

@@ -102,6 +102,7 @@ pub type PatLit =
     | PatLitNat(Nat)       // Alias for PatLitInt
     | PatLitBool(Bool)
     | PatLitString(String)
+    | PatLitNegInt(Nat)    // -5, carried as its magnitude (ADR 18.9.26e)
 
 // ===========================================================================
 // IDENTIFIER

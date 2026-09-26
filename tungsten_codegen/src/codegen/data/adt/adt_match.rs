@@ -3,6 +3,8 @@
 //! Generates tag extraction + switch + per-arm payload loading for flat ADT types.
 
 use crate::codegen::backend::CodeGenError;
+use crate::codegen::data::mu_types::unwrap_mu_type;
+use crate::codegen::exec::merge::{plan_merge, MergeArm};
 use crate::codegen::CodeGen;
 use inkwell::values::{BasicValue, BasicValueEnum};
 use tungsten_core::terms::Term;
@@ -17,7 +19,6 @@ struct AdtArmCtx<'ctx> {
     variants: Vec<(String, Type)>,
     merge_bb: inkwell::basic_block::BasicBlock<'ctx>,
     is_tail: bool,
-    result_type: Option<inkwell::types::BasicTypeEnum<'ctx>>,
 }
 
 impl<'ctx> CodeGen<'ctx> {
@@ -65,18 +66,17 @@ impl<'ctx> CodeGen<'ctx> {
             .ok_or_else(|| CodeGenError::LlvmError("no current function".to_string()))?;
         let (merge_bb, switch_info) = self.build_adt_switch(function, tag, arms)?;
 
-        // Compile each arm and collect phi incoming values
+        // Compile each arm and collect merge arms (value, end block, reachable)
         let mut arm_ctx = AdtArmCtx {
             data_ptr,
             variants,
             merge_bb,
             is_tail,
-            result_type: None,
         };
-        let phi_incoming = self.compile_adt_arms(&switch_info, arms, &mut arm_ctx)?;
+        let merge_arms = self.compile_adt_arms(&switch_info, arms, &mut arm_ctx)?;
 
-        // Build merge block with phi
-        self.build_adt_merge_phi(merge_bb, &phi_incoming)
+        // Build merge block via the shared planner (ADR 2.7.26b T2)
+        self.build_adt_merge_phi(merge_bb, &merge_arms)
     }
 
     /// Store ADT scrutinee on stack and extract tag + data pointer.
@@ -170,26 +170,33 @@ impl<'ctx> CodeGen<'ctx> {
         Ok((merge_bb, arm_blocks))
     }
 
-    /// Compile all ADT match arms and collect phi incoming values.
+    /// Compile all ADT match arms into [`MergeArm`]s. An arm is unreachable
+    /// when it terminated control flow itself (a `musttail … ; ret` self-tail
+    /// arm, ADRs 1.7.26a/e) and its "value" is only the epilogue's dummy in an
+    /// unreachable dead block.
     fn compile_adt_arms(
         &mut self,
         arm_blocks: &[(inkwell::basic_block::BasicBlock<'ctx>, String, usize)],
         arms: &[(usize, String, Box<Term>)],
         ctx: &mut AdtArmCtx<'ctx>,
-    ) -> Result<Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)>, CodeGenError>
-    {
-        let mut phi_incoming = Vec::with_capacity(arms.len());
+    ) -> Result<Vec<MergeArm<'ctx>>, CodeGenError> {
+        let mut merge_arms = Vec::with_capacity(arms.len());
 
         for (i, (bb, var_name, variant_idx)) in arm_blocks.iter().enumerate() {
-            let (arm_result, end_bb) =
-                self.compile_adt_arm(*bb, *variant_idx, var_name, &arms[i].2, ctx)?;
-            phi_incoming.push((arm_result, end_bb));
+            let arm = self.compile_adt_arm(*bb, *variant_idx, var_name, &arms[i].2, ctx)?;
+            merge_arms.push(arm);
         }
 
-        Ok(phi_incoming)
+        Ok(merge_arms)
     }
 
-    /// Compile a single ADT match arm.
+    /// Compile a single ADT match arm. The arm is unreachable when its end
+    /// block has no predecessors — i.e. the arm body already terminated
+    /// (musttail self-tail edge) and the returned value is only the epilogue
+    /// dummy, which must NOT participate in result-type unification
+    /// (ADR 1.7.26e §6.5: a first-arm `i1` dummy truncated real sibling-arm
+    /// results through a 1-byte `cast_to_type` memcpy). The arm's block is NOT
+    /// terminated here — `terminate_merge_arm` does that after planning.
     fn compile_adt_arm(
         &mut self,
         bb: inkwell::basic_block::BasicBlock<'ctx>,
@@ -197,7 +204,7 @@ impl<'ctx> CodeGen<'ctx> {
         var_name: &str,
         body: &Term,
         ctx: &mut AdtArmCtx<'ctx>,
-    ) -> Result<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>), CodeGenError> {
+    ) -> Result<MergeArm<'ctx>, CodeGenError> {
         self.builder.position_at_end(bb);
 
         // Get payload type for this variant
@@ -228,58 +235,54 @@ impl<'ctx> CodeGen<'ctx> {
         // Arm body IS in tail position if the match is
         self.compilation.in_tail_position = ctx.is_tail;
         let arm_result = self.compile_term(body)?;
+        // Best-effort arm result type for merge-error self-decoding (ADR
+        // 12.7.26c P2) — inferred while the arm binding is still in scope.
+        let source_ty = self.infer_term_type(body).ok();
         if let Some(v) = old_binding {
             self.compilation.env.insert(var_name.to_string(), v);
         } else {
             self.compilation.env.remove(var_name);
         }
 
-        // Track/cast result type for phi consistency
-        if ctx.result_type.is_none() {
-            ctx.result_type = Some(arm_result.get_type());
-        }
-        let arm_result = if let Some(expected_ty) = ctx.result_type {
-            if arm_result.get_type() == expected_ty {
-                arm_result
-            } else {
-                self.cast_to_type(arm_result, expected_ty)?
-            }
-        } else {
-            arm_result
-        };
-
-        // Branch to merge
+        // Reachability: a musttail self-tail arm ends in the epilogue's fresh
+        // dead block, which nothing branches to. Its value is a typed dummy
+        // and control never flows from it to the merge.
         let actual_end_bb = self.builder.get_insert_block().unwrap();
-        self.builder
-            .build_unconditional_branch(ctx.merge_bb)
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
+        let reachable = actual_end_bb.get_first_use().is_some();
 
-        Ok((arm_result, actual_end_bb))
+        Ok(MergeArm {
+            value: arm_result,
+            end_bb: actual_end_bb,
+            reachable,
+            source_ty,
+        })
     }
 
-    /// Build merge block with phi node for ADT match results.
+    /// Terminate the arm blocks and build the merge via the shared planner
+    /// (ADR 2.7.26b T2): unreachable (musttail-terminated) arms are excluded
+    /// from the phi ENTIRELY — their dead blocks end in `unreachable`, not a
+    /// branch; all reachable arms must agree on the result type (hard error
+    /// otherwise); the all-unreachable case emits no phi at all.
     fn build_adt_merge_phi(
         &mut self,
         merge_bb: inkwell::basic_block::BasicBlock<'ctx>,
-        phi_incoming: &[(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)],
+        merge_arms: &[MergeArm<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, CodeGenError> {
-        self.builder.position_at_end(merge_bb);
+        let site = format!("ADT match in `{}`", self.current_fn_name());
+        let plan = plan_merge(merge_arms, None, &site, Some(&mut self.types))?;
 
-        let result_type = phi_incoming
-            .first()
-            .map(|(val, _)| val.get_type())
-            .ok_or_else(|| CodeGenError::TypeError("ADT match has no arms".to_string()))?;
-
-        let phi = self
-            .builder
-            .build_phi(result_type, "adt_result")
-            .map_err(|e| CodeGenError::LlvmError(e.to_string()))?;
-
-        for (val, bb) in phi_incoming {
-            phi.add_incoming(&[(val, *bb)]);
+        for arm in merge_arms {
+            self.terminate_merge_arm(arm, merge_bb)?;
         }
 
-        Ok(phi.as_basic_value())
+        // Dead-merge placeholder type: the first arm's dummy type (the merge
+        // block has no predecessors; anything appended to it never executes).
+        let placeholder_ty = merge_arms
+            .first()
+            .map(|a| a.value.get_type())
+            .ok_or_else(|| CodeGenError::TypeError("ADT match has no arms".to_string()))?;
+
+        self.build_planned_merge(merge_bb, &plan, placeholder_ty, "adt_result")
     }
 
     /// Unwrap μ-type wrapper and return the actual ADT type + struct value.
@@ -292,7 +295,7 @@ impl<'ctx> CodeGen<'ctx> {
             Type::Mu(_, _) => {
                 // For μ X. Adt(...), unwrap ALL Mu layers and load from pointer.
                 // unwrap_mu_type handles nested Mu binders for mutual recursion.
-                let inner_ty = self.unwrap_mu_type(ty);
+                let inner_ty = unwrap_mu_type(ty);
 
                 // Resolve to flat ADT if inner is a type variable
                 let resolved_inner = self

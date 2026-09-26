@@ -1,0 +1,6 @@
+// == the recursive call hands the same list back
+type Lst = Nil | Cons(Nat, Lst)
+
+fn spin(l: Lst) -> Nat { match l { Nil => 0, Cons(h, t) => spin(l) } }
+
+fn main() -> Nat { 0 }

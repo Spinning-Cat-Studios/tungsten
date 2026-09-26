@@ -1,13 +1,17 @@
 //! Type Constructors for FFI
 //!
 //! This module provides C-compatible functions for constructing Core types.
+//!
+//! Constructors are O(1) node pushes: children are referenced by handle,
+//! never cloned (ADR 2.7.26a §4). An invalid child handle yields
+//! `INVALID_HANDLE` — same contract as the old deep-cloning constructors.
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
-use crate::types::Type;
+use super::nodes::TypeNode;
+use crate::ffi::{valid_terms, valid_types, with_arena, TypeHandle, INVALID_HANDLE};
 
-use crate::ffi::{with_arena, TypeHandle, INVALID_HANDLE};
 // ============================================================================
 // Essential Type Constructors
 // ============================================================================
@@ -15,40 +19,41 @@ use crate::ffi::{with_arena, TypeHandle, INVALID_HANDLE};
 /// Construct Nat type
 #[no_mangle]
 pub extern "C" fn tg_type_nat() -> TypeHandle {
-    with_arena!(|arena| arena.alloc_type(Type::Nat))
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::Nat))
+}
+
+/// Construct Int type (ADR 14.9.26c)
+#[no_mangle]
+pub extern "C" fn tg_type_int() -> TypeHandle {
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::Int))
 }
 
 /// Construct Bool type
 #[no_mangle]
 pub extern "C" fn tg_type_bool() -> TypeHandle {
-    with_arena!(|arena| arena.alloc_type(Type::Bool))
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::Bool))
 }
 
 /// Construct String type
 #[no_mangle]
 pub extern "C" fn tg_type_string() -> TypeHandle {
-    with_arena!(|arena| arena.alloc_type(Type::String))
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::String))
 }
 
 /// Construct Unit type
 #[no_mangle]
 pub extern "C" fn tg_type_unit() -> TypeHandle {
-    with_arena!(|arena| arena.alloc_type(Type::Unit))
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::Unit))
 }
 
 /// Construct arrow (function) type: τ1 → τ2
 #[no_mangle]
 pub extern "C" fn tg_type_arrow(t1: TypeHandle, t2: TypeHandle) -> TypeHandle {
     with_arena!(|arena| {
-        let t1 = match arena.get_type(t1) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t2 = match arena.get_type(t2) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(Type::Arrow(Box::new(t1), Box::new(t2)))
+        if !valid_types(arena, &[t1, t2]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_type_node(TypeNode::Arrow(t1, t2))
     })
 }
 
@@ -59,28 +64,23 @@ pub extern "C" fn tg_type_arrow(t1: TypeHandle, t2: TypeHandle) -> TypeHandle {
 /// Construct Void type (empty type, logical false)
 #[no_mangle]
 pub extern "C" fn tg_type_void() -> TypeHandle {
-    with_arena!(|arena| arena.alloc_type(Type::Void))
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::Void))
 }
 
 /// Construct Prop type (universe of propositions)
 #[no_mangle]
 pub extern "C" fn tg_type_prop() -> TypeHandle {
-    with_arena!(|arena| arena.alloc_type(Type::Prop))
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::Prop))
 }
 
 /// Construct product type: τ1 × τ2
 #[no_mangle]
 pub extern "C" fn tg_type_product(t1: TypeHandle, t2: TypeHandle) -> TypeHandle {
     with_arena!(|arena| {
-        let t1 = match arena.get_type(t1) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t2 = match arena.get_type(t2) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(Type::Product(Box::new(t1), Box::new(t2)))
+        if !valid_types(arena, &[t1, t2]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_type_node(TypeNode::Product(t1, t2))
     })
 }
 
@@ -88,15 +88,10 @@ pub extern "C" fn tg_type_product(t1: TypeHandle, t2: TypeHandle) -> TypeHandle 
 #[no_mangle]
 pub extern "C" fn tg_type_sum(t1: TypeHandle, t2: TypeHandle) -> TypeHandle {
     with_arena!(|arena| {
-        let t1 = match arena.get_type(t1) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t2 = match arena.get_type(t2) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(Type::Sum(Box::new(t1), Box::new(t2)))
+        if !valid_types(arena, &[t1, t2]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_type_node(TypeNode::Sum(t1, t2))
     })
 }
 
@@ -113,7 +108,7 @@ pub unsafe extern "C" fn tg_type_var(name: *const c_char) -> TypeHandle {
         Ok(s) => s,
         Err(_) => return INVALID_HANDLE,
     };
-    with_arena!(|arena| arena.alloc_type(Type::TyVar(name_str.to_owned())))
+    with_arena!(|arena| arena.alloc_type_node(TypeNode::TyVar(name_str.to_owned())))
 }
 
 /// Construct a forall type: ∀α. τ
@@ -129,13 +124,11 @@ pub unsafe extern "C" fn tg_type_forall(var_name: *const c_char, body: TypeHandl
         Ok(s) => s,
         Err(_) => return INVALID_HANDLE,
     };
-
     with_arena!(|arena| {
-        let body = match arena.get_type(body) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(Type::Forall(name_str.to_owned(), Box::new(body)))
+        if !valid_types(arena, &[body]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_type_node(TypeNode::Forall(name_str.to_owned(), body))
     })
 }
 
@@ -152,13 +145,11 @@ pub unsafe extern "C" fn tg_type_mu(var_name: *const c_char, body: TypeHandle) -
         Ok(s) => s,
         Err(_) => return INVALID_HANDLE,
     };
-
     with_arena!(|arena| {
-        let body = match arena.get_type(body) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(Type::Mu(name_str.to_owned(), Box::new(body)))
+        if !valid_types(arena, &[body]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_type_node(TypeNode::Mu(name_str.to_owned(), body))
     })
 }
 
@@ -166,11 +157,10 @@ pub unsafe extern "C" fn tg_type_mu(var_name: *const c_char, body: TypeHandle) -
 #[no_mangle]
 pub extern "C" fn tg_type_ptr(inner: TypeHandle) -> TypeHandle {
     with_arena!(|arena| {
-        let inner_ty = match arena.get_type(inner) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(Type::Ptr(Box::new(inner_ty)))
+        if !valid_types(arena, &[inner]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_type_node(TypeNode::Ptr(inner))
     })
 }
 
@@ -178,11 +168,10 @@ pub extern "C" fn tg_type_ptr(inner: TypeHandle) -> TypeHandle {
 #[no_mangle]
 pub extern "C" fn tg_type_ref(inner: TypeHandle) -> TypeHandle {
     with_arena!(|arena| {
-        let inner_ty = match arena.get_type(inner) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(Type::Ref(Box::new(inner_ty)))
+        if !valid_types(arena, &[inner]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_type_node(TypeNode::Ref(inner))
     })
 }
 
@@ -196,18 +185,9 @@ pub extern "C" fn tg_type_eq(
     t2: super::super::TermHandle,
 ) -> TypeHandle {
     with_arena!(|arena| {
-        let ty = match arena.get_type(ty) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t1 = match arena.get_term(t1) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        let t2 = match arena.get_term(t2) {
-            Some(t) => t.clone(),
-            None => return INVALID_HANDLE,
-        };
-        arena.alloc_type(Type::eq(ty, t1, t2))
+        if !valid_terms(arena, &[t1, t2]) || !valid_types(arena, &[ty]) {
+            return INVALID_HANDLE;
+        }
+        arena.alloc_type_node(TypeNode::Eq(ty, t1, t2))
     })
 }

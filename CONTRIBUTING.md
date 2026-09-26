@@ -2,11 +2,11 @@
 
 Thank you for your interest in Tungsten.
 
-## Current Status (v1.5)
+## Current Status (2.0-alpha)
 
-Tungsten is under active single-maintainer development. The v1.5 release focused on compiler architecture, performance, and language ergonomics.
+Tungsten is a research language under active single-maintainer development. The 2.0-alpha pre-release is available for experimentation, and its language surface may change before 2.0.
 
-**Pull requests are not being accepted at this time.** This is a bandwidth decision — the project is at a stage where reviewing and integrating external changes would slow down core development work. A structured contribution workflow (CI for external PRs, review process, contributor guidelines) is planned for v2.0.
+**Pull requests are not being accepted at this time.** This is a bandwidth decision — the project is at a stage where reviewing and integrating external changes would slow down core development work. A structured contribution workflow (CI for external PRs, review process, contributor guidelines) is planned for v2.1.
 
 ## What's Welcome Now
 
@@ -18,9 +18,9 @@ Bug reports, questions, and feedback are genuinely appreciated:
 
 These help improve the project and are always welcome.
 
-## v2.0 and Beyond
+## v2.1 and Beyond
 
-Starting with v2.0, Tungsten will accept community contributions through a structured process. Contribution guidelines, CI for external PRs, and a workflow for integrating changes will be documented before then.
+The v2.1 roadmap includes a structured contribution process. Guidelines, CI for external PRs, and an integration workflow will be documented when that work is ready.
 
 If you have ideas you'd like to discuss in the meantime, opening an issue is the right path.
 

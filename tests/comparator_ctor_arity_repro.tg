@@ -1,0 +1,50 @@
+// Repro: the structural comparator mis-handles flat-ADT constructors with ≥3
+// payload fields (ADR 29.6.26f §4.1 / bug_reports/1.8.26.comparator-ctor-arity).
+//
+// Run: `tungsten run tests/comparator_ctor_arity_repro.tg`
+//   expected (correct compiler): 0
+//   actual   (2026-08-01):       the evaluator prints a Stuck residual term
+//
+// `main` returns a bit-packed vector where a set bit means the comparator
+// wrongly reported two DIFFERENT values Equal. A correct comparator returns 0.
+//
+// Root cause: for `Three(Nat, Nat, Nat)` the declared payload type encodes
+// LEFT-nested — `Product(Product(Nat, Nat), Nat)` — while `AdtConstruct` builds
+// a RIGHT-nested value, `Pair(a, Pair(b, c))`. The comparator is synthesized
+// from the type, so it projects `Fst(Fst(v))`; applied to the right-nested
+// value that becomes `Fst(<Nat>)`, which is Stuck. Arity ≤ 2 has no nesting, so
+// the two representations coincide and those cases are correct — which is why
+// the failure starts exactly at three fields.
+//
+// Records are NOT affected: `record_comparator` walks fields by name (AC 8), so
+// a 3-field record such as `Span { start, end, file }` compares correctly.
+
+type List<T> = | Nil | Cons(T, List<T>)
+type PathSeg = | Field(String) | Pos(Nat) | Index(Nat) | Tag | Len
+type ComparePath = List<PathSeg>
+type CompareDiff = { path: ComparePath, left_display: String, right_display: String }
+type CompareResult = | Equal | NotEqual(CompareDiff)
+
+type Shape =
+    | One(Nat)
+    | Two(Nat, Nat)
+    | Three(Nat, Nat, Nat)
+    | Four(Nat, Nat, Nat, Nat)
+
+/// 1 when the comparator claims the two values are Equal, 0 when it reports a
+/// difference. Every call below passes values that DIFFER, so 0 is correct.
+fn wrongly_equal(a: Shape, b: Shape) -> Nat {
+    match compare(a, b) {
+        Equal() => 1,
+        NotEqual(_) => 0
+    }
+}
+
+fn main() -> Nat {
+    let one = wrongly_equal(One(1), One(2));
+    let two = wrongly_equal(Two(1, 1), Two(1, 2));
+    let three_last = wrongly_equal(Three(1, 1, 1), Three(1, 1, 2));
+    let three_first = wrongly_equal(Three(1, 1, 1), Three(9, 1, 1));
+    let four = wrongly_equal(Four(1, 1, 1, 1), Four(1, 1, 1, 2));
+    one + 2 * two + 4 * three_last + 8 * three_first + 16 * four
+}

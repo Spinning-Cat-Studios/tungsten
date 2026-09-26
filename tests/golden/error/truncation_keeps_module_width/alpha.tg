@@ -1,0 +1,2 @@
+pub fn alpha_one() -> Nat { "a" }
+pub fn alpha_two() -> Nat { "b" }

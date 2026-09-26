@@ -1,0 +1,10 @@
+// The other half: `odd_side` imports `even_side`, which imports `odd_side`.
+use chain::{Chain, Link, End};
+use even_side::sum_at_even;
+
+pub fn sum_at_odd(xs: Chain) -> Nat {
+    match xs {
+        Link(_, tail) => sum_at_even(tail),
+        End => 0
+    }
+}

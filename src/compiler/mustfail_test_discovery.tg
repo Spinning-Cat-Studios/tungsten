@@ -1,0 +1,53 @@
+// Negative control for the `test` verb's signature filter (ADR 7.8.26a §2.4).
+//
+// EVERY `test_*` in this file is REJECTED by the signature filter, so the file
+// has zero runnable tests. Under `--require-tests` that must be an ERROR:
+//
+//   tungsten1 test src/compiler/mustfail_test_discovery.tg --require-tests
+//     -> warning: skipping … (one per function below)
+//        error: zero runnable tests discovered (--require-tests); 4 function(s) skipped
+//        exit != 0
+//
+// Without `--require-tests` the same run reports the skips and exits 0 — the
+// `Proceed` fallthrough of §2.4's case 6 — and, per §2.2, must NOT build a
+// harness, so it returns promptly and leaves no `_tgtest_*` artifact behind.
+//
+// This is the contract the whole flag rests on: **skips do not satisfy
+// `--require-tests`**. A file whose every test_* fails the filter has zero
+// RUNNABLE tests, not "some tests, all skipped" — that distinction is the
+// regression ADR 2.7.26b closed on the bootstrap side, and it is exactly the
+// state a real suite would be in if the filter ever rejected too much.
+//
+// Deliberately NOT named `test_*.tg`, following `mustfail_ast_compare.tg`:
+// `make tg-test` globs that pattern and passes `--require-tests` on every
+// invocation, so a file that must fail under that flag would fail the gate by
+// design. Confirm with `ls src/compiler/test_*.tg` — this file must not appear.
+//
+// Deliberately standalone (no `mod` declarations): it asserts the runner's
+// discovery, not the compiler's, so there is nothing to be gained from
+// elaborating the whole tree and ~40 s to be lost.
+
+/// Rejected: takes a parameter, so its type is an Arrow (tag 6).
+/// Reason: "test function must take no parameters".
+pub fn test_takes_a_parameter(_n: Nat) -> Unit {
+    ()
+}
+
+/// Rejected: takes a parameter AND returns non-Unit. The arrow arm is checked
+/// first, so this reports as parameter-taking — pinning the arm ORDER, not just
+/// the arms.
+pub fn test_takes_a_parameter_and_returns_bool(_n: Nat) -> Bool {
+    true
+}
+
+/// Rejected: returns Bool (tag 1).
+/// Reason: "test function must return Unit, found Bool".
+pub fn test_returns_bool() -> Bool {
+    true
+}
+
+/// Rejected: returns Nat (tag 0).
+/// Reason: "test function must return Unit, found Nat".
+pub fn test_returns_nat() -> Nat {
+    0
+}

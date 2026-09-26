@@ -1,0 +1,11 @@
+[E0100] Error: `match on non-sum types` is not supported
+   ╭─[tests/golden/error/docs_nullary_patterns_bare.tg:6:5]
+   │
+ 6 │     match c { Red => true, Green => true, Blue => false }
+   │     ──────────────────────────┬──────────────────────────  
+   │                               ╰──────────────────────────── 
+   │ 
+   │ Help: use constructor patterns for ADT matching
+───╯
+
+error: aborting due to 1 error

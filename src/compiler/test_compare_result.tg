@@ -1,0 +1,55 @@
+// P1a verification: the authored CompareResult ADT layer elaborates and
+// type-checks (ADR 29.6.26f, design doc §T11.1). Value-level comparator tests
+// arrive with P2 (synthesized compare_T); this only exercises the ADTs.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::compare::{
+    CompareResult, Equal, NotEqual,
+    CompareDiff,
+    PathSeg, Field, Pos, Index, Tag, Len,
+    ComparePath
+};
+use driver::ffi::types::{List, Nil, Cons};
+
+/// `Equal` is a well-formed CompareResult.
+pub fn test_compare_result_equal_typechecks() -> Unit {
+    let r: CompareResult = Equal;
+    expect_type(r, "CompareResult")
+}
+
+/// `NotEqual` wraps a CompareDiff record with a structural path.
+pub fn test_compare_result_notequal_typechecks() -> Unit {
+    let path: ComparePath = Cons(Pos(0), Cons(Index(1), Nil));
+    let diff: CompareDiff = CompareDiff {
+        path: path,
+        left_display: "2",
+        right_display: "3"
+    };
+    let r: CompareResult = NotEqual(diff);
+    expect_type(r, "CompareResult")
+}
+
+/// All five PathSeg variants are constructible.
+pub fn test_path_seg_variants_typecheck() -> Unit {
+    let segs: List<PathSeg> = Cons(Field("ret"),
+        Cons(Pos(0), Cons(Index(2), Cons(Tag, Cons(Len, Nil)))));
+    expect_type(segs, "List<PathSeg>")
+}
+
+/// The `__compare` intrinsic infers `CompareResult` for primitive leaves
+/// (ADR 29.6.26f §T11.2). Typed let-binding asserts the type (ADT-returning
+/// expressions can't use `expect_type`, which compares structural encodings).
+pub fn test_compare_nat_infers_compare_result() -> Unit {
+    let _r: CompareResult = __compare(3, 3);
+    ()
+}
+
+pub fn test_compare_bool_and_string() -> Unit {
+    let _b: CompareResult = __compare(true, false);
+    let _s: CompareResult = __compare("hello", "hello");
+    ()
+}

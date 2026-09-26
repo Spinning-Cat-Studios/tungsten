@@ -48,7 +48,7 @@ impl Env {
             }
 
             // Flat global table fallback — bypasses module-scoped import visibility.
-            // All definitions from all modules are in `self.values` (populated during Phase A.5).
+            // All definitions from all modules are in `self.values` (populated during Signature Collection).
             // This means unqualified names resolve globally unless suppressed above.
             Ok(self.resolve_value(name, current_depth))
         } else {

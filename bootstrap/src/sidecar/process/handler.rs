@@ -119,10 +119,18 @@ impl ConnectionHandler {
             }
             Request::ReportOutcome { command, helped } => {
                 if let Some(ref mut session) = self.session {
+                    // Capture the cost tier via the same shared helper the CLI
+                    // and flush paths use (ADR 23.7.26e D2); flush_session then
+                    // keys relevance by the derived error class.
+                    let cost = crate::doctor::suggest_tools::relevance_context(
+                        &session.error_description,
+                        &command,
+                    )
+                    .cost;
                     session.outcomes.push(CommandOutcome {
                         command,
                         helped,
-                        cost: 0,
+                        cost,
                     });
                     Response::outcome_recorded()
                 } else {

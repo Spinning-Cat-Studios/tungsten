@@ -50,4 +50,4 @@ pub use parser::error::{
 // Type parsing: parser::types::parse_type, parser::types::parse_path
 // Pattern parsing: parser::patterns::parse_pattern, parser::patterns::parse_pattern_atom
 // Expression parsing: parser::exprs::parse_expr, parser::exprs::parse_expr_prec
-// Item parsing: parser::items::parse_item, parser::items::parse_items
+// Item parsing: parser::items::parse_item (one item); the loop is parser::lib::parse_file

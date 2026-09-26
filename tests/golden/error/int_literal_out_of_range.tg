@@ -1,0 +1,3 @@
+// One past the signed maximum: E0090 (ADR 14.9.26c)
+fn f() -> Int { 9223372036854775808 }
+fn main() -> Int { f() }

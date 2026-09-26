@@ -1,0 +1,2 @@
+// The violation lives here; `main.tg` only imports it.
+pub type Bad = Mk(Bad -> Bad)

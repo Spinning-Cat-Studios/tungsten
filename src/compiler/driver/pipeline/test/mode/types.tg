@@ -1,0 +1,100 @@
+// src/compiler/driver/pipeline/test/mode/types.tg
+// The harness-mode vocabulary, and the two tables that say what each mode
+// needs from the program (ADR 7.8.26b D2/§2.2).
+//
+// Split from the decision (`decide.tg`) and the projections (`mod.tg`) so that
+// both can import the vocabulary without importing each other.
+
+use driver::ffi::{List, Nil, Cons};
+use driver::util::{Option};
+use lexer::span::{Span};
+
+// ===========================================================================
+// MODE
+// ===========================================================================
+
+/// Which template can serve a given test file.
+///
+/// `UnsupportedLayout` is built, not deferred: it is the difference between one
+/// good error and the 77 bad ones that are the status quo.
+pub type HarnessMode =
+    | TreeMode
+    | StandaloneMode
+    | UnsupportedLayout(String)
+
+/// Everything the generator needs that is not the user's source text.
+///
+/// `user_main` is the span of the root `main` **identifier**, if the file has
+/// one — `None` for all 16 `src/compiler/test_*.tg`, none of which declares a
+/// `main`. `reused_externs` names the externs the program already declares at
+/// root with a matching arity, which standalone mode must therefore NOT
+/// re-declare.
+pub type HarnessPlan = {
+    mode: HarnessMode,
+    test_names: List<String>,
+    test_count: Nat,
+    reused_externs: List<String>,
+    user_main: Option<Span>
+}
+
+// ===========================================================================
+// WHAT DETECTION LOOKS AT
+// ===========================================================================
+
+/// Item name → the module path it is bound in, rendered.
+pub type ItemPath = (String, String)
+
+/// Item name → whether it is `pub`.
+pub type ItemPublic = (String, Bool)
+
+/// One extern the standalone preamble would declare, and its parameter count.
+///
+/// Arity is carried because name-only matching would silently reuse a
+/// mismatched declaration and produce a type error behind the very wall this
+/// ADR removes — `tg_test_begin` takes two parameters, so the case is reachable.
+pub type ExternNeed = { name: String, arity: Nat }
+
+/// One compiler symbol tree mode calls by qualified path.
+pub type TreeSymbol = { name: String, module_path: String }
+
+/// Whether the standalone externs can be reconciled with the program's own.
+pub type ExternVerdict =
+    | ExternsReconciled(List<String>)   // names to REUSE, i.e. not re-declare
+    | ExternsConflict(String)
+
+// ===========================================================================
+// THE TWO TABLES
+// ===========================================================================
+
+/// The externs the standalone preamble declares, with their arities.
+///
+/// Seven, not the eleven the old preamble emitted: the three `tg_assert_eq_*`
+/// went with the assertion surface (D4 — `assert_eq_*` is the user's business,
+/// and a test runner has no reason to define it), and `tg_print` was declared
+/// but never called. Every name dropped is a collision that can no longer
+/// happen, which is the invariant paying out rather than a tidy-up.
+pub fn standalone_extern_needs() -> List<ExternNeed> {
+    Cons({ name: "tg_test_begin", arity: 2 } : ExternNeed,
+    Cons({ name: "tg_test_check_failure", arity: 0 } : ExternNeed,
+    Cons({ name: "tg_println", arity: 2 } : ExternNeed,
+    Cons({ name: "tg_exit", arity: 1 } : ExternNeed,
+    Cons({ name: "tg_string_to_cstring", arity: 1 } : ExternNeed,
+    Cons({ name: "tg_free_string", arity: 1 } : ExternNeed,
+    Cons({ name: "tg_string_len_internal", arity: 1 } : ExternNeed,
+    Nil)))))))
+}
+
+/// The five compiler symbols tree mode calls, and where each is DEFINED.
+///
+/// Defining paths, not re-export paths: `nat_to_string` is also reachable as
+/// `driver::util::nat_to_string` through two globs, but a re-export can cap
+/// visibility and the canonical path cannot. The list is exactly what
+/// `tree.tg`'s template emits — if one moves, both move.
+pub fn tree_mode_symbols() -> List<TreeSymbol> {
+    Cons({ name: "test_begin", module_path: "driver::ffi::test" } : TreeSymbol,
+    Cons({ name: "test_check_failure", module_path: "driver::ffi::test" } : TreeSymbol,
+    Cons({ name: "println", module_path: "driver::ffi::process" } : TreeSymbol,
+    Cons({ name: "process_exit", module_path: "driver::ffi::process" } : TreeSymbol,
+    Cons({ name: "nat_to_string", module_path: "driver::util::strings::convert" } : TreeSymbol,
+    Nil)))))
+}

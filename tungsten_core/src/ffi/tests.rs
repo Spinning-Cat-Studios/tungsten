@@ -218,3 +218,67 @@ fn test_type_tag() {
     // Invalid handle
     assert_eq!(tg_type_tag(INVALID_HANDLE), 99);
 }
+
+#[test]
+fn test_arena_retention_accumulates_when_profiler_active() {
+    tg_init();
+
+    // Activate the allocation profiler (process-global; other tests are
+    // unaffected — an active profiler only enables retention counters).
+    static FN_NAME: &[u8] = b"test_arena_retention\0";
+    unsafe {
+        tungsten_runtime::__tungsten_alloc_profile_set_fn(FN_NAME.as_ptr().cast::<c_char>());
+    }
+    assert!(tungsten_runtime::alloc_profile_is_active());
+
+    let baseline = with_arena_ref!(|arena| {
+        (
+            arena.retention.types,
+            arena.retention.terms,
+            arena.retention.ctxs,
+        )
+    });
+
+    // Types AND terms are handle-children nodes (ADR 2.7.26a §4): composing
+    // retains ONLY per-node heap (strings/vec slabs) — an Arrow or Succ of
+    // leaves adds zero retention bytes; string-bearing nodes retain their
+    // name's capacity. Contexts still store owned trees, so their walker
+    // accumulates deep bytes as before.
+    let nat = tg_type_nat();
+    let arrow = tg_type_arrow(nat, nat);
+    assert_ne!(arrow, INVALID_HANDLE);
+    let named = unsafe { tg_type_var(std::ffi::CString::new("alpha").unwrap().as_ptr()) };
+    assert_ne!(named, INVALID_HANDLE);
+
+    let zero = tg_term_zero();
+    let succ = tg_term_succ(zero);
+    assert_ne!(succ, INVALID_HANDLE);
+    let named_term =
+        unsafe { tg_term_var_named(std::ffi::CString::new("binder").unwrap().as_ptr()) };
+    assert_ne!(named_term, INVALID_HANDLE);
+
+    let ctx = tg_ctx_empty();
+    let var_name = std::ffi::CString::new("x").unwrap();
+    let extended = unsafe { tg_ctx_extend(ctx, var_name.as_ptr(), nat) };
+    assert_ne!(extended, INVALID_HANDLE);
+
+    let (type_bytes, term_bytes, ctx_bytes) = with_arena_ref!(|arena| {
+        (
+            arena.retention.types,
+            arena.retention.terms,
+            arena.retention.ctxs,
+        )
+    });
+    // TyVar("alpha") retains its name capacity; Arrow retains nothing extra.
+    assert!(type_bytes >= baseline.0 + 5);
+    // Var("binder") retains its name capacity; Succ retains nothing extra.
+    assert!(term_bytes >= baseline.1 + 6);
+    // The extended context owns one Term binding.
+    assert!(ctx_bytes > baseline.2);
+
+    // The marker path prints the arena retention line without panicking.
+    static MARKER: &[u8] = b"phaseB:module test::arena_stats\0";
+    unsafe {
+        super::driver::tg_alloc_profile_marker(MARKER.as_ptr().cast::<c_char>());
+    }
+}

@@ -14,7 +14,7 @@ use crate::elaborate::{CoreDef, ElabResult, Elaborator};
 impl<'a> Elaborator<'a> {
     /// Collect an extern function declaration (first pass).
     pub(super) fn collect_extern_fn(&mut self, extern_fn: &ast::ExternFnDef) -> ElabResult<()> {
-        // Check for duplicate (allow overwrite if Phase A stub, ADR 5.5.26c)
+        // Check for duplicate (allow overwrite if Stub Registration stub, ADR 5.5.26c)
         if self.env.has_value(&extern_fn.name.name) && !self.allow_value_overwrite {
             return Err(ElabError::duplicate(
                 extern_fn.name.span,

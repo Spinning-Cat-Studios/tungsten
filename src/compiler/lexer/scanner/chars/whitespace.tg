@@ -1,0 +1,7 @@
+// src/compiler/lexer/scanner/chars/whitespace.tg
+// The character codes the lexer skips between tokens.
+
+pub fn char_space() -> Nat { 32 }
+pub fn char_tab() -> Nat { 9 }
+pub fn char_newline() -> Nat { 10 }
+pub fn char_carriage_return() -> Nat { 13 }

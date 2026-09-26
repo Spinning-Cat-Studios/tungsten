@@ -1,0 +1,19 @@
+// src/compiler/lexer/scanner/chars/operators.tg
+// The codes that begin an operator or a sigil — arithmetic, comparison,
+// logical, and the attribute/annotation markers the scanner treats the same
+// way: one character that starts a token rather than delimits one.
+
+pub fn char_at_sign() -> Nat { 64 }
+pub fn char_hash() -> Nat { 35 }
+pub fn char_question() -> Nat { 63 }
+pub fn char_eq() -> Nat { 61 }
+pub fn char_bang() -> Nat { 33 }
+pub fn char_plus() -> Nat { 43 }
+pub fn char_minus() -> Nat { 45 }
+pub fn char_star() -> Nat { 42 }
+pub fn char_slash() -> Nat { 47 }
+pub fn char_percent() -> Nat { 37 }
+pub fn char_amp() -> Nat { 38 }
+pub fn char_pipe() -> Nat { 124 }
+pub fn char_caret() -> Nat { 94 }
+pub fn char_tilde() -> Nat { 126 }

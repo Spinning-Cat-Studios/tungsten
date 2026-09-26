@@ -1,0 +1,292 @@
+// Unit tests for driver/pipeline/bootstrap_lookup.tg (ADR 3.9.26b), the FFI's
+// wrapped-`-1` sentinel and the test pipeline's failure message (ADR 3.9.26s).
+//
+// Both halves of the ADR are pure functions over injected values, so nothing
+// here spawns a process, reads an environment variable or touches the disk —
+// `resolve_bootstrap_path` takes the three environment answers as arguments and
+// `bootstrap_failure_message` takes the choice and the outcome.
+//
+// That is the point of the split, not an accident of testing: the defect this
+// ADR fixes was invisible on the machine that wrote the code, so the order has
+// to be assertable for machines this suite will never run on.
+
+mod driver;
+mod lexer;
+mod parser;
+mod elab;
+
+use driver::ffi::test::{assert_eq_bool, assert_eq_string};
+use driver::ffi::{
+    ffi_negative_one, exec_code_is_absent,
+    ExecOutcome, ExecExited, ExecSpawnFailed, exec_succeeded
+};
+use driver::pipeline::bootstrap_lookup::{
+    BootstrapChoice, BootstrapSource,
+    FromOverrideEnv, FromExeDir, FromCargoTargetDir, FromRepoTarget,
+    resolve_bootstrap_path, bootstrap_source_label, bootstrap_failure_message,
+    default_bootstrap_path
+};
+use driver::pipeline::test::execute::{
+    harness_compile_failure_message, harness_run_message, harness_run_failure_message
+};
+use parser::option::{Option, Some, None, is_some, is_none};
+use driver::util::{string_contains, nat_to_string, option_unwrap_or};
+
+// ---------------------------------------------------------------------------
+// Resolution order (AC4) — one case per environment shape.
+//
+// `unset()` is spelled as an annotated binding because a bare `None` in
+// argument position infers `Option<T>` from the branch rather than from the
+// parameter.
+// ---------------------------------------------------------------------------
+
+fn unset() -> Option<String> {
+    let nothing: Option<String> = None;
+    nothing
+}
+
+/// Nothing set at all: the repo-relative fallback, exactly as before this ADR.
+/// This is AC5 — host behaviour is unchanged when `CARGO_TARGET_DIR` is unset.
+pub fn test_resolve_falls_back_to_repo_target() -> Unit {
+    let choice = resolve_bootstrap_path(unset(), unset(), unset());
+    assert_eq_string(choice.path, "./target/release/tungsten");
+    assert_eq_string(bootstrap_source_label(choice.source), "repo-relative fallback")
+}
+
+/// The fallback the previous bullet asserts is the one `default_bootstrap_path`
+/// names, so a change to one cannot silently diverge from the other.
+pub fn test_default_bootstrap_path_is_the_repo_target() -> Unit {
+    assert_eq_string(default_bootstrap_path(), "./target/release/tungsten")
+}
+
+/// `CARGO_TARGET_DIR` set and nothing else: D2's new step. The container's own
+/// build, not the bind-mounted host `target/`.
+pub fn test_resolve_prefers_cargo_target_dir_over_repo_target() -> Unit {
+    let choice = resolve_bootstrap_path(unset(), unset(), Some("/build/target"));
+    assert_eq_string(choice.path, "/build/target/release/tungsten");
+    assert_eq_string(bootstrap_source_label(choice.source), "CARGO_TARGET_DIR")
+}
+
+/// The explicit override outranks `CARGO_TARGET_DIR`, so the documented
+/// workaround keeps working after D2 lands.
+pub fn test_resolve_override_beats_cargo_target_dir() -> Unit {
+    let choice = resolve_bootstrap_path(Some("/opt/tungsten"), unset(), Some("/build/target"));
+    assert_eq_string(choice.path, "/opt/tungsten");
+    assert_eq_string(bootstrap_source_label(choice.source), "TUNGSTEN_BOOTSTRAP_BIN")
+}
+
+/// The release-archive layout outranks `CARGO_TARGET_DIR` too: a binary sitting
+/// beside this executable is a shipped install, where no `target/` exists.
+pub fn test_resolve_exe_dir_beats_cargo_target_dir() -> Unit {
+    let choice = resolve_bootstrap_path(unset(), Some("/usr/local/bin/tungsten-bootstrap"), Some("/build/target"));
+    assert_eq_string(choice.path, "/usr/local/bin/tungsten-bootstrap");
+    assert_eq_string(bootstrap_source_label(choice.source), "beside this executable")
+}
+
+/// The override outranks everything, including a binary beside the executable.
+pub fn test_resolve_override_beats_exe_dir() -> Unit {
+    let choice = resolve_bootstrap_path(Some("/opt/tungsten"), Some("/usr/local/bin/tungsten-bootstrap"), unset());
+    assert_eq_string(choice.path, "/opt/tungsten");
+    assert_eq_string(bootstrap_source_label(choice.source), "TUNGSTEN_BOOTSTRAP_BIN")
+}
+
+/// Every step has a label, and no two share one — a shared label would make the
+/// message name a step the reader cannot act on.
+pub fn test_every_source_has_a_distinct_label() -> Unit {
+    assert_eq_string(bootstrap_source_label(FromOverrideEnv), "TUNGSTEN_BOOTSTRAP_BIN");
+    assert_eq_string(bootstrap_source_label(FromExeDir), "beside this executable");
+    assert_eq_string(bootstrap_source_label(FromCargoTargetDir), "CARGO_TARGET_DIR");
+    assert_eq_string(bootstrap_source_label(FromRepoTarget), "repo-relative fallback")
+}
+
+// ---------------------------------------------------------------------------
+// The failure message (AC2, AC3)
+// ---------------------------------------------------------------------------
+
+fn container_choice() -> BootstrapChoice {
+    let choice: BootstrapChoice = { path: "./target/release/tungsten", source: FromRepoTarget };
+    choice
+}
+
+/// A process that ran and exited badly reads as the child's own verdict.
+pub fn test_message_for_a_nonzero_exit_names_the_code() -> Unit {
+    let msg = bootstrap_failure_message(container_choice(), ExecExited(2));
+    assert_eq_string(msg,
+        ": bootstrap at ./target/release/tungsten (chosen by repo-relative fallback) exited with code 2")
+}
+
+/// AC3: the two outcomes render differently, and the spawn failure says so in
+/// as many words rather than leaving the reader to infer it from a number.
+pub fn test_message_for_a_spawn_failure_says_could_not_spawn() -> Unit {
+    let msg = bootstrap_failure_message(container_choice(),
+        ExecSpawnFailed("Exec format error"));
+    assert_eq_bool(string_contains(msg, "could not spawn"), true);
+    assert_eq_bool(string_contains(msg, "Exec format error"), true)
+}
+
+/// Both renderings name the path and the step that chose it — the two things
+/// the old message withheld unless `-v` happened to be on.
+pub fn test_both_renderings_name_the_path_and_the_step() -> Unit {
+    let exited = bootstrap_failure_message(container_choice(), ExecExited(2));
+    let unspawned = bootstrap_failure_message(container_choice(),
+        ExecSpawnFailed("Exec format error"));
+    assert_eq_bool(string_contains(exited, "./target/release/tungsten"), true);
+    assert_eq_bool(string_contains(exited, "repo-relative fallback"), true);
+    assert_eq_bool(string_contains(unspawned, "./target/release/tungsten"), true);
+    assert_eq_bool(string_contains(unspawned, "repo-relative fallback"), true)
+}
+
+/// The spawn failure points at the one cause the exit status cannot show: a
+/// binary built for another platform, which in the devcontainer is what
+/// `./target` normally holds.
+pub fn test_spawn_failure_points_at_the_platform_trap() -> Unit {
+    let msg = bootstrap_failure_message(container_choice(),
+        ExecSpawnFailed("Exec format error"));
+    assert_eq_bool(string_contains(msg, "CARGO_TARGET_DIR"), true);
+    assert_eq_bool(string_contains(msg, "TUNGSTEN_BOOTSTRAP_BIN"), true)
+}
+
+/// AC2: the wrapped `-1` is never printed as an exit code, by either arm.
+///
+/// It is `u64::MAX`, and a reader who does not recognise it goes looking for a
+/// compiler bug. The `ExecExited` case here is the residual one — a child that
+/// spawned and was killed by a signal, which leaves no driver error behind.
+pub fn test_wrapped_minus_one_is_never_printed_as_a_code() -> Unit {
+    let signalled = bootstrap_failure_message(container_choice(), ExecExited(ffi_negative_one()));
+    assert_eq_bool(string_contains(signalled, "18446744073709551615"), false);
+    assert_eq_bool(string_contains(signalled, "reported no exit code"), true);
+    let unspawned = bootstrap_failure_message(container_choice(),
+        ExecSpawnFailed("No such file or directory"));
+    assert_eq_bool(string_contains(unspawned, "18446744073709551615"), false)
+}
+
+// ---------------------------------------------------------------------------
+// exec_succeeded
+// ---------------------------------------------------------------------------
+
+/// Only a clean exit is success. A process that never spawned is not one that
+/// exited 0, which is the confusion the old `Int` return made easy.
+pub fn test_exec_succeeded_only_on_a_clean_exit() -> Unit {
+    assert_eq_bool(exec_succeeded(ExecExited(0)), true);
+    assert_eq_bool(exec_succeeded(ExecExited(1)), false);
+    assert_eq_bool(exec_succeeded(ExecSpawnFailed("Exec format error")), false)
+}
+
+// ---------------------------------------------------------------------------
+// The wrapped `-1` sentinel and its predicate (3.9.26s AC1, AC2)
+// ---------------------------------------------------------------------------
+
+/// 3.9.26s AC2: the sentinel has one definition, and it is two's-complement
+/// `-1` widened to 64 bits. Pinned as a literal rather than derived, so that a
+/// change to the constant OR to the FFI's width is a red test rather than a
+/// message that quietly starts rendering a different number.
+pub fn test_ffi_negative_one_is_the_wrapped_minus_one() -> Unit {
+    assert_eq_string(nat_to_string(ffi_negative_one()), "18446744073709551615")
+}
+
+/// 3.9.26s AC2: the predicate answers for the sentinel and for nothing a child
+/// could plausibly exit with — including the number one below it, which is what
+/// an off-by-one in the constant would turn into a silent false negative.
+pub fn test_exec_code_is_absent_only_for_the_sentinel() -> Unit {
+    assert_eq_bool(exec_code_is_absent(ffi_negative_one()), true);
+    assert_eq_bool(exec_code_is_absent(0), false);
+    assert_eq_bool(exec_code_is_absent(1), false);
+    assert_eq_bool(exec_code_is_absent(255), false);
+    assert_eq_bool(exec_code_is_absent(18446744073709551614), false)
+}
+
+/// 3.9.26s AC1: `exit_code_phrase` asks the FFI's own predicate, so the arena's
+/// handle constant is no longer load-bearing in a function about exit codes.
+/// Drop the comparison and this goes red on the second assertion.
+pub fn test_exit_phrase_recognises_the_sentinel_by_name() -> Unit {
+    let msg = bootstrap_failure_message(container_choice(), ExecExited(ffi_negative_one()));
+    assert_eq_bool(string_contains(msg, "reported no exit code"), true);
+    assert_eq_bool(string_contains(msg, "exited with code"), false)
+}
+
+// ---------------------------------------------------------------------------
+// The test pipeline's failure message (3.9.26s AC3)
+// ---------------------------------------------------------------------------
+
+/// 3.9.26s AC3: when the bootstrap cannot be SPAWNED, the test pipeline says so
+/// and names the path it tried and the step that chose it. The old message —
+/// `": test compilation failed"` — carried none of the three.
+pub fn test_harness_message_names_the_path_and_the_spawn_failure() -> Unit {
+    let msg = harness_compile_failure_message(container_choice(),
+        ExecSpawnFailed("Exec format error"));
+    assert_eq_bool(string_contains(msg, "could not spawn"), true);
+    assert_eq_bool(string_contains(msg, "./target/release/tungsten"), true);
+    assert_eq_bool(string_contains(msg, "repo-relative fallback"), true);
+    assert_eq_bool(string_contains(msg, "Exec format error"), true)
+}
+
+/// 3.9.26s AC3: it still says WHICH stage failed — the one thing the compile
+/// pipeline's own wording cannot carry, and the reason this is a wrapper rather
+/// than a bare call to `bootstrap_failure_message`.
+pub fn test_harness_message_names_the_stage() -> Unit {
+    let exited = harness_compile_failure_message(container_choice(), ExecExited(2));
+    assert_eq_bool(string_contains(exited, "test harness compilation failed"), true);
+    assert_eq_bool(string_contains(exited, "exited with code 2"), true)
+}
+
+/// 3.9.26s AC3: the two outcomes render differently here too. One message for
+/// both was the defect, so asserting the spawn wording appears is only half of
+/// it — the exit rendering must NOT claim a spawn failure.
+pub fn test_harness_message_distinguishes_spawn_from_exit() -> Unit {
+    let exited = harness_compile_failure_message(container_choice(), ExecExited(2));
+    let unspawned = harness_compile_failure_message(container_choice(),
+        ExecSpawnFailed("No such file or directory"));
+    assert_eq_bool(string_contains(exited, "could not spawn"), false);
+    assert_eq_bool(string_contains(unspawned, "could not spawn"), true);
+    assert_eq_bool(string_contains(unspawned, "exited with code"), false)
+}
+
+/// 3.9.26s AC3: and the wrapped `-1` never reaches the reader through the test
+/// pipeline either — the same guarantee AC2 makes for the compile pipeline.
+pub fn test_harness_message_never_prints_the_wrapped_minus_one() -> Unit {
+    let signalled = harness_compile_failure_message(container_choice(),
+        ExecExited(ffi_negative_one()));
+    assert_eq_bool(string_contains(signalled, "18446744073709551615"), false);
+    assert_eq_bool(string_contains(signalled, "reported no exit code"), true)
+}
+
+// ---------------------------------------------------------------------------
+// Running the harness that was just built (5.9.26b AC1, AC2)
+// ---------------------------------------------------------------------------
+
+fn harness_binary() -> String {
+    "src/compiler/_tgtest_main"
+}
+
+/// 5.9.26b AC1: a harness that never starts names the artefact path and the
+/// operating system's own reason — the two things `PipelineErr(1)` withheld.
+pub fn test_harness_run_message_names_the_artifact_and_the_reason() -> Unit {
+    let msg = option_unwrap_or(
+        harness_run_message(harness_binary(), ExecSpawnFailed("Exec format error")), "");
+    assert_eq_bool(string_contains(msg, "src/compiler/_tgtest_main"), true);
+    assert_eq_bool(string_contains(msg, "Exec format error"), true);
+    assert_eq_bool(string_contains(msg, "could not run"), true)
+}
+
+/// 5.9.26b AC1/D2: the wording is the artefact's, not the bootstrap's. Routing
+/// this through `bootstrap_failure_message` would name a resolution step that
+/// did not happen — this binary was built by this run into a computed path.
+pub fn test_harness_run_failure_message_is_not_a_bootstrap_message() -> Unit {
+    let msg = harness_run_failure_message(harness_binary(), "Permission denied");
+    assert_eq_string(msg,
+        ": could not run the compiled test harness at src/compiler/_tgtest_main: Permission denied");
+    assert_eq_bool(string_contains(msg, "chosen by"), false)
+}
+
+/// 5.9.26b AC2: a harness that RAN and failed its assertions gets no driver
+/// message — it printed its own report, and a second verdict under it would be
+/// the less informative one. `None` here is the decision, so deleting the arm
+/// distinction turns this red.
+pub fn test_harness_run_message_is_absent_for_an_exit() -> Unit {
+    assert_eq_bool(is_none(harness_run_message(harness_binary(), ExecExited(1))), true);
+    assert_eq_bool(is_none(harness_run_message(harness_binary(), ExecExited(101))), true);
+    assert_eq_bool(is_none(harness_run_message(harness_binary(),
+        ExecExited(ffi_negative_one()))), true);
+    assert_eq_bool(is_some(harness_run_message(harness_binary(),
+        ExecSpawnFailed("No such file or directory"))), true)
+}

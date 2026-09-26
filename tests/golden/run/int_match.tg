@@ -1,0 +1,25 @@
+// Golden test (ADR 18.9.26e): integer match on the evaluator. Each digit is
+// one arm selection: classify(-1), classify(7), classify(3), classify(-9) take
+// the negative literal, the or-of-literals, the guarded arm and the catch-all;
+// small(2), small(9) take a Nat or-of-literals and its catch-all. 123467.
+fn classify(n: Int) -> Nat {
+    match n {
+        -1 => 1,
+        0 | 7 => 2,
+        x if x > 0 => 3,
+        _ => 4
+    }
+}
+
+fn small(n: Nat) -> Nat {
+    match n {
+        0 => 5,
+        1 | 2 => 6,
+        _ => 7
+    }
+}
+
+fn main() -> Nat {
+    classify(-1) * 100000 + classify(7) * 10000 + classify(3) * 1000
+        + classify(-9) * 100 + small(2) * 10 + small(9)
+}

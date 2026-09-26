@@ -1,0 +1,12 @@
+// ADR 14.8.26g P5: an ADT whose body fails reports the seeded fault and
+// NOTHING at its constructor sites. This fixture pre-recorded a residue of
+// 1 E0010 at the Tick(1) site — the type-body producer could not poison
+// constructor fields, so the dependent checked its argument against the
+// placeholder's unresolved field type. ADR 15.8.26d AC 2 took that residue
+// to 0: the poisoned stub now replaces the placeholder in the exports, and
+// the constructor boundary passes the poison through. A change in the
+// count, in either direction, fails this snapshot deliberately.
+mod events;
+mod emitter;
+
+fn main() -> Nat { 0 }

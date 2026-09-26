@@ -15,8 +15,13 @@ pub(crate) mod modules;
 pub(crate) mod output;
 pub(crate) mod per_module;
 pub(crate) mod pipeline;
+mod run_mode;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+// Tests: tests_comparator_units.rs
+#[path = "tests_comparator_units.rs"]
+mod tests_comparator_units;
 mod type_registry;
 
 use diagnostics::set_max_errors;
@@ -29,9 +34,10 @@ pub use modules::{
 /// Re-exported from [`output`] — the complete result of project elaboration.
 pub use output::{
     format_type, format_value, AdtTypes, ModuleCodegenUnit, PipelineOpts, ProjectOutput,
-    RecordTypes, TraceOptions, TypeAliases,
+    RecordTypes, TraceOptions, TypeAliases, ValueImportTargetsByModule,
 };
 pub use per_module::cache::levels::{sort_submodules_by_deps, use_first_segments};
+pub use per_module::inspect::{inspect_cache, CacheEntryKind, ModuleCacheRow};
 pub use type_registry::{register_type_name, register_type_pattern, TypePattern};
 
 // Re-export CoreDef for compile command
@@ -50,7 +56,11 @@ use tungsten_core::{Term, Type};
 #[derive(Debug)]
 pub enum PipelineResult {
     /// Successfully checked, with number of definitions.
-    Checked { num_defs: usize, has_sorry: bool },
+    Checked {
+        num_defs: usize,
+        /// Holes by class over the definitions this run elaborated (ADR 18.9.26g).
+        sorry: tungsten_core::terms::analysis::SorryCounts,
+    },
     /// Successfully evaluated to a value.
     Evaluated { value: Term, ty: Type },
     /// Test run completed.
@@ -59,7 +69,12 @@ pub enum PipelineResult {
         /// Per-module definition groups for scoped test discovery (ADR 12.5.26b).
         /// Each entry is (module_path, source_file, defs).
         module_defs: Vec<(Vec<String>, std::path::PathBuf, Vec<CoreDef>)>,
-        has_sorry: bool,
+        /// Type information for the evaluator's comparator-synthesis callback
+        /// when running `test_*` bodies: record fields plus the μ-cluster member
+        /// map a mutually recursive comparison needs (ADR 29.6.26f / T13;
+        /// ADR 1.8.26b D2).
+        comparator_types: crate::comparator::ComparatorTypes,
+        sorry: tungsten_core::terms::analysis::SorryCounts,
     },
     /// Compilation failed.
     Failed,
@@ -103,6 +118,11 @@ pub(super) fn prepare_project(
     verbose: bool,
     cache: Option<&Mutex<BuildCache>>,
 ) -> Result<PreparedProject, PipelineError> {
+    // Reset the comparator request registry so stale entries from a prior
+    // in-process invocation cannot leak (ADR 29.6.26f §T11.8). Shared by the
+    // run/test (`run_file_with_options`) and compile (`elaborate_project`) paths.
+    crate::comparator::requests::clear();
+
     // Parse the module tree (handles `mod foo;` declarations)
     // Use parallel pre-parsing when available (ADR 11.5.26b §P3)
     let mut visited = HashSet::new();
@@ -248,6 +268,10 @@ pub fn run_file_with_options(
         }
     };
 
+    // Comparators for `__compare`-emitted `compare_T` globals are already in
+    // `output.defs`: `run_module_tree` synthesizes them ahead of the termination
+    // gate (ADR 11.8.26b §2.3), which is what the evaluator's environment is
+    // built from. This function used to append them here, past the gate.
     let output = tree_output.elab;
 
     // Render any warnings (non-fatal)
@@ -269,109 +293,15 @@ pub fn run_file_with_options(
     pipeline::run_with_output_cached_defs(output, &prepared.source, path, opts, module_ctx)
 }
 
-/// Elaborate a multi-module project, returning the compiled definitions.
-///
-/// This is the entry point for the `compile` command. Unlike `run_file_with_options`,
-/// this returns the elaborated definitions instead of checking/evaluating them,
-/// so they can be passed to codegen.
-///
-/// Returns:
-/// - `Ok((defs, record_types, adt_types, source_map))` on success, where `defs` are the elaborated definitions,
-///   `record_types` maps record names to their fields for codegen, `adt_types` maps ADT names to their
-///   constructors for Type::App expansion, and `source_map` maps file paths to source code for error reporting
-/// - `Err(PipelineError)` on failure
-pub fn elaborate_project(
-    path: &Path,
+/// Build the final codegen units: per-module defs → units, with @-prefixed
+/// TyVars stripped at the elab→codegen boundary (ADR 10.5.26d P7), plus
+/// synthesized comparator units appended (ADR 29.6.26f §T11.8).
+fn finalize_codegen_units(
+    module_defs: Vec<(Vec<String>, PathBuf, Vec<CoreDef>)>,
     verbose: bool,
-    max_errors: usize,
-    trace: Option<&TraceOptions>,
-) -> Result<ProjectOutput, PipelineError> {
-    // Set max_errors for this run
-    set_max_errors(max_errors);
-
-    // No caching for compile mode — codegen needs full CoreDef bodies, which the
-    // signature-only elab cache (ADR 10.5.26n) intentionally omits. Cache is only
-    // useful for `check` mode where we verify types without emitting code.
-    // Exception: when TUNGSTEN_ELAB_CACHE_FULL=1 is set, the full-output cache
-    // (ADR 12.5.26a) provides CoreDef bodies, enabling cache hits in compile mode.
-    let full_output_cache = std::env::var("TUNGSTEN_ELAB_CACHE_FULL")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-    let cache: Option<Mutex<BuildCache>> = if full_output_cache {
-        let project_root = path.parent().unwrap_or(Path::new("."));
-        match BuildCache::new(project_root, verbose) {
-            Ok(c) => Some(Mutex::new(c)),
-            Err(e) => {
-                if verbose {
-                    eprintln!("[cache] warning: failed to initialize cache: {e}");
-                }
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    // Parse and prepare the project
-    let prepared = prepare_project(path, verbose, cache.as_ref())?;
-
-    // Elaborate per-module with two-phase approach (ADR 5.5.26c)
-    let trace_opts = trace.cloned().unwrap_or_default();
-    let build = pipeline::BuildCtx {
-        cache: cache.as_ref(),
-        module_info: prepared.module_info,
-        source_map: prepared.source_map,
-    };
-    let tree_output = match per_module::elaborate_module_tree(
-        &prepared.module_tree,
-        path,
-        verbose,
-        &build,
-        &trace_opts,
-    ) {
-        Ok(output) => output,
-        Err(elab_errors) => {
-            let filename = path.to_string_lossy();
-            render_diagnostics_with_source_map(
-                &prepared.source,
-                &filename,
-                &build.source_map,
-                &elab_errors,
-                &[],
-            );
-            return Err(PipelineError::ElabFailed("elaboration errors".to_string()));
-        }
-    };
-
-    let output = tree_output.elab;
-
-    // Render any warnings (non-fatal)
-    if !output.warnings.is_empty() {
-        let filename = path.to_string_lossy();
-        render_diagnostics_with_source_map(
-            &prepared.source,
-            &filename,
-            &build.source_map,
-            &[],
-            &output.warnings,
-        );
-    }
-
-    if verbose {
-        eprintln!("Elaborated {} definition(s)", output.defs.len());
-    }
-
-    // Build codegen units from per-module defs (ADR 6.5.26c §2.2)
-    let codegen_units = output::build_codegen_units(tree_output.module_defs);
-
-    // Strip @-prefixed TyVars at the elaboration→codegen boundary (ADR 10.5.26d P7).
-    // These are an elaboration-internal convention that must not leak downstream.
-    let defs: Vec<_> = output
-        .defs
-        .into_iter()
-        .map(|d| d.strip_at_prefixes())
-        .collect();
-    let codegen_units: Vec<_> = codegen_units
+    types: &crate::comparator::ComparatorTypes,
+) -> Vec<output::ModuleCodegenUnit> {
+    let mut units: Vec<_> = output::build_codegen_units(module_defs)
         .into_iter()
         .map(|mut unit| {
             unit.defs = unit
@@ -382,24 +312,71 @@ pub fn elaborate_project(
             unit
         })
         .collect();
-
-    Ok(ProjectOutput {
-        defs,
-        codegen_units,
-        record_types: output.record_types,
-        adt_types: output.adt_types,
-        type_aliases: output.type_aliases,
-        type_provenance: output.type_provenance,
-        source_map: build.source_map,
-        encoded_types: output.encoded_types,
-        mutual_recursion_groups: output.mutual_recursion_groups,
-        type_visibilities: output.type_visibilities,
-        record_field_visibilities: output.record_field_visibilities,
-    })
+    // Synthesized terms are already @-free, so they are appended after stripping.
+    let synth = synthesized_comparator_units(units.iter().flat_map(|u| &u.defs), verbose, types);
+    units.extend(synth);
+    units
 }
 
+/// Build synthetic codegen units for `__compare`-emitted `compare_T` globals that
+/// lack a definition (ADR 29.6.26f §T11.8) — the *concrete* `__compare` path, which
+/// references comparators directly as `Global("compare_T")`.
+///
+/// The *generic* `compare` path (`TyApp(Global("__cmp"), T)`) is resolved separately,
+/// at codegen time, by the comparator-synthesis intercept (P6′ step 2,
+/// `CodeGen::compile_comparator_intrinsic`) — not here, because those instances only
+/// become concrete after monomorphization.
+///
+/// Each synthesized comparator becomes its own unit (per-unit "exactly one def" convention).
+fn synthesized_comparator_units<'a>(
+    defs: impl IntoIterator<Item = &'a CoreDef>,
+    verbose: bool,
+    types: &crate::comparator::ComparatorTypes,
+) -> Vec<output::ModuleCodegenUnit> {
+    crate::comparator::discover::synth_missing_comparators(defs, types)
+        .into_iter()
+        .map(|def| {
+            if verbose {
+                eprintln!("Synthesized comparator `{}`", def.name);
+            }
+            output::ModuleCodegenUnit {
+                module_path: vec!["__comparator".to_string()],
+                source_file: std::path::PathBuf::from("<synthesized>"),
+                defs: vec![def],
+            }
+        })
+        .collect()
+}
+
+/// The compile path's cache handle: no caching by default — codegen needs
+/// full CoreDef bodies, which the signature-only elab cache (ADR 10.5.26n)
+/// intentionally omits. Exception: TUNGSTEN_ELAB_CACHE_FULL=1 enables the
+/// full-output cache (ADR 12.5.26a), which does carry bodies.
+fn full_output_cache_for_compile(path: &Path, verbose: bool) -> Option<Mutex<BuildCache>> {
+    let full_output_cache = std::env::var("TUNGSTEN_ELAB_CACHE_FULL")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !full_output_cache {
+        return None;
+    }
+    let project_root = path.parent().unwrap_or(Path::new("."));
+    match BuildCache::new(project_root, verbose) {
+        Ok(c) => Some(Mutex::new(c)),
+        Err(e) => {
+            if verbose {
+                eprintln!("[cache] warning: failed to initialize cache: {e}");
+            }
+            None
+        }
+    }
+}
+
+/// Multi-module project elaboration + the live-normalization inspector variant.
+mod project;
+pub use project::{elaborate_project, elaborate_project_with_inspector, ProjectNormalizer};
+
 /// Run the compilation pipeline on source code (single file, no module resolution).
-pub use pipeline::run_source;
+pub use pipeline::{check_verdict_line, run_source};
 
 /// Run the pipeline on a single expression (for eval command).
 pub use pipeline::eval_expr;

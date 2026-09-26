@@ -1,0 +1,15 @@
+[E0062] Error: cannot prove termination of `ind`
+   ╭─[tests/golden/error/termination_indirect.tg:4:1]
+   │
+ 4 │ ╭─▶ fn ind(l: Lst) -> Nat {
+   ┆ ┆   
+ 7 │ ├─▶ }
+   │ │       
+   │ ╰─────── 
+   │     
+   │     Help: call the definition directly so the recursion is visible, or mark it `#[partial]`
+   │     
+   │     Note: `ind` is mentioned outside call position, so the recursive call cannot be inspected
+───╯
+
+error: aborting due to 1 error

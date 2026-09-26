@@ -1,0 +1,31 @@
+// Regression fixture for ADR 6.8.26b §1.1 — a test whose assertion never
+// EXECUTES must be reported `ASSERTED NOTHING`, not `ok`.
+//
+// The original demonstration keyed on `module_map_lookup`, whose path
+// comparison bottomed out in `tg_string_char_at_internal`; that extern became
+// executable in the same ADR (D6, reversed on the census evidence), so the
+// demonstration no longer reproduces at that call site. What it demonstrated
+// is preserved here in the shape the outcome actually keys on: the assertion's
+// ARGUMENT goes Stuck, so the assertion is never reached, there are no
+// operands for ADR 1.8.26b's residual guard to inspect, and only the execution
+// COUNT can see it.
+//
+// The expected value is deliberately absurd. Before 6.8.26b this file reported
+// `ok`, exit 0 — a wrong answer asserted against nothing.
+//
+// `tg_never_executable_probe` is deliberately absent from EXECUTABLE_EXTERNS
+// and must stay absent. Registering it would make this fixture non-vacuous and
+// turn `make check-test-runner` red, which is the intended alarm rather than a
+// breakage.
+//
+// Expected: ASSERTED NOTHING, `1 asserted nothing` in the summary, exit 1.
+
+extern "C" fn tg_assert_eq_nat(left: Nat, right: Nat) -> Unit
+extern "C" fn tg_never_executable_probe(x: Nat) -> Nat
+
+fn assert_eq_nat(a: Nat, b: Nat) -> Unit { tg_assert_eq_nat(a, b) }
+fn stuck_value() -> Nat { tg_never_executable_probe(1) }
+
+pub fn test_assertion_argument_goes_stuck() -> Unit {
+    assert_eq_nat(stuck_value(), 4242)
+}

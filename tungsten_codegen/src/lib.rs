@@ -80,8 +80,12 @@ mod codegen;
 pub mod escape_analysis;
 mod types;
 
-pub use codegen::{CodeGen, CodeGenError, SymbolEntry};
-pub use types::{AdtDef, CodegenConstructor, TypeLowering};
+pub use codegen::musttail_report::{
+    self, Blocker, BlockerPosition, Decision, MusttailDecision, MusttailReport, ParamAbiKind,
+    ReasonCode,
+};
+pub use codegen::{CodeGen, CodeGenError, ComparatorSynth, SymbolEntry};
+pub use types::{AdtDef, CodegenConstructor, Route, TypeLowering};
 
 // Re-export inkwell for consumers
 pub use inkwell;

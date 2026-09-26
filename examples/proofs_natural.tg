@@ -51,6 +51,9 @@ pub fn mul(m: Peano, n: Peano) -> Peano {
 // Comparison and Equality
 // -----------------------------------------------------------------------------
 
+// Both arguments shrink at every call, so the termination checker asks which
+// one to measure (E0062 otherwise).
+#[decreasing(m)]
 pub fn nat_eq(m: Peano, n: Peano) -> Bool {
     match m {
         Zero => match n {
@@ -64,6 +67,9 @@ pub fn nat_eq(m: Peano, n: Peano) -> Bool {
     }
 }
 
+// Both arguments shrink at every call, so the termination checker asks which
+// one to measure (E0062 otherwise).
+#[decreasing(m)]
 pub fn leq(m: Peano, n: Peano) -> Bool {
     match m {
         Zero => true,

@@ -1,0 +1,70 @@
+// tests/selfcompiled_stored_generics/payload_list.tg
+// ADR 21.7.26k (D3): tungsten1-run regression battery, L1-matrix mirror.
+// This file: CONTROL cells — List stored in CONSTRUCTOR PAYLOAD position
+// (2-ctor sum), across all four argument categories.
+
+pub type List<T> = Nil | Cons(T, List<T>)
+
+pub fn touch_list<X>(xs: List<X>) -> List<X> { xs }
+
+type Rec = { count: Nat, label: String }
+
+type Choice =
+    | ChoiceNat(Nat)
+    | ChoiceStr(String)
+
+// Cell: payload × List × builtin (Nat)
+type HolderListNat =
+    | EmptyListNat
+    | HoldListNat(List<Nat>)
+
+fn project_hln(h: HolderListNat) -> List<Nat> {
+    match h {
+        EmptyListNat() => Nil,
+        HoldListNat(xs) => touch_list(xs)
+    }
+}
+
+// Cell: payload × List × record
+type HolderListRec =
+    | EmptyListRec
+    | HoldListRec(List<Rec>)
+
+fn project_hlr(h: HolderListRec) -> List<Rec> {
+    match h {
+        EmptyListRec() => Nil,
+        HoldListRec(xs) => touch_list(xs)
+    }
+}
+
+// Cell: payload × List × 2-ctor sum
+type HolderListChoice =
+    | EmptyListChoice
+    | HoldListChoice(List<Choice>)
+
+fn project_hlc(h: HolderListChoice) -> List<Choice> {
+    match h {
+        EmptyListChoice() => Nil,
+        HoldListChoice(xs) => touch_list(xs)
+    }
+}
+
+// Cell: payload × List × nested (List<List<Rec>>)
+type HolderListNested =
+    | EmptyListNested
+    | HoldListNested(List<List<Rec>>)
+
+fn project_hlx(h: HolderListNested) -> List<List<Rec>> {
+    match h {
+        EmptyListNested() => Nil,
+        HoldListNested(xs) => touch_list(xs)
+    }
+}
+
+pub fn main() -> Nat {
+    let _n = project_hln(HoldListNat(Cons(1, Nil)));
+    let _r = project_hlr(EmptyListRec);
+    let _c = project_hlc(HoldListChoice(Cons(ChoiceStr("x"), Nil)));
+    let _x = project_hlx(EmptyListNested);
+    0
+}

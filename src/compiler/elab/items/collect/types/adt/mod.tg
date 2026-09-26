@@ -32,6 +32,9 @@ use elab::items::collect::types::helpers::{
     update_type_encoding, update_type_encoding_with_record_fields,
     encode_fields_to_product
 };
+use elab::items::collect::positivity::{
+    positivity_register_adt, positivity_register_record, positivity_register_alias
+};
 use elab::items::collect::types::adt::sum::elaborate_sum_body;
 use elab::items::collect::types::adt::record::elaborate_record_body;
 
@@ -50,6 +53,11 @@ pub fn elaborate_adt_body(ctx: ElabContext, def: TypeDef) -> ElabContext {
     match def.body {
         TypeDefAdt(variant_list) => {
             let (ctx3, variants, is_recursive) = elaborate_sum_body(ctx2, variant_list, type_name);
+            // Hand the per-field handles to the shared strict-positivity engine
+            // HERE, where they are still separate: after `encode_adt` folds
+            // them into a product only the encoder's nesting convention could
+            // split them apart again (ADR 18.8.26b D1).
+            let _ = positivity_register_adt(type_name, def.type_params, variants);
             let encoding = encode_adt(type_name, variants, is_recursive);
             let reg: TypeRegInfo = { name: type_name, type_handle: encoding.type_handle, vis: def.vis, span: def.span };
             let ctx4 = update_type_encoding(ctx3, reg);
@@ -58,6 +66,9 @@ pub fn elaborate_adt_body(ctx: ElabContext, def: TypeDef) -> ElabContext {
         },
         TypeDefRecord(field_list) => {
             let (ctx3, body) = elaborate_record_body(ctx2, field_list, type_name);
+            // Records register their fields NAMED — the one rendering
+            // difference the positivity diagnostic needs (ADR 18.8.26b D1).
+            let _ = positivity_register_record(type_name, def.type_params, body.field_info);
             let encoding = encode_adt(type_name, body.variants, body.is_recursive);
             let reg: TypeRegInfo = { name: type_name, type_handle: encoding.type_handle, vis: def.vis, span: def.span };
             let ctx4 = update_type_encoding_with_record_fields(ctx3, reg, body.field_info);
@@ -128,6 +139,10 @@ pub fn elaborate_alias_body(ctx: ElabContext, def: TypeAliasDef) -> ElabContext 
             pop_type_params(ctx3, def.type_params)
         },
         ElabTypeOk(ty_handle, _) => {
+            // Aliases are not nodes in the checked graph; they are registered
+            // so the engine can inline them into the fields that reference
+            // them (ADR 18.8.26b D1).
+            let _ = positivity_register_alias(type_name, def.type_params, ty_handle);
             let reg: TypeRegInfo = { name: type_name, type_handle: ty_handle, vis: def.vis, span: def.span };
             let ctx3 = update_type_encoding(ctx2, reg);
             pop_type_params(ctx3, def.type_params)

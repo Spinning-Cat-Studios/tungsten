@@ -133,6 +133,7 @@ fn test_cached_module_signature_roundtrip() {
         delta_exports: ModuleExports::default(),
         warnings: Vec::new(),
         def_count: 0,
+        termination: Default::default(),
     };
 
     let bytes = bincode::serialize(&sig).unwrap();
@@ -261,6 +262,7 @@ fn test_into_elab_output_has_empty_defs_and_type_maps() {
         delta_exports: ModuleExports::default(),
         warnings: Vec::new(),
         def_count: 42,
+        termination: Default::default(),
     };
     let output = sig.into_elab_output();
     assert!(output.defs.is_empty());
@@ -271,7 +273,6 @@ fn test_into_elab_output_has_empty_defs_and_type_maps() {
 
 #[test]
 fn test_from_output_preserves_def_count() {
-    use std::collections::HashMap;
     let dummy_term = tungsten_core::SpannedTerm {
         term: tungsten_core::Term::Var("x".to_string()),
         span: None,
@@ -291,15 +292,7 @@ fn test_from_output_preserves_def_count() {
                 span: crate::span::Span::default(),
             },
         ],
-        warnings: Vec::new(),
-        record_types: HashMap::new(),
-        adt_types: HashMap::new(),
-        type_aliases: HashMap::new(),
-        type_provenance: crate::elaborate::TypeProvenance::default(),
-        encoded_types: HashMap::new(),
-        mutual_recursion_groups: HashMap::new(),
-        type_visibilities: HashMap::new(),
-        record_field_visibilities: HashMap::new(),
+        ..crate::elaborate::ElabOutput::default()
     };
     let exports = ModuleExports::default();
     let sig = CachedModuleSignature::from_output(&output, &exports, &exports);
@@ -341,6 +334,7 @@ fn empty_signature() -> CachedModuleSignature {
         delta_exports: ModuleExports::default(),
         warnings: Vec::new(),
         def_count: 0,
+        termination: Default::default(),
     }
 }
 

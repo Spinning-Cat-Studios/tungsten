@@ -8,7 +8,22 @@
     }
   },
   "mounts": [
-    "type=bind,source=${localWorkspaceFolder}/.devcontainer/logs,target=/var/log/tungsten"
+    "type=bind,source=${localWorkspaceFolder}/.devcontainer/logs,target=/var/log/tungsten",
+    // ADR 24.7.26b: isolate the container's Cargo build dir from the
+    // bind-mounted workspace target/ so host↔container builds can no longer
+    // clobber each other (Mach-O vs ELF, BSD-ar vs GNU-ar). A named volume —
+    // not /tmp — so the warm incremental cache survives a container recreate.
+    // Reset a poisoned cache with `make devcontainer-target-reset`.
+    "type=volume,source=tungsten-arm-target,target=/build/target"
+  ],
+  // CPU profiling prerequisite (ADR 17.7.26f): Docker's default seccomp
+  // profile blocks perf_event_open, and the VM kernel runs
+  // perf_event_paranoid=2. These grants let `perf record` / samply sample
+  // unprivileged inside the container (see `make devcontainer-profile-selfcompiled`).
+  "runArgs": [
+    "--cap-add=PERFMON",
+    "--security-opt",
+    "seccomp=unconfined"
   ],
   "postCreateCommand": ".devcontainer/post-create.sh",
   "customizations": {
@@ -28,6 +43,11 @@
   },
   "containerEnv": {
     "LLVM_SYS_180_PREFIX": "/usr/lib/llvm-18",
+    // ADR 24.7.26b: build into the isolated /build/target volume (mounted
+    // above), mirroring the x86_64 container's CARGO_TARGET_DIR=/tmp/target_x86.
+    // containerEnv propagates to every process (interactive shells, cargo,
+    // rust-analyzer, tungsten-dev), so no post-create export is needed.
+    "CARGO_TARGET_DIR": "/build/target",
     "RUST_MIN_STACK": "67108864"
   },
   "remoteUser": "vscode"

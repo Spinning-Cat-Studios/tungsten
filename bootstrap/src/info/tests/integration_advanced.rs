@@ -106,7 +106,7 @@ fn test_info_field_type_recursive_self_ref() {
     let cons = constructors.iter().find(|c| c.name == "Cons").unwrap();
     // Field 0 is the element type (T)
     assert_eq!(format!("{}", cons.fields[0]), "T");
-    // Field 1 is the self-reference (stored as bare TyVar during Phase 1c)
+    // Field 1 is the self-reference (stored as bare TyVar during Type-Body Collection)
     let tail_ty = format!("{}", cons.fields[1]);
     assert!(
         tail_ty.contains("List"),
@@ -185,7 +185,17 @@ fn test_info_constructors_exit_success() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.tg");
     fs::write(&path, "type AB = A(Nat) | B(Nat)\nfn main() -> Nat { 0 }").unwrap();
-    let result = cmd_info_constructors("AB", &path, false, 20);
+    let result = cmd_info_constructors("AB", &path, false, 20, false);
+    assert_eq!(result, ExitCode::SUCCESS);
+}
+
+/// `--raw` is additive: it changes what is printed, never the verdict.
+#[test]
+fn test_info_constructors_raw_exit_success() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("test.tg");
+    fs::write(&path, "type AB = A(Nat) | B(Nat)\nfn main() -> Nat { 0 }").unwrap();
+    let result = cmd_info_constructors("AB", &path, false, 20, true);
     assert_eq!(result, ExitCode::SUCCESS);
 }
 
@@ -194,7 +204,7 @@ fn test_info_constructors_not_found() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("test.tg");
     fs::write(&path, "type AB = A(Nat) | B(Nat)\nfn main() -> Nat { 0 }").unwrap();
-    let result = cmd_info_constructors("Missing", &path, false, 20);
+    let result = cmd_info_constructors("Missing", &path, false, 20, false);
     assert_eq!(result, ExitCode::FAILURE);
 }
 

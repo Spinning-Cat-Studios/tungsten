@@ -62,6 +62,8 @@ impl<'a> Elaborator<'a> {
                     self.elab_var_arm(&arm.body, ctor_ty, &var.name, result_ty)
                 }
             }
+            // Defensive: exotic pattern forms are rejected with E0021 before
+            // arm elaboration — uncoded by design (ADR 15.8.26b).
             _ => Err(ElabError::new(
                 arm.pattern.span(),
                 ElabErrorKind::Other(
@@ -141,6 +143,8 @@ impl<'a> Elaborator<'a> {
         adt: &AdtIdentity<'_>,
         result_ty: Option<&Type>, // Expected result type (for nullary constructor check mode)
     ) -> ElabResult<(String, Term)> {
+        // Defensive: classification routes only constructor arms here —
+        // uncoded by design (ADR 15.8.26b).
         let Pattern::Constructor(_, ref sub_patterns, _) = arm.pattern else {
             return Err(ElabError::new(
                 arm.pattern.span(),

@@ -1,0 +1,11 @@
+[E0021] Error: pattern `negative literal on a Nat scrutinee` is not supported
+   ╭─[tests/golden/error/int_match_negative_on_nat.tg:7:9]
+   │
+ 7 │         -1 => 1,
+   │         ─┬  
+   │          ╰── 
+   │ 
+   │ Help: a `Nat` is never negative; match on an `Int` instead — `match to_int(n) { … }`
+───╯
+
+error: aborting due to 1 error

@@ -3,8 +3,36 @@
 //! Provides `Term::for_each_subterm` which calls a visitor closure on every
 //! direct child `Term`. This eliminates the need for each analysis pass to
 //! duplicate the structural match over all `Term` variants.
+//!
+//! **Sibling walker:** `ffi::arena_stats::deep_term_bytes` re-enumerates the
+//! same child structure (it additionally needs embedded `Type`s, string
+//! capacities, and vec slabs, which this visitor does not expose). When a
+//! `Term` variant is added or its children change, update BOTH matches — the
+//! `walkers_agree_on_children_for_every_variant` test in `arena_stats.rs`
+//! cross-checks them and fails if the size walker misses a child this
+//! traversal visits.
 
 use super::Term;
+
+/// Visit two children in order — keeps every arm of the dispatcher one line.
+fn visit_two(f: &mut impl FnMut(&Term), a: &Term, b: &Term) {
+    f(a);
+    f(b);
+}
+
+/// Visit three children in order.
+fn visit_three(f: &mut impl FnMut(&Term), a: &Term, b: &Term, c: &Term) {
+    f(a);
+    f(b);
+    f(c);
+}
+
+/// Visit every child of a variadic node in order.
+fn visit_all<'t>(f: &mut impl FnMut(&Term), children: impl Iterator<Item = &'t Term>) {
+    for child in children {
+        f(child);
+    }
+}
 
 impl Term {
     /// Call `f` on every immediate sub-term of this node.
@@ -33,6 +61,7 @@ impl Term {
             | Term::Global(_)
             | Term::Zero
             | Term::NatLit(_)
+            | Term::IntLit(_)
             | Term::True
             | Term::False
             | Term::Unit
@@ -44,6 +73,9 @@ impl Term {
             | Term::Fst(t)
             | Term::Snd(t)
             | Term::StrLen(t)
+            | Term::IntNeg(t)
+            | Term::NatToInt(t)
+            | Term::IntToNat(t)
             | Term::BoolNot(t)
             | Term::RefNew(t)
             | Term::RefGet(t)
@@ -79,51 +111,120 @@ impl Term {
             | Term::NatLe(a, b)
             | Term::NatGt(a, b)
             | Term::NatGe(a, b)
+            | Term::IntBin(_, a, b)
             | Term::BoolAnd(a, b)
             | Term::BoolOr(a, b)
             | Term::RefSet(a, b)
-            | Term::Subst(_, _, a, b) => {
-                f(a);
-                f(b);
-            }
+            | Term::Subst(_, _, a, b) => visit_two(f, a, b),
 
             // Binary binding — value + body
-            Term::Let(_, _, val, body) => {
-                f(val);
-                f(body);
-            }
+            Term::Let(_, _, val, body) => visit_two(f, val, body),
 
             // Ternary
             Term::If(a, b, c)
             | Term::StrSubstring(a, b, c)
             | Term::NatRec(_, a, b, c)
-            | Term::NatInd(_, a, b, c) => {
-                f(a);
-                f(b);
-                f(c);
-            }
+            | Term::NatInd(_, a, b, c) => visit_three(f, a, b, c),
 
             // Case — scrutinee + two branches
-            Term::Case(scrut, _, left, _, right) => {
-                f(scrut);
-                f(left);
-                f(right);
-            }
+            Term::Case(scrut, _, left, _, right) => visit_three(f, scrut, left, right),
 
             // ADT match — scrutinee + arm bodies
             Term::AdtMatch(scrut, arms) => {
                 f(scrut);
-                for (_, _, body) in arms {
-                    f(body);
-                }
+                visit_all(f, arms.iter().map(|(_, _, body)| body.as_ref()));
             }
 
             // Variadic
-            Term::ExternCall(_, args) => {
-                for arg in args {
-                    f(arg);
-                }
+            Term::ExternCall(_, args) => visit_all(f, args.iter()),
+        }
+    }
+
+    /// Call `f` on every `Type` stored *directly* on this node.
+    ///
+    /// Like [`Term::for_each_subterm`] this does NOT recurse — drive recursion
+    /// by calling `for_each_subterm` alongside it. Together the two visit every
+    /// type embedded anywhere in a term tree, which is what lets the
+    /// strict-positivity walker treat `Eq`'s witness terms as type-bearing
+    /// (`types::positivity`, ADR 7.8.26e §2.1) rather than assuming terms are
+    /// type-free.
+    ///
+    /// **Sibling walkers:** [`Term::for_each_subterm`] and
+    /// `ffi::arena_stats::deep_term_bytes` enumerate the same variants; the
+    /// latter also sums these embedded types. All three matches are exhaustive
+    /// — when a `Term` variant gains a `Type`, add it here too.
+    pub fn for_each_embedded_type(&self, mut f: impl FnMut(&crate::types::Type)) {
+        match self {
+            // One embedded type
+            Term::Lambda(_, ty, _)
+            | Term::Fix(_, ty, _)
+            | Term::Let(_, ty, _, _)
+            | Term::Absurd(ty, _)
+            | Term::Inl(ty, _)
+            | Term::Inr(ty, _)
+            | Term::Refl(ty, _)
+            | Term::Fold(ty, _)
+            | Term::Unfold(ty, _)
+            | Term::NatRec(ty, _, _, _)
+            | Term::NatInd(ty, _, _, _)
+            | Term::TyApp(_, ty)
+            | Term::Annot(_, ty)
+            | Term::AdtConstruct(ty, _, _) => f(ty),
+
+            // Two embedded types
+            Term::Subst(base, motive, _, _) => {
+                f(base);
+                f(motive);
             }
+
+            // No embedded type
+            Term::Var(_)
+            | Term::Global(_)
+            | Term::App(_, _)
+            | Term::True
+            | Term::False
+            | Term::If(_, _, _)
+            | Term::Unit
+            | Term::Zero
+            | Term::Succ(_)
+            | Term::NatLit(_)
+            | Term::NatAdd(_, _)
+            | Term::NatSub(_, _)
+            | Term::NatMul(_, _)
+            | Term::NatDiv(_, _)
+            | Term::NatMod(_, _)
+            | Term::NatEq(_, _)
+            | Term::NatLt(_, _)
+            | Term::NatLe(_, _)
+            | Term::NatGt(_, _)
+            | Term::NatGe(_, _)
+            | Term::IntLit(_)
+            | Term::IntBin(_, _, _)
+            | Term::IntNeg(_)
+            | Term::NatToInt(_)
+            | Term::IntToNat(_)
+            | Term::BoolAnd(_, _)
+            | Term::BoolOr(_, _)
+            | Term::BoolNot(_)
+            | Term::StringLit(_)
+            | Term::StrConcat(_, _)
+            | Term::StrLen(_)
+            | Term::StrEq(_, _)
+            | Term::StrCharAt(_, _)
+            | Term::StrSubstring(_, _, _)
+            | Term::Pair(_, _)
+            | Term::Fst(_)
+            | Term::Snd(_)
+            | Term::Case(_, _, _, _, _)
+            | Term::TyAbs(_, _)
+            | Term::ExternCall(_, _)
+            | Term::RefNew(_)
+            | Term::RefGet(_)
+            | Term::RefSet(_, _)
+            | Term::Sorry
+            | Term::AdtMatch(_, _)
+            | Term::Return(_)
+            | Term::Spanned(_, _) => {}
         }
     }
 }

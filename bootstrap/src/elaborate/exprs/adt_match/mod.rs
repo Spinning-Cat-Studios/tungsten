@@ -38,6 +38,7 @@ mod tests;
 // Re-export the context types
 use context::AdtIdentity;
 pub(super) use context::ClassifiedArms;
+pub(in crate::elaborate) use unfolding::ResidualMuChain;
 
 use crate::ast;
 use crate::span::Span;
@@ -70,13 +71,30 @@ impl<'a> Elaborator<'a> {
         expected: Option<&Type>,
         span: Span,
     ) -> ElabResult<(Term, Type)> {
-        // Phase 1: Resolve ADT context from constructor patterns
-        let ctx = self.resolve_adt_match_context(arms, span)?;
+        // Phase 1: Resolve ADT context from constructor patterns. A poisoned
+        // ADT is transit (ADR 15.8.26d): arms elaborate with their variables
+        // at `Type::Error`, and the match is a hole. So is a poisoned
+        // scrutinee: `elab_match` transits one first, but a nested match
+        // over a poisoned payload (`nested_match.rs`) arrives here directly.
+        let Some(ctx) = self.resolve_adt_match_context(arms, span)? else {
+            return self.elab_poisoned_match(arms, expected);
+        };
+        if let Type::Error = scrutinee_ty {
+            return self.elab_poisoned_match(arms, expected);
+        }
         let num_ctors = ctx.constructors.len();
 
-        // Phase 2: Unfold the scrutinee type if recursive
+        // Phase 2: Unfold the scrutinee type if recursive.
+        // A μ chain that will not flatten (a nested inductive family) is
+        // rejected here rather than passed on: `build_adt_match` answers a
+        // non-`Sum` scrutinee with E9999 "expected sum type", and trading a
+        // hang for an internal-error code is not a conservative rejection
+        // (ADR 11.8.26c §2.2).
         let (inner_type, match_scrutinee) =
-            self.unfold_scrutinee_type(&scrutinee_ty, scrutinee_term, ctx.is_recursive);
+            match self.unfold_scrutinee_type(&scrutinee_ty, scrutinee_term, ctx.is_recursive) {
+                Ok(unfolded) => unfolded,
+                Err(unflattened) => return Err(self.nested_family_error(&unflattened, span)),
+            };
 
         // Phase 3: Classify arms by constructor vs catch-all
         let classified = self.classify_match_arms(arms, &ctx.constructors, span)?;

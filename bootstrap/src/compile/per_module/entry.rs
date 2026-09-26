@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use tungsten_bootstrap::driver;
 
+use super::emit_paths;
+use super::emit_paths::resolve_emit_llvm_dir;
 use super::run_per_module_codegen;
 use crate::compile::CompileFlags;
 
@@ -34,7 +36,12 @@ pub(in crate::compile) fn run_codegen_per_module(
         Err(code) => return code,
     };
 
-    let modules = match run_per_module_codegen(file, flags, project, main_ty, tmp_dir.path()) {
+    let codegen_output = super::CodegenOutput {
+        dir: tmp_dir.path(),
+        musttail_sink: None,
+        unit_cost_sink: None,
+    };
+    let modules = match run_per_module_codegen(file, flags, project, main_ty, codegen_output) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -60,7 +67,7 @@ pub(in crate::compile) fn run_codegen_per_module(
         for module in &modules {
             if module.name == crate::compile::mono::MONO_DEPOT_UNIT {
                 // Copy __mono.ll to output root
-                let dest = output_dir.join(format!("{}.ll", module.name));
+                let dest = emit_paths::mono_depot_dest(&output_dir, &module.name);
                 if let Err(e) = std::fs::copy(&module.output_path, &dest) {
                     eprintln!("error: could not copy '{}': {}", dest.display(), e);
                     return ExitCode::FAILURE;
@@ -79,21 +86,19 @@ pub(in crate::compile) fn run_codegen_per_module(
                 Some(u) => u,
                 None => continue,
             };
-            let relative_dir = match unit.source_file.strip_prefix(source_root) {
-                Ok(r) => r.with_extension(""),
-                Err(_) => {
-                    eprintln!(
-                        "error: source file '{}' is outside source root '{}'",
-                        unit.source_file.display(),
-                        source_root.display()
-                    );
+            // The destination rule is shared with `info codegen unit-paths`
+            // (ADR 28.7.26e retrospective) — do not re-derive it here.
+            let origin = emit_paths::UnitOrigin {
+                source_file: &unit.source_file,
+                def_name: &unit.defs[0].name,
+            };
+            let dest = match emit_paths::emit_llvm_dest(&origin, source_root, &output_dir) {
+                Ok(dest) => dest,
+                Err(e) => {
+                    eprintln!("error: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let def_name = crate::compile::def_llvm_name(&unit.defs[0].name);
-            let dest = output_dir
-                .join(&relative_dir)
-                .join(format!("{}.ll", def_name));
             if let Some(parent) = dest.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     eprintln!("error: could not create dir '{}': {}", parent.display(), e);
@@ -123,23 +128,6 @@ fn create_codegen_temp_dir() -> Result<tempfile::TempDir, std::process::ExitCode
         eprintln!("error: could not create temp dir: {e}");
         std::process::ExitCode::FAILURE
     })
-}
-
-/// Determine the output directory for `--emit-llvm` .ll files (ADR 7.5.26h §2.3).
-///
-/// - If `-o` points to a file (has extension), use its parent directory.
-/// - If `-o` points to a directory, use it directly.
-/// - If neither is specified, default to `target/ll/`.
-pub(in crate::compile) fn resolve_emit_llvm_dir(file: &PathBuf, output: Option<&Path>) -> PathBuf {
-    match output {
-        Some(p) if p.extension().is_some() => p.parent().unwrap_or(Path::new(".")).to_path_buf(),
-        Some(p) => p.to_path_buf(),
-        None => {
-            // Default to target/ll/ relative to the entry file's parent directory
-            let parent = file.parent().unwrap_or(Path::new("."));
-            parent.join("target").join("ll")
-        }
-    }
 }
 
 /// Initialize the Chrome trace subscriber (ADR 10.5.26j §2.2).

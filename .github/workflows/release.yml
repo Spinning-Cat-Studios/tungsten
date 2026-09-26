@@ -11,13 +11,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # macOS: ship self-compiled binary (tungsten1) with L3 verification
+  # macOS: ship self-compiled binary (tungsten1) with self-compiled verification
   build-macos:
     name: Build (macOS ARM64)
     runs-on: macos-15
     
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # tools/claude-hooks is a git submodule AND a workspace member
+          # (ADR 20.7.26b) — every cargo invocation needs it checked out.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo + scs-claude-hooks); the default
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -38,7 +48,7 @@ jobs:
           LIBRARY_PATH: /opt/homebrew/lib
         run: ./target/release/tungsten compile src/compiler/main.tg -o tungsten1 -v
       
-      - name: Verify — tungsten1 typechecks itself (L3)
+      - name: Verify — tungsten1 typechecks itself (self-compiled)
         run: ./tungsten1 check src/compiler/main.tg --max-errors=0
       
       - name: Package release archive
@@ -63,7 +73,17 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          # tools/claude-hooks is a git submodule AND a workspace member
+          # (ADR 20.7.26b) — every cargo invocation needs it checked out.
+          # scs-claude-hooks is private: SUBMODULES_PAT is a fine-grained PAT
+          # (Contents: Read on this repo + scs-claude-hooks); the default
+          # GITHUB_TOKEN cannot fetch a sibling private repo. Falls back to
+          # github.token so jobs degrade (submodule fetch fails loudly) rather
+          # than break at checkout while the secret is unset.
+          submodules: true
+          token: ${{ secrets.SUBMODULES_PAT || github.token }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.91.0
@@ -101,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-macos, build-linux]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -126,10 +146,35 @@ jobs:
           fi
           cp "$NOTES" release-notes.md
 
-      - name: Create GitHub Release
+      - name: Create draft GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           body_path: release-notes.md
+          # Immutable releases lock assets on publication. Keep the release a
+          # draft until every archive and the checksum file have uploaded.
+          draft: true
+          # A hyphenated tag (v2.0.0-alpha.0) is a pre-release, never *Latest*.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
           files: |
             artifacts/*.tar.gz
             artifacts/checksums.txt
+
+      - name: Publish complete GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release view "$tag" --json isDraft,assets |
+            jq -e --arg tag "$tag" '
+              .isDraft == true and
+              (([.assets[] | select(.size > 0) | .name] | sort) ==
+               (["checksums.txt", "tungsten-\($tag)-macos-arm64.tar.gz",
+                 "tungsten-\($tag)-linux-x86_64.tar.gz"] | sort))
+            '
+          if [[ "$tag" == *-* ]]; then
+            gh release edit "$tag" --draft=false --prerelease
+          else
+            gh release edit "$tag" --draft=false
+          fi

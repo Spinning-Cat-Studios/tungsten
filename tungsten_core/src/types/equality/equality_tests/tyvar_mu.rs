@@ -55,7 +55,7 @@ fn test_tyvar_not_equal_mu_name_mismatch() {
 #[test]
 fn test_tyvar_vs_mu_in_list_element() {
     // List<TyVar("TypeExpr")> should equal List<Mu("α_TypeExpr", ...)>
-    // This is the actual pattern causing L2 errors
+    // This is the actual pattern causing self-host errors
     let type_expr_as_tyvar = Type::TyVar("TypeExpr".into());
     let type_expr_as_mu = Type::mu(
         "α_TypeExpr",

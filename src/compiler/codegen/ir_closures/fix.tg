@@ -1,4 +1,7 @@
 // src/compiler/codegen/ir_closures/fix.tg
+// The driver never reaches this module: `run_compile` delegates codegen to the
+// bootstrap binary, so it is compiled and type-checked but executed only by
+// `test_codegen*.tg` / `test_cir_captures.tg`. See codegen/mod.tg (ADR 3.9.26a).
 // Recursive closure (fix) emission.
 //
 // The environment's first slot stores the self closure { ptr, ptr },
@@ -18,6 +21,7 @@ use codegen::ir_builder::{
 };
 use codegen::ir_types::{llvm_type};
 use codegen::ir_expr::{emit_expr};
+use codegen::ir_header::{emit_alloc_call, alloc_class_env};
 
 // ===========================================================================
 // FIX EMISSION
@@ -66,10 +70,11 @@ pub fn emit_fix(
     let st = emit_deferred(st, "}");
     let st = emit_deferred(st, "");
 
-    // Compute env size: 16 (self closure) + capture sizes
+    // Compute env size: 16 (self closure) + capture sizes, allocated through
+    // the runtime symbol as class Env (ADR 14.9.26b)
     let env_size = 16 + capture_env_size(captures);
     let (env_mem, st) = fresh_name(st);
-    let st = emit_line(st, "  " ++ env_mem ++ " = call ptr @malloc(i64 " ++ nat_to_string(env_size) ++ ")");
+    let st = emit_line(st, "  " ++ env_mem ++ " = " ++ emit_alloc_call(env_size, alloc_class_env()));
 
     // Build self closure pair
     let (c1, st) = fresh_name(st);

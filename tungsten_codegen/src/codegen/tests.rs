@@ -1,12 +1,28 @@
 use super::*;
 use inkwell::context::Context;
+use std::collections::HashMap;
 
 #[test]
 fn test_codegen_new() {
     let context = Context::create();
     let codegen = CodeGen::new(&context, "test");
     assert!(codegen.module.get_function("printf").is_some());
+    // ADR 14.9.26b: the runtime symbol and its prologue init.
+    assert!(codegen.module.get_function("__tungsten_alloc").is_some());
+    assert!(codegen
+        .module
+        .get_function("__tungsten_arena_init")
+        .is_some());
+    // ADR 18.9.26c: mode off calls `malloc` directly, gated on the flag.
     assert!(codegen.module.get_function("malloc").is_some());
+    let mode = codegen
+        .module
+        .get_global("__tungsten_arena_mode")
+        .expect("mode flag declared");
+    assert!(
+        mode.get_initializer().is_none(),
+        "external, not defined here"
+    );
 }
 
 #[test]
@@ -28,6 +44,40 @@ fn test_fresh_lambda_name() {
     let name2 = codegen.fresh_lambda_name();
     assert_ne!(name1, name2);
     assert!(name1.starts_with("__lambda_"));
+}
+
+/// ADR 12.7.26c P6/D7: inside a synthesized def, lambdas name deterministically
+/// as `<def-symbol>$l<index>` regardless of `named_lambdas`, and the index
+/// resets per def. Ordinary code (no synthesized binding) keeps `__lambda_N`.
+#[test]
+fn test_synthesized_lambda_naming_is_deterministic_and_scoped() {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context, "test");
+
+    // Ordinary code: __lambda_N even without named_lambdas.
+    assert!(codegen.fresh_lambda_name().starts_with("__lambda_"));
+
+    // Enter synthesized mode for `compare_List_Nat_spine`.
+    codegen.naming.synthesized_def_binding = Some("compare_List_Nat_spine".to_string());
+    codegen.naming.synthesized_lambda_index = 0;
+    assert_eq!(codegen.fresh_lambda_name(), "compare_List_Nat_spine$l0");
+    assert_eq!(codegen.fresh_lambda_name(), "compare_List_Nat_spine$l1");
+
+    // Leaving synthesized mode restores ordinary naming.
+    codegen.naming.synthesized_def_binding = None;
+    assert!(codegen.fresh_lambda_name().starts_with("__lambda_"));
+}
+
+/// The synthesized scheme must win even when `--named-lambdas` is on.
+#[test]
+fn test_synthesized_naming_overrides_named_lambdas() {
+    let context = Context::create();
+    let mut codegen = CodeGen::new(&context, "test");
+    codegen.set_named_lambdas(true);
+    codegen.naming.current_binding_name = Some("some_binding".to_string());
+    codegen.naming.synthesized_def_binding = Some("compare_Nat".to_string());
+    codegen.naming.synthesized_lambda_index = 0;
+    assert_eq!(codegen.fresh_lambda_name(), "compare_Nat$l0");
 }
 
 #[test]

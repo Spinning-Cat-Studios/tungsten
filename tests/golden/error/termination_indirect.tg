@@ -1,0 +1,9 @@
+// == recursion through a binding: no call-position occurrence to inspect
+type Lst = Nil | Cons(Nat, Lst)
+
+fn ind(l: Lst) -> Nat {
+    let g = ind;
+    g(l)
+}
+
+fn main() -> Nat { 0 }

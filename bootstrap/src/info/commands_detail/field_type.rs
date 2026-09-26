@@ -145,7 +145,7 @@ fn lookup_three_part_field(
     println!("  stored:   {field_ty}");
 
     if is_self_ref {
-        println!("  ↳ bare self-reference (type args discarded during Phase 1c)");
+        println!("  ↳ bare self-reference (type args discarded during Type-Body Collection)");
         if let Some(encoded) = project.encoded_types.get(adt_name) {
             let display = format_semantic_type(encoded, &project.type_provenance)
                 .unwrap_or_else(|| format!("{encoded}"));

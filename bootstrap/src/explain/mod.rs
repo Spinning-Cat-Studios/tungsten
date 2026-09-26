@@ -1,15 +1,17 @@
 //! `tungsten explain` — pedagogical CLI namespace for understanding errors and types.
 //!
 //! Unlike `tungsten info` (which shows *what* exists), `explain` answers *why* and *how*:
-//! - `explain error <kind>` — detailed error explanations with examples
+//! - `explain error <code|kind>` — detailed error explanations with examples
 //! - `explain type <string>` — step-by-step structural type decoding
 //!
 //! All explain commands are fully static — no file I/O or elaboration required.
 //! See ADR 14.4.26a for design rationale.
 
 mod error_catalogue;
+mod error_categories;
 mod explanations;
-pub(crate) mod l2_error_catalogue;
+mod keyword_catalogue;
+pub(crate) mod self_hosted_error_catalogue;
 mod type_explainer;
 mod type_parser;
 
@@ -22,26 +24,38 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum ExplainCommands {
-    /// Explain an elaboration error kind
+    /// Explain an elaboration error, by code or by kind name
     ///
-    /// With no argument, lists all error kinds grouped by category.
-    /// With an error kind name, prints a detailed explanation with examples.
-    /// Use --l2 for self-hosted compiler (L2) error codes.
+    /// With no argument, lists every user-facing code, name and summary,
+    /// grouped by category. With an argument, prints a detailed explanation
+    /// with examples. Accepts the CODE the compiler printed (`E0010`) or the
+    /// name (`TypeMismatch`), case-insensitively — the code is the identifier
+    /// that appears in diagnostic output, so it is the one to reach for.
+    ///
+    /// An internal-invariant code (E9998) resolves by code or by name but is
+    /// deliberately absent from the listing: it means the compiler broke its
+    /// own invariant, so no program edit can cause or fix one (ADR 15.8.26b).
+    ///
+    /// Use --self-hosted for the self-hosted compiler's error codes, which
+    /// are numbered differently (bootstrap `TypeMismatch` = E0010 vs
+    /// self-host `ErrTypeMismatch` = E0001).
     ///
     /// Examples:
     ///   tungsten explain error
+    ///   tungsten explain error E0010
     ///   tungsten explain error `TypeMismatch`
-    ///   tungsten explain error `UndefinedVariable`
-    ///   tungsten explain error --l2
-    ///   tungsten explain error --l2 E0001
-    ///   tungsten explain error --l2 `ErrTypeMismatch`
+    ///   tungsten explain error e0061
+    ///   tungsten explain error --self-hosted
+    ///   tungsten explain error --self-hosted E0001
+    ///   tungsten explain error --self-hosted `ErrTypeMismatch`
     Error {
-        /// Error kind name (e.g., "`TypeMismatch`"). Omit to list all.
+        /// Error code (e.g., `E0010`) or kind name (e.g., "`TypeMismatch`"),
+        /// case-insensitive. Omit to list every user-facing code.
         kind: Option<String>,
 
-        /// Show L2 (self-hosted compiler) error codes instead of L1
+        /// Show self-hosted-compiler error codes instead of bootstrap codes
         #[arg(long)]
-        l2: bool,
+        self_hosted: bool,
     },
 
     /// Decode a structural Core IR type step by step
@@ -84,6 +98,29 @@ pub enum ExplainCommands {
     /// Examples:
     ///   tungsten explain mutual-recursion
     MutualRecursion,
+
+    /// List the reserved words, or ask whether one name is available
+    ///
+    /// An identifier equal to a reserved word fails to PARSE, and the error
+    /// (`InvalidPattern`, or `expected item`) is reported at the token AFTER
+    /// the offending word — so `fn f(sym: T)` underlines `T`. If a parse error
+    /// points at something that looks correct, check the token before it here.
+    ///
+    /// The proof keywords are the trap: `by`, `have`, `show`, `sym`, `cong`,
+    /// `trans`, `subst` and `refl` are ordinary English words that read as
+    /// perfectly good parameter names (ADR 7.8.26b retrospective).
+    ///
+    /// The set is generated from the lexer's own keyword table, so it cannot
+    /// drift from what the compiler enforces.
+    ///
+    /// Examples:
+    ///   tungsten explain keywords
+    ///   tungsten explain keywords sym
+    ///   tungsten explain keywords `my_variable`
+    Keywords {
+        /// A name to check. Omit to list every reserved word, grouped.
+        word: Option<String>,
+    },
 }
 
 /// Dispatch an explain subcommand.
@@ -91,25 +128,25 @@ pub fn cmd_explain(cmd: ExplainCommands) -> ExitCode {
     match cmd {
         ExplainCommands::Error {
             kind: None,
-            l2: true,
+            self_hosted: true,
         } => {
-            l2_error_catalogue::print_l2_error_list();
+            print!("{}", self_hosted_error_catalogue::self_hosted_error_list());
             ExitCode::SUCCESS
         }
         ExplainCommands::Error {
             kind: Some(name),
-            l2: true,
-        } => l2_error_catalogue::print_l2_error_explanation(&name),
+            self_hosted: true,
+        } => self_hosted_error_catalogue::print_self_hosted_error_explanation(&name),
         ExplainCommands::Error {
             kind: None,
-            l2: false,
+            self_hosted: false,
         } => {
-            error_catalogue::print_error_list();
+            print!("{}", error_catalogue::render_error_list());
             ExitCode::SUCCESS
         }
         ExplainCommands::Error {
             kind: Some(name),
-            l2: false,
+            self_hosted: false,
         } => error_catalogue::print_error_explanation(&name),
         ExplainCommands::Type { type_string } => explain_type_string(&type_string),
         ExplainCommands::RecursionTypes => {
@@ -122,6 +159,10 @@ pub fn cmd_explain(cmd: ExplainCommands) -> ExitCode {
         }
         ExplainCommands::MutualRecursion => {
             print_mutual_recursion_explanation();
+            ExitCode::SUCCESS
+        }
+        ExplainCommands::Keywords { word } => {
+            print!("{}", keyword_catalogue::render(word.as_deref()));
             ExitCode::SUCCESS
         }
     }

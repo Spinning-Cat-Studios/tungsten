@@ -60,6 +60,13 @@ pub fn parsed_module_source_file(m: ParsedModule) -> SourceFile {
 }
 
 /// Get the parse errors of a parsed module.
+/// This module's OWN parse errors — **one node, not the tree**.
+///
+/// Each `ParsedModule` records only its own; submodules carry theirs. Reading
+/// this on the root and stopping is what made every parse error in an imported
+/// file invisible, so `check` printed `✓ all OK` over source it had failed to
+/// parse (ADR 12.8.26b §7.3). For a whole-tree verdict use
+/// `driver::pipeline::errors::render_module_tree_errors`.
 pub fn parsed_module_parse_errors(m: ParsedModule) -> ParseErrors {
     m.parse_errors
 }

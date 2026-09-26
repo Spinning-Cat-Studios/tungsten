@@ -1,0 +1,22 @@
+// Regression test for ADR 21.7.26e wall 1 (cross-module axis):
+// a generic instantiation stored in a record field must normalize equal to a
+// fresh spelling of the same type, with the generic ADT (Tree, the k=2
+// StrMap shape) defined in another module. Before the fix, every
+// projection/construction in store.tg failed with
+// `E0010: expected 'Tree<Bucket>', found 'Store'` /
+// `E0010: expected 'Tree<Bucket>', found 'Tree<Bucket>'`.
+
+pub mod tree;
+pub mod store;
+
+use tree::{Tree, TreeLeaf, TreeNode};
+use store::{Store, project_stored, pass_stored_through_generic};
+
+fn main() -> Nat {
+    let start: Store = { stored: TreeLeaf };
+    let round_tripped = pass_stored_through_generic(start);
+    match project_stored(round_tripped) {
+        TreeLeaf() => 0,
+        TreeNode(_, _, _, _, height) => height
+    }
+}

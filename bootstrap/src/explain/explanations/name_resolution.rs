@@ -18,6 +18,7 @@ fn binding_errors(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "UndefinedVariable" => ErrorExplanation {
             name: "UndefinedVariable",
+            code: "E0001",
             category: "Name Resolution",
             summary: "cannot find value in scope",
             detail: "\
@@ -42,6 +43,7 @@ fn main() -> Nat {\n\
 
         "UndefinedType" => ErrorExplanation {
             name: "UndefinedType",
+            code: "E0002",
             category: "Name Resolution",
             summary: "cannot find type in scope",
             detail: "\
@@ -61,6 +63,7 @@ fn main() -> Foo {   // error: cannot find type `Foo` in this scope\n\
 
         "UndefinedConstructor" => ErrorExplanation {
             name: "UndefinedConstructor",
+            code: "E0003",
             category: "Name Resolution",
             summary: "cannot find constructor in scope",
             detail: "\
@@ -82,6 +85,7 @@ fn main() -> Color {\n\
 
         "DuplicateDefinition" => ErrorExplanation {
             name: "DuplicateDefinition",
+            code: "E0004",
             category: "Name Resolution",
             summary: "name defined multiple times",
             detail: "\
@@ -107,6 +111,7 @@ fn module_errors(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "ModuleNotFound" => ErrorExplanation {
             name: "ModuleNotFound",
+            code: "E0005",
             category: "Name Resolution",
             summary: "cannot find referenced module",
             detail: "\
@@ -124,6 +129,7 @@ mod utils;    // error: cannot find module `utils`\n\
 
         "ItemNotFoundInModule" => ErrorExplanation {
             name: "ItemNotFoundInModule",
+            code: "E0006",
             category: "Name Resolution",
             summary: "item not found in module",
             detail: "\
@@ -141,6 +147,7 @@ use math::multiply;    // error: cannot find `multiply` in module `math`\n\
 
         "DuplicateImport" => ErrorExplanation {
             name: "DuplicateImport",
+            code: "E0007",
             category: "Name Resolution",
             summary: "same name imported twice",
             detail: "\
@@ -159,6 +166,7 @@ use utils::add;    // error: `add` is imported from both `math` and `utils`",
 
         "GlobConflict" => ErrorExplanation {
             name: "GlobConflict",
+            code: "E0018",
             category: "Name Resolution",
             summary: "glob imports conflict on a name",
             detail: "\
@@ -181,6 +189,7 @@ use utils::concat;",
 
         "UnresolvedImport" => ErrorExplanation {
             name: "UnresolvedImport",
+            code: "E0008",
             category: "Name Resolution",
             summary: "cannot resolve import path",
             detail: "\
@@ -205,6 +214,7 @@ fn visibility_errors(name: &str) -> Option<ErrorExplanation> {
     let exp = match name {
         "PrivateModule" => ErrorExplanation {
             name: "PrivateModule",
+            code: "E0009",
             category: "Name Resolution",
             summary: "module is private",
             detail: "\
@@ -224,6 +234,7 @@ use lib::internal::helper;    // error: module `internal` is private",
 
         "PrivateItem" => ErrorExplanation {
             name: "PrivateItem",
+            code: "E0016",
             category: "Name Resolution",
             summary: "item is private",
             detail: "\
@@ -244,6 +255,7 @@ use math::internal_add;    // error: `internal_add` is private",
 
         "PublicItemLeak" => ErrorExplanation {
             name: "PublicItemLeak",
+            code: "E0017",
             category: "Name Resolution",
             summary: "public item exposes private type",
             detail: "\
